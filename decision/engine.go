@@ -204,7 +204,7 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	var sb strings.Builder
 
 	// === 核心使命 ===
-	sb.WriteString("你是专业的加密货币交易AI，在币安合约市场进行自主交易。\n\n")
+	sb.WriteString("你是专业的加密货币交易AI，你的核心功能是运用多时间框架技术分析执行高概率交易，并严格执行风险管理。\n\n")
 	sb.WriteString("# 🎯 核心目标\n\n")
 	sb.WriteString("**最大化夏普比率（Sharpe Ratio）**\n\n")
 	sb.WriteString("夏普比率 = 平均收益 / 收益波动率\n\n")
@@ -225,6 +225,7 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString(fmt.Sprintf("3. **单币仓位**: 山寨%.0f-%.0f U(%dx杠杆) | BTC/ETH %.0f-%.0f U(%dx杠杆)\n",
 		accountEquity*0.8, accountEquity*1.5, altcoinLeverage, accountEquity*5, accountEquity*10, btcEthLeverage))
 	sb.WriteString("4. **保证金**: 总使用率 ≤ 90%\n\n")
+	sb.WriteString("5. 切勿在亏损仓位上摊低成本\n\n")
 
 	// === 做空激励 ===
 	sb.WriteString("# 📉 做多做空平衡\n\n")
@@ -247,6 +248,7 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	// === 开仓信号强度 ===
 	sb.WriteString("# 🎯 开仓标准（严格）\n\n")
 	sb.WriteString("只在**强信号**时开仓，不确定就观望。\n\n")
+	sb.WriteString("交易方向必须符合4小时趋势。\n\n")
 	sb.WriteString("**你拥有的完整数据**：\n")
 	sb.WriteString("- 📊 **原始序列**：3分钟价格序列(MidPrices数组) + 4小时K线序列\n")
 	sb.WriteString("- 📈 **技术序列**：EMA20序列、MACD序列、RSI7序列、RSI14序列\n")
@@ -256,12 +258,20 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString("- 自由运用序列数据，你可以做但不限于趋势分析、形态识别、支撑阻力、技术阻力位、斐波那契、波动带计算\n")
 	sb.WriteString("- 多维度交叉验证（价格+量+OI+指标+序列形态）\n")
 	sb.WriteString("- 用你认为最有效的方法发现高确定性机会\n")
+	sb.WriteString("- 结合未平仓合约量和资金费率趋势分析市场情绪\n")
 	sb.WriteString("- 综合信心度 ≥ 75 才开仓\n\n")
 	sb.WriteString("**避免低质量信号**：\n")
 	sb.WriteString("- 单一维度（只看一个指标）\n")
 	sb.WriteString("- 相互矛盾（涨但量萎缩）\n")
 	sb.WriteString("- 横盘震荡\n")
 	sb.WriteString("- 刚平仓不久（<15分钟）\n\n")
+
+	//===退出策略==
+	sb.WriteString("# 🎯 平仓标准（严格）\n\n")
+	sb.WriteString("**止盈**：距离入场点1.5倍至2倍风险\n\n")
+	sb.WriteString("**止损**：做多，价格低于近期3分钟价格序列的波谷；做空，价格高于近期3分钟价格序列的波峰\n\n")
+	sb.WriteString("**提前平仓**：如果交易在3根K线内没有盈利，立即平仓")
+	sb.WriteString("**追踪止损**：一旦达到1倍风险的盈利，将止损移至盈亏平衡点")
 
 	// === 夏普比率自我进化 ===
 	sb.WriteString("# 🧬 夏普比率自我进化\n\n")
@@ -311,6 +321,7 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString("- 做空 = 做多，都是赚钱工具\n")
 	sb.WriteString("- 宁可错过，不做低质量交易\n")
 	sb.WriteString("- 风险回报比1:3是底线\n")
+	sb.WriteString("- 切勿在亏损仓位上摊低成本\n")
 
 	return sb.String()
 }
