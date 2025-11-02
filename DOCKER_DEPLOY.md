@@ -84,11 +84,13 @@ nano config.json  # 或使用其他编辑器
 ### 第 2 步：一键启动
 
 ```bash
-# 构建并启动所有服务（首次运行）
+# 构建并启动所有服务（首次运行）（docker compose或者sudo docker-compose）
 docker compose up -d --build
+
 
 # 后续启动（不重新构建）
 docker compose up -d
+
 ```
 
 **启动过程说明：**
@@ -104,16 +106,16 @@ docker compose up -d
 
 ## 📊 服务管理
 
-### 查看运行状态
+### 查看运行状态（docker compose或者sudo docker-compose）
 ```bash
 # 查看所有容器状态
 docker compose ps
-
+（或者sudo docker-compose ps）
 # 查看服务健康状态
 docker compose ps --format json | jq
 ```
 
-### 查看日志
+### 查看日志（docker compose或者sudo docker-compose ）
 ```bash
 # 查看所有服务日志
 docker compose logs -f
@@ -128,7 +130,7 @@ docker compose logs -f frontend
 docker compose logs --tail=100
 ```
 
-### 停止服务
+### 停止服务（docker compose或者sudo docker-compose ）
 ```bash
 # 停止所有服务（保留数据）
 docker compose stop
@@ -140,7 +142,7 @@ docker compose down
 docker compose down -v
 ```
 
-### 重启服务
+### 重启服务（docker compose或者sudo docker-compose ）
 ```bash
 # 重启所有服务
 docker compose restart
@@ -238,7 +240,7 @@ tar -xzf backup_20241029.tar.gz
 
 ## 🐛 故障排查
 
-### 容器无法启动
+### 容器无法启动（docker compose或者sudo docker-compose）
 
 ```bash
 # 查看详细错误信息
@@ -273,7 +275,7 @@ ls -la config.json
 cp config.json.example config.json
 ```
 
-### 健康检查失败
+### 健康检查失败（docker compose或者sudo docker-compose）
 
 ```bash
 # 检查健康状态
@@ -295,7 +297,7 @@ docker compose exec frontend ping backend
 docker compose exec frontend wget -O- http://backend:8080/health
 ```
 
-### 清理 Docker 资源
+### 清理 Docker 资源（docker compose或者sudo docker-compose）
 
 ```bash
 # 清理未使用的镜像
@@ -335,7 +337,7 @@ docker system prune -a --volumes
          - "127.0.0.1:8080:8080"
    ```
 
-4. **定期更新镜像**
+4. **定期更新镜像**（docker compose或者sudo docker-compose）
    ```bash
    docker compose pull
    docker compose up -d
