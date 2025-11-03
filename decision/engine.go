@@ -220,11 +220,17 @@ func buildSystemPrompt(availableBalance float64, btcEthLeverage, altcoinLeverage
 	sb.WriteString("**量化标准**: 优秀交易员每天2-4笔，每小时0.1-0.2笔。如果你每小时>2笔 = 过度交易。\n\n")
 
 	// === 硬约束（风险控制）===
+	maxPositionForAltcoin := availableBalance * float64(altcoinLeverage) * 0.9
+    maxPositionForBTCETH := availableBalance * float64(btcEthLeverage) * 0.9
+	
 	sb.WriteString("# ⚖️ 硬约束（风险控制）\n\n")
 	sb.WriteString("1. **风险回报比**: 必须 ≥ 1:3（冒1%风险，赚3%+收益）\n")
 	sb.WriteString("2. **最多持仓**: 3个币种（质量>数量，避免过度集中）\n")
-	sb.WriteString(fmt.Sprintf("3. **单币仓位**: 山寨%.0f-%.0f U(%dx杠杆) | BTC/ETH %.0f-%.0f U(%dx杠杆)\n",
-		availableBalance*0.8, availableBalance *1.5, altcoinLeverage, availableBalance*5, availableBalance*10, btcEthLeverage))
+	sb.WriteString(fmt.Sprintf("3. 仓位计算（基于可用余额）：\n"))
+    sb.WriteString(fmt.Sprintf(" - 当前可用余额: %.2f USDT\n", availableBalance))
+    sb.WriteString(fmt.Sprintf(" - 山寨币最大仓位: %.2f USD\n", maxPositionForAltcoin))
+    sb.WriteString(fmt.Sprintf(" - BTC/ETH最大仓位: %.2f USD\n", maxPositionForBTCETH))
+    sb.WriteString(" - 公式: position_size = 可用余额 × 杠杆 × 0.9\n")
 	sb.WriteString("4. **保证金**: 总使用率 ≤ 90%\n")
 	sb.WriteString("5. **流动性要求**: 持仓价值(OI) < 15M USD的币种禁止新开仓（避免滑点和无法平仓）\n")
 	sb.WriteString("6. 切勿在亏损仓位上摊低成本\n\n")
