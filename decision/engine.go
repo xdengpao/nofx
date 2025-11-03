@@ -97,7 +97,7 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 	}
 
 	// 2. 构建 System Prompt（固定规则）和 User Prompt（动态数据）
-	systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+	systemPrompt := buildSystemPrompt(ctx.Account.AvailableBalance, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
 	userPrompt := buildUserPrompt(ctx)
 
 	// 3. 调用AI API（使用 system + user prompt）
@@ -200,7 +200,7 @@ func calculateMaxCandidates(ctx *Context) int {
 }
 
 // buildSystemPrompt 构建 System Prompt（固定规则，可缓存）
-func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage int) string {
+func buildSystemPrompt(availableBalance float64, btcEthLeverage, altcoinLeverage int) string {
 	var sb strings.Builder
 
 	// === 核心使命 ===
@@ -224,7 +224,7 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString("1. **风险回报比**: 必须 ≥ 1:3（冒1%风险，赚3%+收益）\n")
 	sb.WriteString("2. **最多持仓**: 3个币种（质量>数量，避免过度集中）\n")
 	sb.WriteString(fmt.Sprintf("3. **单币仓位**: 山寨%.0f-%.0f U(%dx杠杆) | BTC/ETH %.0f-%.0f U(%dx杠杆)\n",
-		accountEquity*0.8, accountEquity*1.5, altcoinLeverage, accountEquity*5, accountEquity*10, btcEthLeverage))
+		availableBalance*0.8, availableBalance *1.5, altcoinLeverage, availableBalance*5, availableBalance*10, btcEthLeverage))
 	sb.WriteString("4. **保证金**: 总使用率 ≤ 90%\n")
 	sb.WriteString("5. **流动性要求**: 持仓价值(OI) < 15M USD的币种禁止新开仓（避免滑点和无法平仓）\n")
 	sb.WriteString("6. 切勿在亏损仓位上摊低成本\n\n")
