@@ -330,8 +330,8 @@ func buildSystemPrompt(availableBalance float64, btcEthLeverage, altcoinLeverage
 	sb.WriteString("  - 低波动币种（ATR小）：可适度增加仓位\n")
 	sb.WriteString("  - 目标：所有持仓的潜在损失（止损距离）总和 ≤ 账户净值的5%\n\n")
 	sb.WriteString("**信心度与仓位关系**：\n")
-	sb.WriteString("  - 信心度≥90：可使用上限仓位（山寨1.5倍账户净值，BTC/ETH 10倍账户净值）\n")
-	sb.WriteString("  - 信心度75-89：使用中等仓位（山寨1.0倍账户净值，BTC/ETH 5倍账户净值）\n")
+	sb.WriteString("  - 信心度≥90：可使用上限仓位（山寨1.5倍账户可用余额，BTC/ETH 10倍账户可用余额）\n")
+	sb.WriteString("  - 信心度75-89：使用中等仓位（山寨1.0倍账户可用余额，BTC/ETH 5倍账户可用余额）\n")
 	sb.WriteString("  - 信心度<75：不开仓（等待更好的机会）\n\n")
 
 	// === 开仓信号强度与分析方法 ===
