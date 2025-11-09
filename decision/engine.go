@@ -778,12 +778,15 @@ func findMatchingBracket(s string, start int) int {
 func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoinLeverage int) error {
 	// 验证action
 	validActions := map[string]bool{
-		"open_long":   true,
-		"open_short":  true,
-		"close_long":  true,
-		"close_short": true,
-		"hold":        true,
-		"wait":        true,
+		"open_long":          true,
+		"open_short":         true,
+		"close_long":         true,
+		"close_short":        true,
+		"update_stop_loss":   true,
+		"update_take_profit": true,
+		"partial_close":      true,
+		"hold":               true,
+		"wait":               true,
 	}
 
 	if !validActions[d.Action] {
@@ -869,6 +872,26 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		if riskRewardRatio < 3.0 {
 			return fmt.Errorf("风险回报比过低(%.2f:1)，必须≥3.0:1 [风险:%.2f%% 收益:%.2f%%] [止损:%.2f 止盈:%.2f]",
 				riskRewardRatio, riskPercent, rewardPercent, d.StopLoss, d.TakeProfit)
+		}
+	}
+	// 动态调整止损验证
+	if d.Action == "update_stop_loss" {
+		if d.NewStopLoss <= 0 {
+			return fmt.Errorf("新止损价格必须大于0: %.2f", d.NewStopLoss)
+		}
+	}
+
+	// 动态调整止盈验证
+	if d.Action == "update_take_profit" {
+		if d.NewTakeProfit <= 0 {
+			return fmt.Errorf("新止盈价格必须大于0: %.2f", d.NewTakeProfit)
+		}
+	}
+
+	// 部分平仓验证
+	if d.Action == "partial_close" {
+		if d.ClosePercentage <= 0 || d.ClosePercentage > 100 {
+			return fmt.Errorf("平仓百分比必须在0-100之间: %.1f", d.ClosePercentage)
 		}
 	}
 
