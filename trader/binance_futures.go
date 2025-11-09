@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/adshao/go-binance/v2/common"
 	"github.com/adshao/go-binance/v2/futures"
 )
 

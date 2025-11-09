@@ -70,15 +70,24 @@ type Context struct {
 
 // Decision AI的交易决策
 type Decision struct {
-	Symbol          string  `json:"symbol"`
-	Action          string  `json:"action"` // "open_long", "open_short", "close_long", "close_short", "hold", "wait"
+	Symbol string `json:"symbol"`
+	Action string `json:"action"` // "open_long", "open_short", "close_long", "close_short", "hold", "wait"
+
+	//开仓参数
 	Leverage        int     `json:"leverage,omitempty"`
 	PositionSizeUSD float64 `json:"position_size_usd,omitempty"`
 	StopLoss        float64 `json:"stop_loss,omitempty"`
 	TakeProfit      float64 `json:"take_profit,omitempty"`
-	Confidence      int     `json:"confidence,omitempty"` // 信心度 (0-100)
-	RiskUSD         float64 `json:"risk_usd,omitempty"`   // 最大美元风险
-	Reasoning       string  `json:"reasoning"`
+
+	// 调整参数（新增）
+	NewStopLoss     float64 `json:"new_stop_loss,omitempty"`    // 用于 update_stop_loss
+	NewTakeProfit   float64 `json:"new_take_profit,omitempty"`  // 用于 update_take_profit
+	ClosePercentage float64 `json:"close_percentage,omitempty"` // 用于 partial_close (0-100)
+
+	//通用参数
+	Confidence int     `json:"confidence,omitempty"` // 信心度 (0-100)
+	RiskUSD    float64 `json:"risk_usd,omitempty"`   // 最大美元风险
+	Reasoning  string  `json:"reasoning"`
 }
 
 // FullDecision AI的完整决策（包含思维链）
@@ -221,20 +230,20 @@ func buildSystemPrompt(availableBalance float64, btcEthLeverage, altcoinLeverage
 
 	// === 硬约束（风险控制）===
 	maxPositionForAltcoin := availableBalance * float64(altcoinLeverage) * 0.9
-    maxPositionForBTCETH := availableBalance * float64(btcEthLeverage) * 0.9
-	
+	maxPositionForBTCETH := availableBalance * float64(btcEthLeverage) * 0.9
+
 	sb.WriteString("# ⚖️ 硬约束（风险控制）\n\n")
 	sb.WriteString("1. **风险回报比**: 必须 ≥ 1:3（冒1%风险，赚3%+收益）\n")
 	sb.WriteString("2. **最多持仓**: 3个币种（质量>数量，避免过度集中）\n")
 	sb.WriteString(fmt.Sprintf("3. 仓位计算（基于可用余额）：\n"))
-    sb.WriteString(fmt.Sprintf(" - 当前可用余额: %.2f USDT\n", availableBalance))
-    sb.WriteString(fmt.Sprintf(" - 山寨币最大仓位: %.2f USD\n", maxPositionForAltcoin))
-    sb.WriteString(fmt.Sprintf(" - BTC/ETH最大仓位: %.2f USD\n", maxPositionForBTCETH))
-    sb.WriteString(" - 公式: position_size = 可用余额 × 杠杆 × 0.9\n")
+	sb.WriteString(fmt.Sprintf(" - 当前可用余额: %.2f USDT\n", availableBalance))
+	sb.WriteString(fmt.Sprintf(" - 山寨币最大仓位: %.2f USD\n", maxPositionForAltcoin))
+	sb.WriteString(fmt.Sprintf(" - BTC/ETH最大仓位: %.2f USD\n", maxPositionForBTCETH))
+	sb.WriteString(" - 公式: position_size = 可用余额 × 杠杆 × 0.9\n")
 	sb.WriteString("4. **保证金**: 总使用率 ≤ 90%\n")
 	sb.WriteString("5. **流动性要求**: 持仓价值(OI) < 15M USD的币种禁止新开仓（避免滑点和无法平仓）\n")
 	sb.WriteString("6. 切勿在亏损仓位上摊低成本\n\n")
-	
+
 	// === 市场状态识别框架 ===
 	sb.WriteString("# 🌊 市场状态识别（核心框架）\n\n")
 	sb.WriteString("**第一步：识别市场状态**（使用4小时数据作为主趋势，3分钟数据作为入场时机）\n\n")
@@ -251,7 +260,7 @@ func buildSystemPrompt(availableBalance float64, btcEthLeverage, altcoinLeverage
 	sb.WriteString("  - 技术指标：RSI超买超卖 + MACD背离 + 成交量异常\n")
 	sb.WriteString("  - 资金流向：OI大幅变化 + 资金费率极端 + 净多/空仓反转\n")
 	sb.WriteString("  - 注意：反转信号需要≥2个维度同时确认，单一信号不可靠\n\n")
-	
+
 	// === 多时间框架协同 ===
 	sb.WriteString("# ⏰ 多时间框架协同策略\n\n")
 	sb.WriteString("**3分钟序列**（入场时机）：\n")
@@ -291,7 +300,7 @@ func buildSystemPrompt(availableBalance float64, btcEthLeverage, altcoinLeverage
 	sb.WriteString("  - OI下降 + 价格下跌：多头平仓推动，下跌可能加速\n")
 	sb.WriteString("  - **黄金组合**：OI大幅增长 + 价格突破 + 成交量放大 = 强趋势信号\n")
 	sb.WriteString("  - **警惕组合**：OI下降 + 价格横盘 + 成交量萎缩 = 整理/反转前兆\n\n")
-	
+
 	// === 做空激励与策略 ===
 	sb.WriteString("# 📉 做多做空平衡（重要！）\n\n")
 	sb.WriteString("**核心认知**: 下跌趋势做空的利润 = 上涨趋势做多的利润\n\n")
@@ -419,7 +428,6 @@ func buildSystemPrompt(availableBalance float64, btcEthLeverage, altcoinLeverage
 	sb.WriteString("如果你发现自己每个周期都在交易 → 说明标准太低\n")
 	sb.WriteString("如果你发现持仓<30分钟就平仓 → 说明太急躁\n\n")
 
-
 	// === 夏普比率自我进化 ===
 	sb.WriteString("# 🧬 夏普比率自我进化（动态调整策略）\n\n")
 	sb.WriteString("每次你会收到**夏普比率**作为绩效反馈（周期级别）：\n\n")
@@ -502,7 +510,7 @@ func buildSystemPrompt(availableBalance float64, btcEthLeverage, altcoinLeverage
 	sb.WriteString("- 开仓时必填: leverage, position_size_usd, stop_loss, take_profit, confidence, risk_usd, reasoning\n")
 	sb.WriteString("- `reasoning`必须详细说明：市场状态、多维度确认、风险回报比、BTC影响（如适用）\n\n")
 
-// === 关键提醒 ===
+	// === 关键提醒 ===
 	sb.WriteString("---\n\n")
 	sb.WriteString("**核心原则**（永远记住）: \n")
 	sb.WriteString("1. 目标是夏普比率，不是交易频率（质量>数量）\n")
