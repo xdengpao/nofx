@@ -966,13 +966,13 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *decision.Decisio
 	distanceToEntry := math.Abs(decision.NewStopLoss-entryPrice) / entryPrice
 	isBreakevenStopLoss := distanceToEntry < 0.005 // 0.5% threshold
 
-	// 🔍 Step 3: 如果利润不足 3% 且尝试设置保本价，拒绝执行
-	if profitPercent < 3.0 && isBreakevenStopLoss {
-		log.Printf("  🚫 拒绝调整止损：当前利润仅 %.2f%%，未达到 3%% 最低要求", profitPercent)
+	// 🔍 Step 3: 如果利润不足 1% 且尝试设置保本价，拒绝执行
+	if profitPercent < 1.0 && isBreakevenStopLoss {
+		log.Printf("  🚫 拒绝调整止损：当前利润仅 %.2f%%，未达到 1%% 最低要求", profitPercent)
 		log.Printf("  📊 入场价: %.4f | 当前价: %.4f | 尝试设置止损: %.4f (距离入场价 %.2f%%)",
 			entryPrice, marketData.CurrentPrice, decision.NewStopLoss, distanceToEntry*100)
-		log.Printf("  💡 建议：等待利润达到 3%% 以上后再移动止损至保本价")
-		return fmt.Errorf("利润不足 3%% (当前 %.2f%%)，不允许移动止损至保本价", profitPercent)
+		log.Printf("  💡 建议：等待利润达到 1%% 以上后再移动止损至保本价")
+		return fmt.Errorf("利润不足 1%% (当前 %.2f%%)，不允许移动止损至保本价", profitPercent)
 	}
 
 	// 📊 记录当前利润状态（通过检查时）

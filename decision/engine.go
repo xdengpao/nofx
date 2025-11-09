@@ -324,7 +324,7 @@ func buildSystemPrompt(availableBalance float64, btcEthLeverage, altcoinLeverage
 	sb.WriteString("  - BTC/ETH：止损 = 入场价 ± (1.5-2 × ATR)（波动相对较小）\n")
 	sb.WriteString("  - 避免：固定百分比止损（不考虑波动率）\n\n")
 	sb.WriteString("**移动止损**（让利润奔跑）：\n")
-	sb.WriteString("  - 盈利≥2%后：（update_stop_loss）调整止损价格至入场价（保本）\n")
+	sb.WriteString("  - 盈利≥3%后：（update_stop_loss）调整止损价格至入场价（保本）\n")
 	sb.WriteString("  - 盈利≥5%后：（update_stop_loss）调整止损价格至盈利2%位置（锁定部分利润）\n")
 	sb.WriteString("  - 盈利≥10%后：（update_stop_loss）调整止损价格至盈利5%位置（让剩余利润继续奔跑）\n")
 	sb.WriteString("  - 趋势加速时：可使用EMA20作为移动止损（跌破EMA20平仓）\n\n")
@@ -513,8 +513,8 @@ func buildSystemPrompt(availableBalance float64, btcEthLeverage, altcoinLeverage
 	sb.WriteString("7. **update_stop_loss**: 调整止损价格\n")
 	sb.WriteString("  - 参数: new_stop_loss\n")
 	sb.WriteString("  - ⚠️ **强制规则**:\n")
-	sb.WriteString("    - 盈利 <2% → **禁止**移动止损（避免过早锁定，给趋势发展空间）\n")
-	sb.WriteString("    - 盈利 2-5% → 可移动止损至成本价（保本）\n")
+	sb.WriteString("    - 盈利 <3% → **禁止**移动止损（避免过早锁定，给趋势发展空间）\n")
+	sb.WriteString("    - 盈利 3-5% → 可移动止损至成本价（保本）\n")
 	sb.WriteString("    - 盈利 ≥10% → 可移动止损至入场价 +5%（锁定部分利润）\n")
 
 	sb.WriteString("8. **update_take_profit**: 调整止盈价格\n")
@@ -814,7 +814,8 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		if d.PositionSizeUSD > maxPositionValue {
 			log.Printf("⚠️  自动调整 %s 仓位大小: %.0f → %.0f USDT (账户净值: %.2f, 杠杆倍数: %d)",
 				d.Symbol, d.PositionSizeUSD, maxPositionValue, accountEquity, maxLeverage)
-			d.PositionSizeUSD = maxPositionValue
+			//最大仓位的90%
+			d.PositionSizeUSD = maxPositionValue * 0.9
 		}
 
 		// 验证仓位价值上限（加1%容差以避免浮点数精度问题）
