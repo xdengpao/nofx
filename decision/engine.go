@@ -345,8 +345,8 @@ func buildSystemPrompt(availableBalance float64, btcEthLeverage, altcoinLeverage
 	sb.WriteString("  - 低波动币种（ATR小）：可适度增加仓位\n")
 	sb.WriteString("  - 目标：所有持仓的潜在损失（止损距离）总和 ≤ 账户净值的5%\n\n")
 	sb.WriteString("**信心度与仓位关系**：\n")
-	sb.WriteString("  - 信心度≥90：可使用上限仓位（山寨1.5倍账户可用余额，BTC/ETH 10倍账户可用余额）\n")
-	sb.WriteString("  - 信心度75-89：使用中等仓位（山寨1.0倍账户可用余额，BTC/ETH 5倍账户可用余额）\n")
+	sb.WriteString("  - 信心度≥90：可使用上限仓位（山寨5倍账户可用余额，BTC/ETH 10倍账户可用余额）\n")
+	sb.WriteString("  - 信心度75-89：使用中等仓位（山寨3倍账户可用余额，BTC/ETH 5倍账户可用余额）\n")
 	sb.WriteString("  - 信心度<75：不开仓（等待更好的机会）\n\n")
 
 	// === 开仓信号强度与分析方法 ===
@@ -793,11 +793,11 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 	// 开仓操作必须提供完整参数
 	if d.Action == "open_long" || d.Action == "open_short" {
 		// 根据币种使用配置的杠杆上限
-		maxLeverage := altcoinLeverage          // 山寨币使用配置的杠杆
-		maxPositionValue := accountEquity * 1.5 // 山寨币最多1.5倍账户净值
+		maxLeverage := altcoinLeverage                               // 山寨币使用配置的杠杆
+		maxPositionValue := accountEquity * float64(altcoinLeverage) // 山寨币最多1.5倍账户净值
 		if d.Symbol == "BTCUSDT" || d.Symbol == "ETHUSDT" {
-			maxLeverage = btcEthLeverage          // BTC和ETH使用配置的杠杆
-			maxPositionValue = accountEquity * 10 // BTC/ETH最多10倍账户净值
+			maxLeverage = btcEthLeverage                               // BTC和ETH使用配置的杠杆
+			maxPositionValue = accountEquity * float64(btcEthLeverage) // BTC/ETH最多10倍账户净值
 		}
 
 		if d.Leverage <= 0 || d.Leverage > maxLeverage {
@@ -806,6 +806,14 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		if d.PositionSizeUSD <= 0 {
 			return fmt.Errorf("仓位大小必须大于0: %.2f", d.PositionSizeUSD)
 		}
+
+		// 🔧 自动调整仓位大小到允许的最大值
+		if d.PositionSizeUSD > maxPositionValue {
+			log.Printf("⚠️  自动调整 %s 仓位大小: %.0f → %.0f USDT (账户净值: %.2f, 杠杆倍数: %d)",
+				d.Symbol, d.PositionSizeUSD, maxPositionValue, accountEquity, maxLeverage)
+			d.PositionSizeUSD = maxPositionValue
+		}
+
 		// 验证仓位价值上限（加1%容差以避免浮点数精度问题）
 		tolerance := maxPositionValue * 0.01 // 1%容差
 		if d.PositionSizeUSD > maxPositionValue+tolerance {
@@ -815,6 +823,7 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 				return fmt.Errorf("山寨币单币种仓位价值不能超过%.0f USDT（1.5倍账户净值），实际: %.0f", maxPositionValue, d.PositionSizeUSD)
 			}
 		}
+
 		if d.StopLoss <= 0 || d.TakeProfit <= 0 {
 			return fmt.Errorf("止损和止盈必须大于0")
 		}
