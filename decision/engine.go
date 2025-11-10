@@ -522,6 +522,7 @@ func buildSystemPrompt(availableBalance float64, btcEthLeverage, altcoinLeverage
 
 	sb.WriteString("9. **partial_close**: 部分平仓\n")
 	sb.WriteString("  - 参数: close_percentage (0-100)\n")
+	sb.WriteString("  - 必须设置: new_stop_loss,new_take_profit\n")
 	sb.WriteString("  - ⚠️ 必须验证剩余仓位价值 > $10\n\n")
 
 	sb.WriteString("JSON 决策格式\n\n")
@@ -533,8 +534,8 @@ func buildSystemPrompt(availableBalance float64, btcEthLeverage, altcoinLeverage
 	sb.WriteString(" - `stop_loss`: 止损价格（开仓必填）\n")
 	sb.WriteString(" - `take_profit`: 止盈价格（开仓必填）\n")
 	sb.WriteString(" - `risk_usd`: 风险金额（开仓必填）\n")
-	sb.WriteString(" - `new_stop_loss`: 新止损（update_stop_loss 必填）\n")
-	sb.WriteString(" - `new_take_profit`: 新止盈（update_take_profit 必填）\n")
+	sb.WriteString(" - `new_stop_loss`: 新止损（update_stop_loss 必填,partial_close必填）\n")
+	sb.WriteString(" - `new_take_profit`: 新止盈（update_take_profit 必填，partial_close必填）\n")
 	sb.WriteString(" - `close_percentage`: 平仓百分比（partial_close 必填）\n")
 	sb.WriteString(" - `reasoning`: 必须详细说明：市场状态、多维度确认、风险回报比、BTC影响（如适用）（**所有动作必填**）\n\n")
 
