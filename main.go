@@ -5,6 +5,7 @@ import (
 	"log"
 	"nofx/api"
 	"nofx/config"
+	"nofx/decision"
 	"nofx/manager"
 	"nofx/pool"
 	"os"
@@ -52,7 +53,19 @@ func main() {
 		pool.SetOITopAPI(cfg.OITopAPIURL)
 		log.Printf("✓ 已配置OI Top API")
 	}
-
+	decisionConfig := &decision.Config{
+		MaxRiskPerTrade:     0.02,                         // 单笔风险2%
+		TotalRiskBudget:     0.08,                         // 总风险预算8%
+		AnalysisIntervalMin: 15,                           // 分析间隔15分钟
+		BTCETHLeverage:      cfg.Leverage.BTCETHLeverage,  // 从配置读取
+		AltcoinLeverage:     cfg.Leverage.AltcoinLeverage, // 从配置读取
+		DataDir:             "./data",                     // 数据持久化目录
+		RiskFreeRate:        0.0,                          // 无风险利率
+	}
+	if err := decision.Initialize(decisionConfig); err != nil {
+		log.Fatalf("❌ 初始化决策模块失败: %v", err)
+	}
+	log.Printf("✓ 决策模块初始化成功")
 	// 创建TraderManager
 	traderManager := manager.NewTraderManager()
 
@@ -132,6 +145,12 @@ func main() {
 	fmt.Println()
 	fmt.Println()
 	log.Println("📛 收到退出信号，正在停止所有trader...")
+
+	// 保存决策模块数据
+	if err := decision.Shutdown(); err != nil {
+		log.Printf("⚠️ 保存决策数据失败: %v", err)
+	}
+
 	traderManager.StopAll()
 
 	fmt.Println()

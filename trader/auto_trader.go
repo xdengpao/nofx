@@ -199,6 +199,11 @@ func (at *AutoTrader) Run() error {
 	log.Printf("⚙️  扫描间隔: %v", at.config.ScanInterval)
 	log.Println("🤖 AI将全权决定杠杆、仓位大小、止损止盈等参数")
 
+	// ✅ 新增：启动时同步现有持仓的交易计划
+	if err := at.syncExistingPositions(); err != nil {
+		log.Printf("⚠️ 同步现有持仓计划失败: %v", err)
+	}
+
 	ticker := time.NewTicker(at.config.ScanInterval)
 	defer ticker.Stop()
 
@@ -216,6 +221,70 @@ func (at *AutoTrader) Run() error {
 		}
 	}
 
+	return nil
+}
+
+// ✅ 新增：同步现有持仓的交易计划
+func (at *AutoTrader) syncExistingPositions() error {
+	log.Println("🔄 正在同步现有持仓的交易计划...")
+
+	// 获取当前持仓
+	positions, err := at.trader.GetPositions()
+	if err != nil {
+		return fmt.Errorf("获取持仓失败: %w", err)
+	}
+
+	if len(positions) == 0 {
+		log.Println("  ℹ️ 当前无持仓，无需同步")
+		return nil
+	}
+
+	// 转换为 decision.PositionInfo 格式
+	var positionInfos []decision.PositionInfo
+	for _, pos := range positions {
+		symbol := pos["symbol"].(string)
+		side := pos["side"].(string)
+		entryPrice := pos["entryPrice"].(float64)
+		markPrice := pos["markPrice"].(float64)
+		quantity := pos["positionAmt"].(float64)
+		if quantity < 0 {
+			quantity = -quantity
+		}
+		leverage := 10
+		if lev, ok := pos["leverage"].(float64); ok {
+			leverage = int(lev)
+		}
+
+		positionInfos = append(positionInfos, decision.PositionInfo{
+			Symbol:     symbol,
+			Side:       side,
+			EntryPrice: entryPrice,
+			MarkPrice:  markPrice,
+			Quantity:   quantity,
+			Leverage:   leverage,
+			UpdateTime: time.Now().UnixMilli(),
+		})
+
+		// 记录持仓首次出现时间
+		posKey := symbol + "_" + side
+		at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
+	}
+
+	// 获取市场数据
+	marketDataMap := make(map[string]*market.Data)
+	for _, pos := range positionInfos {
+		data, err := market.Get(pos.Symbol)
+		if err != nil {
+			log.Printf("  ⚠️ 获取 %s 市场数据失败: %v", pos.Symbol, err)
+			continue
+		}
+		marketDataMap[pos.Symbol] = data
+	}
+
+	// 调用决策模块同步计划
+	decision.SyncPlansFromPositions(positionInfos, marketDataMap)
+
+	log.Printf("  ✅ 已同步 %d 个持仓的交易计划", len(positionInfos))
 	return nil
 }
 
@@ -605,32 +674,32 @@ func (at *AutoTrader) executeDecisionWithRecord(decision *decision.Decision, act
 }
 
 // executeOpenLongWithRecord 执行开多仓并记录详细信息
-func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
-	log.Printf("  📈 开多仓: %s", decision.Symbol)
+func (at *AutoTrader) executeOpenLongWithRecord(d *decision.Decision, actionRecord *logger.DecisionAction) error {
+	log.Printf("  📈 开多仓: %s", d.Symbol)
 
 	// ⚠️ 关键：检查是否已有同币种同方向持仓，如果有则拒绝开仓（防止仓位叠加超限）
 	positions, err := at.trader.GetPositions()
 	if err == nil {
 		for _, pos := range positions {
-			if pos["symbol"] == decision.Symbol && pos["side"] == "long" {
-				return fmt.Errorf("❌ %s 已有多仓，拒绝开仓以防止仓位叠加超限。如需换仓，请先给出 close_long 决策", decision.Symbol)
+			if pos["symbol"] == d.Symbol && pos["side"] == "long" {
+				return fmt.Errorf("❌ %s 已有多仓，拒绝开仓以防止仓位叠加超限。如需换仓，请先给出 close_long 决策", d.Symbol)
 			}
 		}
 	}
 
 	// 获取当前价格
-	marketData, err := market.Get(decision.Symbol)
+	marketData, err := market.Get(d.Symbol)
 	if err != nil {
 		return err
 	}
 
 	// 计算数量
-	quantity := decision.PositionSizeUSD / marketData.CurrentPrice
+	quantity := d.PositionSizeUSD / marketData.CurrentPrice
 	actionRecord.Quantity = quantity
 	actionRecord.Price = marketData.CurrentPrice
 
 	// 开仓
-	order, err := at.trader.OpenLong(decision.Symbol, quantity, decision.Leverage)
+	order, err := at.trader.OpenLong(d.Symbol, quantity, d.Leverage)
 	if err != nil {
 		return err
 	}
@@ -643,14 +712,17 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 	log.Printf("  ✓ 开仓成功，订单ID: %v, 数量: %.4f", order["orderId"], quantity)
 
 	// 记录开仓时间
-	posKey := decision.Symbol + "_long"
+	posKey := d.Symbol + "_long"
 	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
 
+	// ✅ 新增：创建交易计划
+	decision.OnPositionOpened(d, marketData.CurrentPrice)
+
 	// 设置止损止盈
-	if err := at.trader.SetStopLoss(decision.Symbol, "LONG", quantity, decision.StopLoss); err != nil {
+	if err := at.trader.SetStopLoss(d.Symbol, "LONG", quantity, d.StopLoss); err != nil {
 		log.Printf("  ⚠ 设置止损失败: %v", err)
 	}
-	if err := at.trader.SetTakeProfit(decision.Symbol, "LONG", quantity, decision.TakeProfit); err != nil {
+	if err := at.trader.SetTakeProfit(d.Symbol, "LONG", quantity, d.TakeProfit); err != nil {
 		log.Printf("  ⚠ 设置止盈失败: %v", err)
 	}
 
@@ -658,32 +730,32 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 }
 
 // executeOpenShortWithRecord 执行开空仓并记录详细信息
-func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
-	log.Printf("  📉 开空仓: %s", decision.Symbol)
+func (at *AutoTrader) executeOpenShortWithRecord(d *decision.Decision, actionRecord *logger.DecisionAction) error {
+	log.Printf("  📉 开空仓: %s", d.Symbol)
 
 	// ⚠️ 关键：检查是否已有同币种同方向持仓，如果有则拒绝开仓（防止仓位叠加超限）
 	positions, err := at.trader.GetPositions()
 	if err == nil {
 		for _, pos := range positions {
-			if pos["symbol"] == decision.Symbol && pos["side"] == "short" {
-				return fmt.Errorf("❌ %s 已有空仓，拒绝开仓以防止仓位叠加超限。如需换仓，请先给出 close_short 决策", decision.Symbol)
+			if pos["symbol"] == d.Symbol && pos["side"] == "short" {
+				return fmt.Errorf("❌ %s 已有空仓，拒绝开仓以防止仓位叠加超限。如需换仓，请先给出 close_short 决策", d.Symbol)
 			}
 		}
 	}
 
 	// 获取当前价格
-	marketData, err := market.Get(decision.Symbol)
+	marketData, err := market.Get(d.Symbol)
 	if err != nil {
 		return err
 	}
 
 	// 计算数量
-	quantity := decision.PositionSizeUSD / marketData.CurrentPrice
+	quantity := d.PositionSizeUSD / marketData.CurrentPrice
 	actionRecord.Quantity = quantity
 	actionRecord.Price = marketData.CurrentPrice
 
 	// 开仓
-	order, err := at.trader.OpenShort(decision.Symbol, quantity, decision.Leverage)
+	order, err := at.trader.OpenShort(d.Symbol, quantity, d.Leverage)
 	if err != nil {
 		return err
 	}
@@ -696,71 +768,173 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 	log.Printf("  ✓ 开仓成功，订单ID: %v, 数量: %.4f", order["orderId"], quantity)
 
 	// 记录开仓时间
-	posKey := decision.Symbol + "_short"
+	posKey := d.Symbol + "_short"
 	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
+	// ✅ 新增：创建交易计划
+	decision.OnPositionOpened(d, marketData.CurrentPrice)
 
 	// 设置止损止盈
-	if err := at.trader.SetStopLoss(decision.Symbol, "SHORT", quantity, decision.StopLoss); err != nil {
+	if err := at.trader.SetStopLoss(d.Symbol, "SHORT", quantity, d.StopLoss); err != nil {
 		log.Printf("  ⚠ 设置止损失败: %v", err)
 	}
-	if err := at.trader.SetTakeProfit(decision.Symbol, "SHORT", quantity, decision.TakeProfit); err != nil {
+	if err := at.trader.SetTakeProfit(d.Symbol, "SHORT", quantity, d.TakeProfit); err != nil {
 		log.Printf("  ⚠ 设置止盈失败: %v", err)
 	}
 
 	return nil
 }
 
-// executeCloseLongWithRecord 执行平多仓并记录详细信息
-func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
-	log.Printf("  🔄 平多仓: %s", decision.Symbol)
+// executeCloseLongWithRecord 执行平多仓
+func (at *AutoTrader) executeCloseLongWithRecord(d *decision.Decision, actionRecord *logger.DecisionAction) error {
+	log.Printf("  🔄 平多仓: %s", d.Symbol)
+
+	// ✅ 新增：获取平仓前的持仓信息（用于计算盈亏）
+	var pnlPercent float64
+	var holdTimeMinutes float64
+	positions, _ := at.trader.GetPositions()
+	for _, pos := range positions {
+		if pos["symbol"] == d.Symbol && pos["side"] == "long" {
+			// 计算盈亏百分比
+			entryPrice := pos["entryPrice"].(float64)
+			markPrice := pos["markPrice"].(float64)
+			leverage := 10
+			if lev, ok := pos["leverage"].(float64); ok {
+				leverage = int(lev)
+			}
+			pnlPercent = ((markPrice - entryPrice) / entryPrice) * float64(leverage) * 100
+
+			// 计算持仓时间
+			posKey := d.Symbol + "_long"
+			if startTime, ok := at.positionFirstSeenTime[posKey]; ok {
+				holdTimeMinutes = float64(time.Now().UnixMilli()-startTime) / (1000 * 60)
+			}
+			break
+		}
+	}
 
 	// 获取当前价格
-	marketData, err := market.Get(decision.Symbol)
+	marketData, err := market.Get(d.Symbol)
 	if err != nil {
 		return err
 	}
 	actionRecord.Price = marketData.CurrentPrice
 
 	// 平仓
-	order, err := at.trader.CloseLong(decision.Symbol, 0) // 0 = 全部平仓
+	order, err := at.trader.CloseLong(d.Symbol, 0)
 	if err != nil {
 		return err
 	}
 
-	// 记录订单ID
 	if orderID, ok := order["orderId"].(int64); ok {
 		actionRecord.OrderID = orderID
 	}
 
-	log.Printf("  ✓ 平仓成功")
+	// ✅ 新增：调用平仓回调（更新统计和夏普比率）
+	decision.OnPositionClosed(d.Symbol, d.Reasoning, pnlPercent, holdTimeMinutes)
+
+	log.Printf("  ✓ 平仓成功 (盈亏: %.2f%%, 持仓: %.0f分钟)", pnlPercent, holdTimeMinutes)
 	return nil
 }
 
-// executeCloseShortWithRecord 执行平空仓并记录详细信息
-func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
-	log.Printf("  🔄 平空仓: %s", decision.Symbol)
+// executeCloseShortWithRecord - 同样修改
+func (at *AutoTrader) executeCloseShortWithRecord(d *decision.Decision, actionRecord *logger.DecisionAction) error {
+	log.Printf("  🔄 平空仓: %s", d.Symbol)
 
-	// 获取当前价格
-	marketData, err := market.Get(decision.Symbol)
+	// ✅ 新增：获取平仓前的持仓信息
+	var pnlPercent float64
+	var holdTimeMinutes float64
+	positions, _ := at.trader.GetPositions()
+	for _, pos := range positions {
+		if pos["symbol"] == d.Symbol && pos["side"] == "short" {
+			entryPrice := pos["entryPrice"].(float64)
+			markPrice := pos["markPrice"].(float64)
+			leverage := 10
+			if lev, ok := pos["leverage"].(float64); ok {
+				leverage = int(lev)
+			}
+			pnlPercent = ((entryPrice - markPrice) / entryPrice) * float64(leverage) * 100
+
+			posKey := d.Symbol + "_short"
+			if startTime, ok := at.positionFirstSeenTime[posKey]; ok {
+				holdTimeMinutes = float64(time.Now().UnixMilli()-startTime) / (1000 * 60)
+			}
+			break
+		}
+	}
+
+	marketData, err := market.Get(d.Symbol)
 	if err != nil {
 		return err
 	}
 	actionRecord.Price = marketData.CurrentPrice
 
-	// 平仓
-	order, err := at.trader.CloseShort(decision.Symbol, 0) // 0 = 全部平仓
+	order, err := at.trader.CloseShort(d.Symbol, 0)
 	if err != nil {
 		return err
 	}
 
-	// 记录订单ID
 	if orderID, ok := order["orderId"].(int64); ok {
 		actionRecord.OrderID = orderID
 	}
 
-	log.Printf("  ✓ 平仓成功")
+	// ✅ 新增：调用平仓回调
+	decision.OnPositionClosed(d.Symbol, d.Reasoning, pnlPercent, holdTimeMinutes)
+
+	log.Printf("  ✓ 平仓成功 (盈亏: %.2f%%, 持仓: %.0f分钟)", pnlPercent, holdTimeMinutes)
 	return nil
 }
+
+//// executeCloseLongWithRecord 执行平多仓并记录详细信息
+//func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+//	log.Printf("  🔄 平多仓: %s", decision.Symbol)
+//
+//	// 获取当前价格
+//	marketData, err := market.Get(decision.Symbol)
+//	if err != nil {
+//		return err
+//	}
+//	actionRecord.Price = marketData.CurrentPrice
+//
+//	// 平仓
+//	order, err := at.trader.CloseLong(decision.Symbol, 0) // 0 = 全部平仓
+//	if err != nil {
+//		return err
+//	}
+//
+//	// 记录订单ID
+//	if orderID, ok := order["orderId"].(int64); ok {
+//		actionRecord.OrderID = orderID
+//	}
+//
+//	log.Printf("  ✓ 平仓成功")
+//	return nil
+//}
+
+//// executeCloseShortWithRecord 执行平空仓并记录详细信息
+//func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+//	log.Printf("  🔄 平空仓: %s", decision.Symbol)
+//
+//	// 获取当前价格
+//	marketData, err := market.Get(decision.Symbol)
+//	if err != nil {
+//		return err
+//	}
+//	actionRecord.Price = marketData.CurrentPrice
+//
+//	// 平仓
+//	order, err := at.trader.CloseShort(decision.Symbol, 0) // 0 = 全部平仓
+//	if err != nil {
+//		return err
+//	}
+//
+//	// 记录订单ID
+//	if orderID, ok := order["orderId"].(int64); ok {
+//		actionRecord.OrderID = orderID
+//	}
+//
+//	log.Printf("  ✓ 平仓成功")
+//	return nil
+//}
 
 // queryHyperliquidTakeProfitOrder 查询 Hyperliquid 的现有止盈单价格
 func (at *AutoTrader) queryHyperliquidTakeProfitOrder(symbol, positionSide string, entryPrice float64) float64 {
