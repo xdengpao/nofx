@@ -338,7 +338,7 @@ func SetSharpeConfig(config SharpeConfig) {
 // AddReturn 添加收益率记录
 func AddReturn(returnPct float64) {
 	returnsLock.Lock()
-	defer returnsLock.Unlock()
+	//defer returnsLock.Unlock()
 
 	returnsSeries = append(returnsSeries, returnPct)
 
@@ -347,17 +347,21 @@ func AddReturn(returnPct float64) {
 		returnsSeries = returnsSeries[len(returnsSeries)-1000:]
 	}
 
+	returnsLock.Unlock() // ← 先释放锁
+
 	// 自动保存
 	if planManager != nil {
 		planManager.autoSaveIfEnabled()
 	}
 }
 
-// CalculateSharpeRatio 计算夏普比率
-func CalculateSharpeRatio() float64 {
-	returnsLock.RLock()
-	defer returnsLock.RUnlock()
+// ============================================================================
+// 无锁版本（供内部使用，调用者需确保已持有 returnsLock）
+// ============================================================================
 
+// calculateSharpeRatioUnlocked 计算夏普比率（无锁版本）
+// 注意：调用此函数前，调用者必须已经持有 returnsLock.RLock() 或 returnsLock.Lock()
+func calculateSharpeRatioUnlocked() float64 {
 	if len(returnsSeries) < sharpeConfig.MinTradesForCalc {
 		return 0
 	}
@@ -390,15 +394,14 @@ func CalculateSharpeRatio() float64 {
 	return sharpe
 }
 
-// CalculateSortinoRatio 计算索提诺比率（只考虑下行风险）
-func CalculateSortinoRatio() float64 {
-	returnsLock.RLock()
-	defer returnsLock.RUnlock()
-
+// calculateSortinoRatioUnlocked 计算索提诺比率（无锁版本）
+// 注意：调用此函数前，调用者必须已经持有 returnsLock.RLock() 或 returnsLock.Lock()
+func calculateSortinoRatioUnlocked() float64 {
 	if len(returnsSeries) < sharpeConfig.MinTradesForCalc {
 		return 0
 	}
 
+	// 计算平均收益率
 	sum := 0.0
 	for _, r := range returnsSeries {
 		sum += r
@@ -431,7 +434,25 @@ func CalculateSortinoRatio() float64 {
 	return sortino
 }
 
-// GetReturnsStats 获取收益率统计
+// ============================================================================
+// 带锁版本（供外部调用）
+// ============================================================================
+
+// CalculateSharpeRatio 计算夏普比率（带锁版本，供外部调用）
+func CalculateSharpeRatio() float64 {
+	returnsLock.RLock()
+	defer returnsLock.RUnlock()
+	return calculateSharpeRatioUnlocked()
+}
+
+// CalculateSortinoRatio 计算索提诺比率（带锁版本，供外部调用）
+func CalculateSortinoRatio() float64 {
+	returnsLock.RLock()
+	defer returnsLock.RUnlock()
+	return calculateSortinoRatioUnlocked()
+}
+
+// GetReturnsStats 获取收益率统计（带锁版本）
 func GetReturnsStats() map[string]float64 {
 	returnsLock.RLock()
 	defer returnsLock.RUnlock()
@@ -477,8 +498,8 @@ func GetReturnsStats() map[string]float64 {
 		"max_return":    maxReturn,
 		"min_return":    minReturn,
 		"win_rate":      winRate,
-		"sharpe_ratio":  CalculateSharpeRatio(),
-		"sortino_ratio": CalculateSortinoRatio(),
+		"sharpe_ratio":  calculateSharpeRatioUnlocked(),  // ← 使用无锁版本
+		"sortino_ratio": calculateSortinoRatioUnlocked(), // ← 使用无锁版本
 	}
 }
 
@@ -2119,8 +2140,8 @@ var (
 
 // UpdateStatistics 更新统计（同时更新夏普比率）
 func UpdateStatistics(pnlPercent float64, holdTimeMinutes float64) {
+	// Step 1: 更新统计数据（持有锁）
 	tradeStatsLock.Lock()
-	defer tradeStatsLock.Unlock()
 
 	tradeStats.TotalTrades++
 	tradeStats.TotalPnL += pnlPercent
@@ -2144,20 +2165,32 @@ func UpdateStatistics(pnlPercent float64, holdTimeMinutes float64) {
 	tradeStats.AverageHoldTime = (tradeStats.AverageHoldTime*float64(tradeStats.TotalTrades-1) + holdTimeMinutes) / float64(tradeStats.TotalTrades)
 	tradeStats.LastUpdated = time.Now()
 
-	// 更新夏普比率和索提诺比率
-	tradeStats.SharpeRatio = CalculateSharpeRatio()
-	tradeStats.SortinoRatio = CalculateSortinoRatio()
+	// Step 2: 计算夏普比率和索提诺比率
+	// 需要同时持有两把锁，按固定顺序获取避免死锁
+	returnsLock.RLock()
+	tradeStats.SharpeRatio = calculateSharpeRatioUnlocked()
+	tradeStats.SortinoRatio = calculateSortinoRatioUnlocked()
+	returnsLock.RUnlock()
 
+	// 复制日志需要的数据
+	totalTrades := tradeStats.TotalTrades
+	winRate := tradeStats.WinRate
+	profitFactor := tradeStats.ProfitFactor
+	sharpeRatio := tradeStats.SharpeRatio
+
+	tradeStatsLock.Unlock() // ← 先释放锁
+
+	// Step 3: 日志输出（锁外）
 	log.Printf("📊 统计更新: 总交易=%d, 胜率=%.1f%%, 盈亏因子=%.2f, 夏普=%.2f",
-		tradeStats.TotalTrades, tradeStats.WinRate*100, tradeStats.ProfitFactor, tradeStats.SharpeRatio)
+		totalTrades, winRate*100, profitFactor, sharpeRatio)
 
-	// 自动保存
+	// Step 4: 在锁外调用自动保存（避免死锁）
 	if planManager != nil {
 		planManager.autoSaveIfEnabled()
 	}
 }
 
-// GetStatistics 获取统计信息
+// GetStatistics 获取统计信息（带锁版本）
 func GetStatistics() *TradeStatistics {
 	tradeStatsLock.RLock()
 	defer tradeStatsLock.RUnlock()
@@ -2165,18 +2198,19 @@ func GetStatistics() *TradeStatistics {
 	return &statsCopy
 }
 
-// ResetStatistics 重置统计
+// ResetStatistics 重置统计（修复死锁版本）
 func ResetStatistics() {
 	tradeStatsLock.Lock()
-	defer tradeStatsLock.Unlock()
 	tradeStats = &TradeStatistics{}
+	tradeStatsLock.Unlock() // ← 先释放锁
 
 	returnsLock.Lock()
 	returnsSeries = nil
-	returnsLock.Unlock()
+	returnsLock.Unlock() // ← 先释放锁
 
 	log.Printf("📊 统计已重置")
 
+	// 在锁外调用自动保存
 	if planManager != nil {
 		planManager.autoSaveIfEnabled()
 	}
