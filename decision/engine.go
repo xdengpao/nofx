@@ -1738,16 +1738,53 @@ func fetchMarketDataForContext(ctx *Context) error {
 // ============================================================================
 // 风险计算
 // ============================================================================
-
+// calculateUsedRisk 计算已用风险（修复版）
 func calculateUsedRisk(ctx *Context) float64 {
 	if ctx.Account.TotalEquity <= 0 {
 		return 0
 	}
 
 	totalRisk := 0.0
+
 	for _, pos := range ctx.Positions {
-		posRisk := pos.MarginUsed / ctx.Account.TotalEquity
+		// 🆕 获取该持仓的交易计划
+		plan := planManager.GetPlan(pos.Symbol)
+
+		var riskUSD float64
+
+		if plan != nil {
+			// ✅ 方法1：基于计划中的止损计算真实风险
+			effectiveSL := plan.CurrentStopLoss
+			if effectiveSL == 0 {
+				effectiveSL = plan.StopLoss
+			}
+
+			var stopDistancePct float64
+			if plan.Direction == "long" {
+				stopDistancePct = (pos.MarkPrice - effectiveSL) / pos.MarkPrice
+			} else {
+				stopDistancePct = (effectiveSL - pos.MarkPrice) / pos.MarkPrice
+			}
+
+			// 确保止损距离为正数
+			if stopDistancePct < 0 {
+				stopDistancePct = 0 // 已经过了止损价，风险为0（应该触发止损）
+			}
+
+			positionValue := pos.Quantity * pos.MarkPrice
+			riskUSD = positionValue * stopDistancePct
+
+		} else {
+			// ✅ 方法2：无计划时，使用保守估计（假设5%止损）
+			positionValue := pos.Quantity * pos.MarkPrice
+			riskUSD = positionValue * 0.05 // 假设5%止损距离
+		}
+
+		posRisk := riskUSD / ctx.Account.TotalEquity
 		totalRisk += posRisk
+
+		log.Printf("📊 %s 风险计算: 仓位价值=%.2f, 风险=%.2f USD (%.2f%%)",
+			pos.Symbol, pos.Quantity*pos.MarkPrice, riskUSD, posRisk*100)
 	}
 
 	return totalRisk
