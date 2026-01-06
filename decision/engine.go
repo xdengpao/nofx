@@ -869,21 +869,29 @@ func (e *PositionEvaluator) Evaluate() *EvaluationResult {
 		return result
 	}
 
-	// ========== 第三优先级：移动止损检查 ==========
+	// ========== 第三优先级：移动止损检查（修复版） ==========
 	if e.Position.UnrealizedPnLPct > 0 && e.Plan != nil {
 		newSL := e.calculateTrailingStop()
-		effectiveSL := e.Plan.CurrentStopLoss
-		if effectiveSL == 0 {
-			effectiveSL = e.Plan.StopLoss
-		}
 
-		if newSL > 0 && newSL != effectiveSL {
+		// ✅ 只有返回有效的止损价格才考虑更新
+		if newSL > 0 {
+			effectiveSL := e.Plan.CurrentStopLoss
+			if effectiveSL == 0 {
+				effectiveSL = e.Plan.StopLoss
+			}
+
 			shouldUpdate := false
 			if e.Plan.Direction == "long" && newSL > effectiveSL {
-				shouldUpdate = true
+				// ✅ 二次验证：确保新止损低于当前价格
+				if newSL < currentPrice {
+					shouldUpdate = true
+				}
 			}
 			if e.Plan.Direction == "short" && newSL < effectiveSL {
-				shouldUpdate = true
+				// ✅ 二次验证：确保新止损高于当前价格
+				if newSL > currentPrice {
+					shouldUpdate = true
+				}
 			}
 
 			if shouldUpdate {
@@ -943,32 +951,102 @@ func (e *PositionEvaluator) getHoldingMinutes() int64 {
 	return (time.Now().UnixMilli() - e.Position.UpdateTime) / (1000 * 60)
 }
 
-// calculateTrailingStop 计算移动止损
+// calculateTrailingStop 计算移动止损（增强版：基于ATR动态计算）
 func (e *PositionEvaluator) calculateTrailingStop() float64 {
-	if e.Plan == nil {
+	if e.Plan == nil || e.MarketData == nil {
 		return 0
 	}
 
 	pnlPct := e.Position.UnrealizedPnLPct
 	entryPrice := e.Plan.EntryPrice
+	currentPrice := e.MarketData.CurrentPrice
+
+	// 获取ATR用于动态计算安全边际
+	atr := 0.0
+	if e.MarketData.LongerTermContext != nil {
+		atr = e.MarketData.LongerTermContext.ATR14
+	}
+	if atr == 0 {
+		atr = currentPrice * 0.01 // 默认1%作为ATR
+	}
+
+	// 安全边际：至少0.3%或0.5倍ATR，取较大值
+	safetyMarginPct := 0.003
+	safetyMarginATR := 0.5 * atr / currentPrice
+	safetyMargin := math.Max(safetyMarginPct, safetyMarginATR)
 
 	var newSL float64
+	var targetSLReason string
 
 	if e.Plan.Direction == "long" {
+		// 多单：根据盈利百分比设置止损
 		if pnlPct >= 15 {
 			newSL = entryPrice * 1.05
+			targetSLReason = "保护5%利润"
 		} else if pnlPct >= 10 {
 			newSL = entryPrice * 1.02
+			targetSLReason = "保护2%利润"
 		} else if pnlPct >= 7 {
 			newSL = entryPrice
+			targetSLReason = "保本"
+		} else {
+			return 0 // 盈利不足，不移动止损
 		}
-	} else {
+
+		// 计算允许的最大止损价格
+		maxAllowedSL := currentPrice * (1 - safetyMargin)
+
+		if newSL >= maxAllowedSL {
+			effectiveSL := e.Plan.CurrentStopLoss
+			if effectiveSL == 0 {
+				effectiveSL = e.Plan.StopLoss
+			}
+
+			if maxAllowedSL > effectiveSL {
+				// 使用安全边际价格
+				log.Printf("  ⚠️ %s止损 %.4f 高于安全线 %.4f，调整为 %.4f",
+					targetSLReason, newSL, maxAllowedSL, maxAllowedSL)
+				newSL = maxAllowedSL
+			} else {
+				// 无法有效更新
+				log.Printf("  ℹ️ 价格%.4f回落，安全止损%.4f ≤ 原止损%.4f，暂不更新",
+					currentPrice, maxAllowedSL, effectiveSL)
+				return 0
+			}
+		}
+
+	} else { // short
 		if pnlPct >= 15 {
 			newSL = entryPrice * 0.95
+			targetSLReason = "保护5%利润"
 		} else if pnlPct >= 10 {
 			newSL = entryPrice * 0.98
+			targetSLReason = "保护2%利润"
 		} else if pnlPct >= 7 {
 			newSL = entryPrice
+			targetSLReason = "保本"
+		} else {
+			return 0
+		}
+
+		// 计算允许的最小止损价格
+		minAllowedSL := currentPrice * (1 + safetyMargin)
+
+		if newSL <= minAllowedSL {
+			effectiveSL := e.Plan.CurrentStopLoss
+			if effectiveSL == 0 {
+				effectiveSL = e.Plan.StopLoss
+			}
+
+			if minAllowedSL < effectiveSL {
+				log.Printf("  ⚠️ %s止损 %.4f 低于安全线 %.4f，调整为 %.4f",
+					targetSLReason, newSL, minAllowedSL, minAllowedSL)
+				newSL = minAllowedSL
+			} else {
+				log.Printf("  ℹ️ 价格%.4f反弹，安全止损%.4f ≥ 原止损%.4f，暂不更新",
+					currentPrice, minAllowedSL, effectiveSL)
+				return 0
+			}
 		}
 	}
 
