@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -81,31 +82,331 @@ type CircuitBreakerState struct {
 }
 
 // ============================================================================
+// 🆕 失效条件结构化定义
+// ============================================================================
+
+// InvalidationConditionType 失效条件类型
+type InvalidationConditionType string
+
+const (
+	ICT_EMA_CROSS_DOWN InvalidationConditionType = "ema_cross_down" // EMA死叉
+	ICT_EMA_CROSS_UP   InvalidationConditionType = "ema_cross_up"   // EMA金叉
+	ICT_PRICE_BELOW    InvalidationConditionType = "price_below"    // 价格跌破指标
+	ICT_PRICE_ABOVE    InvalidationConditionType = "price_above"    // 价格突破指标
+	ICT_RSI_ABOVE      InvalidationConditionType = "rsi_above"      // RSI超过阈值
+	ICT_RSI_BELOW      InvalidationConditionType = "rsi_below"      // RSI低于阈值
+	ICT_ADX_BELOW      InvalidationConditionType = "adx_below"      // ADX低于阈值
+	ICT_MACD_CROSS     InvalidationConditionType = "macd_cross"     // MACD交叉
+	ICT_TREND_REVERSAL InvalidationConditionType = "trend_reversal" // 趋势反转
+	ICT_CUSTOM         InvalidationConditionType = "custom"         // 自定义条件
+)
+
+// ParsedInvalidationCondition 解析后的失效条件
+type ParsedInvalidationCondition struct {
+	Type       InvalidationConditionType `json:"type"`
+	Timeframe  string                    `json:"timeframe"`   // 4H, 1H, 15m
+	Indicator  string                    `json:"indicator"`   // EMA20, EMA50, RSI14等
+	Indicator2 string                    `json:"indicator2"`  // 第二个指标（用于交叉）
+	Threshold  float64                   `json:"threshold"`   // 阈值
+	Direction  string                    `json:"direction"`   // long失效/short失效
+	RawText    string                    `json:"raw_text"`    // 原始文本
+	IsValid    bool                      `json:"is_valid"`    // 是否解析成功
+	ParseError string                    `json:"parse_error"` // 解析错误信息
+}
+
+// InvalidationConditionParser 失效条件解析器
+type InvalidationConditionParser struct {
+	patterns map[InvalidationConditionType]*regexp.Regexp
+}
+
+// 全局解析器实例
+var conditionParser *InvalidationConditionParser
+
+// InitConditionParser 初始化条件解析器
+func InitConditionParser() {
+	conditionParser = &InvalidationConditionParser{
+		patterns: make(map[InvalidationConditionType]*regexp.Regexp),
+	}
+
+	// 定义各种条件的正则表达式
+	// 格式: "4H:EMA_CROSS_DOWN:EMA20:EMA50" 或 "4H:PRICE_BELOW:EMA50" 或 "1H:RSI_ABOVE:70"
+	conditionParser.patterns[ICT_EMA_CROSS_DOWN] = regexp.MustCompile(`(?i)(\d+[HhMm]):?EMA_CROSS_DOWN:?(EMA\d+):?(EMA\d+)?`)
+	conditionParser.patterns[ICT_EMA_CROSS_UP] = regexp.MustCompile(`(?i)(\d+[HhMm]):?EMA_CROSS_UP:?(EMA\d+):?(EMA\d+)?`)
+	conditionParser.patterns[ICT_PRICE_BELOW] = regexp.MustCompile(`(?i)(\d+[HhMm]):?PRICE_BELOW:?(EMA\d+|VWAP|BB_LOWER|\d+\.?\d*)`)
+	conditionParser.patterns[ICT_PRICE_ABOVE] = regexp.MustCompile(`(?i)(\d+[HhMm]):?PRICE_ABOVE:?(EMA\d+|VWAP|BB_UPPER|\d+\.?\d*)`)
+	conditionParser.patterns[ICT_RSI_ABOVE] = regexp.MustCompile(`(?i)(\d+[HhMm]):?RSI_ABOVE:?(\d+)`)
+	conditionParser.patterns[ICT_RSI_BELOW] = regexp.MustCompile(`(?i)(\d+[HhMm]):?RSI_BELOW:?(\d+)`)
+	conditionParser.patterns[ICT_ADX_BELOW] = regexp.MustCompile(`(?i)(\d+[HhMm]):?ADX_BELOW:?(\d+)`)
+	conditionParser.patterns[ICT_MACD_CROSS] = regexp.MustCompile(`(?i)(\d+[HhMm]):?MACD_CROSS:?(UP|DOWN)`)
+	conditionParser.patterns[ICT_TREND_REVERSAL] = regexp.MustCompile(`(?i)(\d+[HhMm]):?TREND_REVERSAL`)
+}
+
+// ParseInvalidationCondition 解析失效条件字符串
+func ParseInvalidationCondition(condition string) *ParsedInvalidationCondition {
+	if conditionParser == nil {
+		InitConditionParser()
+	}
+
+	result := &ParsedInvalidationCondition{
+		RawText: condition,
+		IsValid: false,
+	}
+
+	if condition == "" {
+		result.ParseError = "空条件"
+		return result
+	}
+
+	// 清理输入
+	condition = strings.TrimSpace(condition)
+
+	// 尝试匹配各种模式
+	for condType, pattern := range conditionParser.patterns {
+		matches := pattern.FindStringSubmatch(condition)
+		if len(matches) > 0 {
+			result.Type = condType
+			result.IsValid = true
+
+			// 解析时间框架
+			if len(matches) > 1 {
+				result.Timeframe = strings.ToUpper(matches[1])
+			}
+
+			// 根据条件类型解析其他参数
+			switch condType {
+			case ICT_EMA_CROSS_DOWN, ICT_EMA_CROSS_UP:
+				if len(matches) > 2 {
+					result.Indicator = strings.ToUpper(matches[2])
+				}
+				if len(matches) > 3 && matches[3] != "" {
+					result.Indicator2 = strings.ToUpper(matches[3])
+				} else {
+					// 默认与EMA50交叉
+					result.Indicator2 = "EMA50"
+				}
+
+			case ICT_PRICE_BELOW, ICT_PRICE_ABOVE:
+				if len(matches) > 2 {
+					indicator := matches[2]
+					// 检查是否是数字
+					if val, err := strconv.ParseFloat(indicator, 64); err == nil {
+						result.Threshold = val
+						result.Indicator = "PRICE"
+					} else {
+						result.Indicator = strings.ToUpper(indicator)
+					}
+				}
+
+			case ICT_RSI_ABOVE, ICT_RSI_BELOW, ICT_ADX_BELOW:
+				if len(matches) > 2 {
+					if val, err := strconv.ParseFloat(matches[2], 64); err == nil {
+						result.Threshold = val
+					}
+				}
+				result.Indicator = "RSI14"
+				if condType == ICT_ADX_BELOW {
+					result.Indicator = "ADX14"
+				}
+
+			case ICT_MACD_CROSS:
+				if len(matches) > 2 {
+					result.Direction = strings.ToUpper(matches[2])
+				}
+
+			case ICT_TREND_REVERSAL:
+				// 趋势反转不需要额外参数
+			}
+
+			return result
+		}
+	}
+
+	// 尝试解析自然语言格式（向后兼容）
+	result = parseNaturalLanguageCondition(condition)
+	return result
+}
+
+// parseNaturalLanguageCondition 解析自然语言格式的条件
+func parseNaturalLanguageCondition(condition string) *ParsedInvalidationCondition {
+	result := &ParsedInvalidationCondition{
+		RawText: condition,
+		Type:    ICT_CUSTOM,
+		IsValid: false,
+	}
+
+	condLower := strings.ToLower(condition)
+
+	// 检测时间框架
+	timeframes := []string{"4h", "1h", "15m", "30m", "1d"}
+	for _, tf := range timeframes {
+		if strings.Contains(condLower, tf) {
+			result.Timeframe = strings.ToUpper(tf)
+			break
+		}
+	}
+
+	// 检测EMA相关条件
+	if strings.Contains(condLower, "ema") {
+		// 提取EMA数字
+		emaPattern := regexp.MustCompile(`ema\s*(\d+)`)
+		emaMatches := emaPattern.FindAllStringSubmatch(condLower, -1)
+
+		if len(emaMatches) >= 1 {
+			result.Indicator = fmt.Sprintf("EMA%s", emaMatches[0][1])
+		}
+		if len(emaMatches) >= 2 {
+			result.Indicator2 = fmt.Sprintf("EMA%s", emaMatches[1][1])
+		}
+
+		if strings.Contains(condLower, "死叉") || strings.Contains(condLower, "跌破") ||
+			strings.Contains(condLower, "below") || strings.Contains(condLower, "下穿") {
+			if result.Indicator2 != "" {
+				result.Type = ICT_EMA_CROSS_DOWN
+			} else {
+				result.Type = ICT_PRICE_BELOW
+			}
+			result.IsValid = true
+		} else if strings.Contains(condLower, "金叉") || strings.Contains(condLower, "突破") ||
+			strings.Contains(condLower, "above") || strings.Contains(condLower, "上穿") {
+			if result.Indicator2 != "" {
+				result.Type = ICT_EMA_CROSS_UP
+			} else {
+				result.Type = ICT_PRICE_ABOVE
+			}
+			result.IsValid = true
+		}
+	}
+
+	// 检测RSI相关条件
+	if strings.Contains(condLower, "rsi") {
+		rsiPattern := regexp.MustCompile(`rsi\s*[<>]?\s*(\d+)`)
+		if matches := rsiPattern.FindStringSubmatch(condLower); len(matches) > 1 {
+			if val, err := strconv.ParseFloat(matches[1], 64); err == nil {
+				result.Threshold = val
+				result.Indicator = "RSI14"
+				if strings.Contains(condLower, ">") || strings.Contains(condLower, "超过") ||
+					strings.Contains(condLower, "above") {
+					result.Type = ICT_RSI_ABOVE
+				} else {
+					result.Type = ICT_RSI_BELOW
+				}
+				result.IsValid = true
+			}
+		}
+	}
+
+	// 检测ADX相关条件
+	if strings.Contains(condLower, "adx") {
+		adxPattern := regexp.MustCompile(`adx\s*[<>]?\s*(\d+)`)
+		if matches := adxPattern.FindStringSubmatch(condLower); len(matches) > 1 {
+			if val, err := strconv.ParseFloat(matches[1], 64); err == nil {
+				result.Threshold = val
+				result.Indicator = "ADX14"
+				result.Type = ICT_ADX_BELOW
+				result.IsValid = true
+			}
+		}
+	}
+
+	// 检测趋势反转
+	if strings.Contains(condLower, "趋势反转") || strings.Contains(condLower, "trend reversal") {
+		result.Type = ICT_TREND_REVERSAL
+		result.IsValid = true
+	}
+
+	// 检测MACD交叉
+	if strings.Contains(condLower, "macd") {
+		if strings.Contains(condLower, "死叉") || strings.Contains(condLower, "下穿") {
+			result.Type = ICT_MACD_CROSS
+			result.Direction = "DOWN"
+			result.IsValid = true
+		} else if strings.Contains(condLower, "金叉") || strings.Contains(condLower, "上穿") {
+			result.Type = ICT_MACD_CROSS
+			result.Direction = "UP"
+			result.IsValid = true
+		}
+	}
+
+	if !result.IsValid {
+		result.ParseError = "无法解析条件格式"
+	}
+
+	return result
+}
+
+// FormatInvalidationCondition 格式化输出失效条件（供显示用）
+func FormatInvalidationCondition(condition string) string {
+	parsed := ParseInvalidationCondition(condition)
+	if !parsed.IsValid {
+		return fmt.Sprintf("❓ %s (未能解析)", condition)
+	}
+
+	var formatted string
+	switch parsed.Type {
+	case ICT_EMA_CROSS_DOWN:
+		formatted = fmt.Sprintf("📉 %s %s下穿%s (EMA死叉)", parsed.Timeframe, parsed.Indicator, parsed.Indicator2)
+	case ICT_EMA_CROSS_UP:
+		formatted = fmt.Sprintf("📈 %s %s上穿%s (EMA金叉)", parsed.Timeframe, parsed.Indicator, parsed.Indicator2)
+	case ICT_PRICE_BELOW:
+		if parsed.Threshold > 0 {
+			formatted = fmt.Sprintf("📉 %s 价格跌破 %.4f", parsed.Timeframe, parsed.Threshold)
+		} else {
+			formatted = fmt.Sprintf("📉 %s 价格跌破 %s", parsed.Timeframe, parsed.Indicator)
+		}
+	case ICT_PRICE_ABOVE:
+		if parsed.Threshold > 0 {
+			formatted = fmt.Sprintf("📈 %s 价格突破 %.4f", parsed.Timeframe, parsed.Threshold)
+		} else {
+			formatted = fmt.Sprintf("📈 %s 价格突破 %s", parsed.Timeframe, parsed.Indicator)
+		}
+	case ICT_RSI_ABOVE:
+		formatted = fmt.Sprintf("⚠️ %s RSI > %.0f", parsed.Timeframe, parsed.Threshold)
+	case ICT_RSI_BELOW:
+		formatted = fmt.Sprintf("⚠️ %s RSI < %.0f", parsed.Timeframe, parsed.Threshold)
+	case ICT_ADX_BELOW:
+		formatted = fmt.Sprintf("⚠️ %s ADX < %.0f (趋势减弱)", parsed.Timeframe, parsed.Threshold)
+	case ICT_MACD_CROSS:
+		if parsed.Direction == "DOWN" {
+			formatted = fmt.Sprintf("📉 %s MACD死叉", parsed.Timeframe)
+		} else {
+			formatted = fmt.Sprintf("📈 %s MACD金叉", parsed.Timeframe)
+		}
+	case ICT_TREND_REVERSAL:
+		formatted = fmt.Sprintf("🔄 %s 趋势反转", parsed.Timeframe)
+	default:
+		formatted = fmt.Sprintf("📋 %s", condition)
+	}
+
+	return formatted
+}
+
+// ============================================================================
 // 🆕 优化1: 交易计划持久化到JSON文件
 // ============================================================================
 
 // TradePlan 交易计划
 type TradePlan struct {
-	ID                    string    `json:"id"`
-	Symbol                string    `json:"symbol"`
-	Direction             string    `json:"direction"`
-	EntryPrice            float64   `json:"entry_price"`
-	StopLoss              float64   `json:"stop_loss"`
-	TakeProfit            float64   `json:"take_profit"`
-	PositionSizeUSD       float64   `json:"position_size_usd"`
-	Leverage              int       `json:"leverage"`
-	EntryReason           string    `json:"entry_reason"`
-	InvalidationCondition string    `json:"invalidation_condition"`
-	InvalidationPrice     float64   `json:"invalidation_price"`
-	MinHoldMinutes        int       `json:"min_hold_minutes"`
-	CreatedAt             time.Time `json:"created_at"`
-	Status                string    `json:"status"`
-	Confidence            int       `json:"confidence"`
-	RiskUSD               float64   `json:"risk_usd"`
-	PartialCloseAt1R3     bool      `json:"partial_close_at_1r3"`
-	PartialCloseAt1R5     bool      `json:"partial_close_at_1r5"`
-	TrailingStopActive    bool      `json:"trailing_stop_active"`
-	CurrentStopLoss       float64   `json:"current_stop_loss"`
+	ID                          string                       `json:"id"`
+	Symbol                      string                       `json:"symbol"`
+	Direction                   string                       `json:"direction"`
+	EntryPrice                  float64                      `json:"entry_price"`
+	StopLoss                    float64                      `json:"stop_loss"`
+	TakeProfit                  float64                      `json:"take_profit"`
+	PositionSizeUSD             float64                      `json:"position_size_usd"`
+	Leverage                    int                          `json:"leverage"`
+	EntryReason                 string                       `json:"entry_reason"`
+	InvalidationCondition       string                       `json:"invalidation_condition"`
+	ParsedInvalidationCondition *ParsedInvalidationCondition `json:"parsed_invalidation_condition,omitempty"`
+	InvalidationPrice           float64                      `json:"invalidation_price"`
+	MinHoldMinutes              int                          `json:"min_hold_minutes"`
+	CreatedAt                   time.Time                    `json:"created_at"`
+	Status                      string                       `json:"status"`
+	Confidence                  int                          `json:"confidence"`
+	RiskUSD                     float64                      `json:"risk_usd"`
+	PartialCloseAt1R3           bool                         `json:"partial_close_at_1r3"`
+	PartialCloseAt1R5           bool                         `json:"partial_close_at_1r5"`
+	TrailingStopActive          bool                         `json:"trailing_stop_active"`
+	CurrentStopLoss             float64                      `json:"current_stop_loss"`
 }
 
 // TradePlanManager 交易计划管理器（带持久化）
@@ -142,6 +443,8 @@ func InitPlanManager(dataDir string) error {
 		filePath: filePath,
 		autoSave: true,
 	}
+	// 初始化条件解析器
+	InitConditionParser()
 
 	// 尝试从文件加载
 	if err := planManager.loadFromFile(); err != nil {
@@ -274,8 +577,15 @@ func (m *TradePlanManager) SetPlan(plan *TradePlan) {
 	m.plans[plan.Symbol] = plan
 	m.mu.Unlock()
 
+	// 格式化输出失效条件
+	invalidationDisplay := "无"
+	if plan.InvalidationCondition != "" {
+		invalidationDisplay = FormatInvalidationCondition(plan.InvalidationCondition)
+	}
+
 	log.Printf("📋 创建交易计划: %s %s @ %.4f, SL=%.4f, TP=%.4f, 最小持仓=%d分钟",
 		plan.Symbol, plan.Direction, plan.EntryPrice, plan.StopLoss, plan.TakeProfit, plan.MinHoldMinutes)
+	log.Printf("   └─ 失效条件: %s", invalidationDisplay)
 
 	m.autoSaveIfEnabled()
 }
@@ -1065,7 +1375,23 @@ func (e *PositionEvaluator) checkPlanInvalidation() (bool, string) {
 	if e.MarketData == nil {
 		return false, ""
 	}
+	// ========== 1. 检查结构化失效条件 ==========
+	if e.Plan.ParsedInvalidationCondition != nil && e.Plan.ParsedInvalidationCondition.IsValid {
+		if invalidated, reason := e.checkParsedInvalidationCondition(); invalidated {
+			return true, reason
+		}
+	} else if e.Plan.InvalidationCondition != "" {
+		// 尝试解析并检查
+		parsed := ParseInvalidationCondition(e.Plan.InvalidationCondition)
+		if parsed.IsValid {
+			e.Plan.ParsedInvalidationCondition = parsed
+			if invalidated, reason := e.checkParsedInvalidationCondition(); invalidated {
+				return true, reason
+			}
+		}
+	}
 
+	// ========== 2. 默认的趋势反转检查 ==========
 	if market.Is4HTrendReversed(e.MarketData, e.Plan.Direction) {
 		adx, diPlus, diMinus := market.GetTrendInfo(e.MarketData)
 
@@ -1078,6 +1404,7 @@ func (e *PositionEvaluator) checkPlanInvalidation() (bool, string) {
 		}
 	}
 
+	// ========== 3. EMA交叉检查 ==========
 	if e.MarketData.LongerTermContext != nil {
 		ctx := e.MarketData.LongerTermContext
 		if e.Plan.Direction == "long" && ctx.EMA20 < ctx.EMA50 {
@@ -1090,6 +1417,7 @@ func (e *PositionEvaluator) checkPlanInvalidation() (bool, string) {
 		}
 	}
 
+	// ========== 4. 价格失效线检查 ==========
 	if e.Plan.InvalidationPrice > 0 {
 		currentPrice := e.MarketData.CurrentPrice
 		if e.Plan.Direction == "long" && currentPrice < e.Plan.InvalidationPrice {
@@ -1103,6 +1431,415 @@ func (e *PositionEvaluator) checkPlanInvalidation() (bool, string) {
 	}
 
 	return false, ""
+}
+
+// checkParsedInvalidationCondition 检查解析后的失效条件
+func (e *PositionEvaluator) checkParsedInvalidationCondition() (bool, string) {
+	cond := e.Plan.ParsedInvalidationCondition
+	if cond == nil || !cond.IsValid {
+		return false, ""
+	}
+
+	// 获取对应时间框架的数据
+	ctx := e.getContextForTimeframe(cond.Timeframe)
+	if ctx == nil {
+		log.Printf("⚠️ 无法获取 %s 时间框架数据", cond.Timeframe)
+		return false, ""
+	}
+
+	switch cond.Type {
+	case ICT_EMA_CROSS_DOWN:
+		return e.checkEMACrossDown(ctx, cond)
+
+	case ICT_EMA_CROSS_UP:
+		return e.checkEMACrossUp(ctx, cond)
+
+	case ICT_PRICE_BELOW:
+		return e.checkPriceBelow(ctx, cond)
+
+	case ICT_PRICE_ABOVE:
+		return e.checkPriceAbove(ctx, cond)
+
+	case ICT_RSI_ABOVE:
+		return e.checkRSIAbove(ctx, cond)
+
+	case ICT_RSI_BELOW:
+		return e.checkRSIBelow(ctx, cond)
+
+	case ICT_ADX_BELOW:
+		return e.checkADXBelow(ctx, cond)
+
+	case ICT_MACD_CROSS:
+		return e.checkMACDCross(ctx, cond)
+
+	case ICT_TREND_REVERSAL:
+		return e.checkTrendReversal(ctx, cond)
+
+	default:
+		log.Printf("⚠️ 未知的失效条件类型: %s", cond.Type)
+		return false, ""
+	}
+}
+
+// InvalidationCheckContext 失效条件检查上下文
+type InvalidationCheckContext struct {
+	EMA20        float64
+	EMA50        float64
+	RSI14        float64
+	ADX14        float64
+	DIPlus       float64
+	DIMinus      float64
+	MACD         float64
+	MACDSignal   float64
+	MACDHist     float64
+	CurrentPrice float64
+	VWAP         float64
+	BBUpper      float64
+	BBLower      float64
+	Timeframe    string
+}
+
+// getContextForTimeframe 获取指定时间框架的上下文
+func (e *PositionEvaluator) getContextForTimeframe(timeframe string) *InvalidationCheckContext {
+	if e.MarketData == nil {
+		return nil
+	}
+
+	ctx := &InvalidationCheckContext{
+		CurrentPrice: e.MarketData.CurrentPrice,
+		Timeframe:    timeframe,
+	}
+
+	// 根据时间框架选择数据源
+	switch strings.ToUpper(timeframe) {
+	case "4H":
+		if e.MarketData.LongerTermContext != nil {
+			ltc := e.MarketData.LongerTermContext
+			ctx.EMA20 = ltc.EMA20
+			ctx.EMA50 = ltc.EMA50
+			ctx.BBUpper = ltc.BollingerUpper
+			ctx.BBLower = ltc.BollingerLower
+
+			// 从切片获取最新值
+			ctx.RSI14 = market.GetLastValue(ltc.RSI14Values)
+			ctx.ADX14 = market.GetLastValue(ltc.ADXValues)
+			ctx.DIPlus = market.GetLastValue(ltc.DIPlus)
+			ctx.DIMinus = market.GetLastValue(ltc.DIMinus)
+			ctx.MACD = market.GetLastValue(ltc.MACDValues)
+			ctx.MACDSignal = market.GetLastValue(ltc.MACDSignal)
+			ctx.MACDHist = market.GetLastValue(ltc.MACDHist)
+		}
+
+	case "1H":
+		if e.MarketData.MidTermSeries1h != nil {
+			mtc := e.MarketData.MidTermSeries1h
+			// 从切片获取最新值
+			ctx.EMA20 = market.GetLastValue(mtc.EMA20Values)
+			ctx.EMA50 = market.GetLastValue(mtc.EMA50Values)
+			ctx.RSI14 = market.GetLastValue(mtc.RSI14Values)
+			ctx.ADX14 = market.GetLastValue(mtc.ADXValues)
+			ctx.MACD = market.GetLastValue(mtc.MACDValues)
+			ctx.MACDSignal = market.GetLastValue(mtc.MACDSignal)
+			ctx.MACDHist = market.GetLastValue(mtc.MACDHist)
+			// 注意：MidTermData1h 没有 DIPlus/DIMinus，使用顶层数据
+			ctx.DIPlus = e.MarketData.CurrentDIPlus
+			ctx.DIMinus = e.MarketData.CurrentDIMinus
+		} else {
+			// 回退到顶层 Current* 数据
+			ctx.EMA20 = e.MarketData.CurrentEMA20
+			ctx.EMA50 = e.MarketData.CurrentEMA50
+			ctx.RSI14 = e.MarketData.CurrentRSI14
+			ctx.ADX14 = e.MarketData.CurrentADX
+			ctx.DIPlus = e.MarketData.CurrentDIPlus
+			ctx.DIMinus = e.MarketData.CurrentDIMinus
+			ctx.MACD = e.MarketData.CurrentMACD
+		}
+
+	case "15M", "30M":
+		if e.MarketData.MidTermSeries15m != nil {
+			mtc := e.MarketData.MidTermSeries15m
+			// 从切片获取最新值
+			ctx.EMA20 = market.GetLastValue(mtc.EMA20Values)
+			ctx.EMA50 = market.GetLastValue(mtc.EMA50Values)
+			ctx.RSI14 = market.GetLastValue(mtc.RSI14Values)
+			ctx.ADX14 = market.GetLastValue(mtc.ADXValues)
+			ctx.MACD = market.GetLastValue(mtc.MACDValues)
+			ctx.MACDSignal = market.GetLastValue(mtc.MACDSignal)
+			ctx.MACDHist = market.GetLastValue(mtc.MACDHist)
+			// MidTermData15m 没有 DIPlus/DIMinus，使用顶层数据
+			ctx.DIPlus = e.MarketData.CurrentDIPlus
+			ctx.DIMinus = e.MarketData.CurrentDIMinus
+		} else {
+			// 回退到顶层数据
+			ctx.EMA20 = e.MarketData.CurrentEMA20
+			ctx.EMA50 = e.MarketData.CurrentEMA50
+			ctx.RSI14 = e.MarketData.CurrentRSI14
+			ctx.ADX14 = e.MarketData.CurrentADX
+			ctx.DIPlus = e.MarketData.CurrentDIPlus
+			ctx.DIMinus = e.MarketData.CurrentDIMinus
+			ctx.MACD = e.MarketData.CurrentMACD
+		}
+
+	default:
+		// 默认使用顶层 Current* 数据（基于3分钟最新数据计算）
+		ctx.EMA20 = e.MarketData.CurrentEMA20
+		ctx.EMA50 = e.MarketData.CurrentEMA50
+		ctx.RSI14 = e.MarketData.CurrentRSI14
+		ctx.ADX14 = e.MarketData.CurrentADX
+		ctx.DIPlus = e.MarketData.CurrentDIPlus
+		ctx.DIMinus = e.MarketData.CurrentDIMinus
+		ctx.MACD = e.MarketData.CurrentMACD
+		// 尝试从 IntradaySeries 获取 MACD 信号线和柱状图
+		if e.MarketData.IntradaySeries != nil {
+			ctx.MACDSignal = market.GetLastValue(e.MarketData.IntradaySeries.MACDSignal)
+			ctx.MACDHist = market.GetLastValue(e.MarketData.IntradaySeries.MACDHist)
+		}
+	}
+
+	return ctx
+}
+
+// checkEMACrossDown 检查EMA死叉
+func (e *PositionEvaluator) checkEMACrossDown(ctx *InvalidationCheckContext, cond *ParsedInvalidationCondition) (bool, string) {
+	ema1 := e.getEMAValue(ctx, cond.Indicator)
+	ema2 := e.getEMAValue(ctx, cond.Indicator2)
+
+	if ema1 == 0 || ema2 == 0 {
+		return false, ""
+	}
+
+	// 检查是否死叉（短期EMA低于长期EMA）
+	if ema1 < ema2 {
+		// 对于多单，EMA死叉是失效信号
+		if e.Plan.Direction == "long" {
+			return true, fmt.Sprintf("%s EMA死叉: %s(%.4f) < %s(%.4f)，计划失效",
+				cond.Timeframe, cond.Indicator, ema1, cond.Indicator2, ema2)
+		}
+	}
+
+	return false, ""
+}
+
+// checkEMACrossUp 检查EMA金叉
+func (e *PositionEvaluator) checkEMACrossUp(ctx *InvalidationCheckContext, cond *ParsedInvalidationCondition) (bool, string) {
+	ema1 := e.getEMAValue(ctx, cond.Indicator)
+	ema2 := e.getEMAValue(ctx, cond.Indicator2)
+
+	if ema1 == 0 || ema2 == 0 {
+		return false, ""
+	}
+
+	// 检查是否金叉（短期EMA高于长期EMA）
+	if ema1 > ema2 {
+		// 对于空单，EMA金叉是失效信号
+		if e.Plan.Direction == "short" {
+			return true, fmt.Sprintf("%s EMA金叉: %s(%.4f) > %s(%.4f)，计划失效",
+				cond.Timeframe, cond.Indicator, ema1, cond.Indicator2, ema2)
+		}
+	}
+
+	return false, ""
+}
+
+// checkPriceBelow 检查价格跌破
+func (e *PositionEvaluator) checkPriceBelow(ctx *InvalidationCheckContext, cond *ParsedInvalidationCondition) (bool, string) {
+	var targetPrice float64
+
+	if cond.Threshold > 0 {
+		targetPrice = cond.Threshold
+	} else {
+		targetPrice = e.getIndicatorValue(ctx, cond.Indicator)
+	}
+
+	if targetPrice == 0 {
+		return false, ""
+	}
+
+	if ctx.CurrentPrice < targetPrice {
+		// 对于多单，价格跌破是失效信号
+		if e.Plan.Direction == "long" {
+			indicator := cond.Indicator
+			if cond.Threshold > 0 {
+				indicator = fmt.Sprintf("%.4f", cond.Threshold)
+			}
+			return true, fmt.Sprintf("%s 价格(%.4f)跌破%s(%.4f)，计划失效",
+				cond.Timeframe, ctx.CurrentPrice, indicator, targetPrice)
+		}
+	}
+
+	return false, ""
+}
+
+// checkPriceAbove 检查价格突破
+func (e *PositionEvaluator) checkPriceAbove(ctx *InvalidationCheckContext, cond *ParsedInvalidationCondition) (bool, string) {
+	var targetPrice float64
+
+	if cond.Threshold > 0 {
+		targetPrice = cond.Threshold
+	} else {
+		targetPrice = e.getIndicatorValue(ctx, cond.Indicator)
+	}
+
+	if targetPrice == 0 {
+		return false, ""
+	}
+
+	if ctx.CurrentPrice > targetPrice {
+		// 对于空单，价格突破是失效信号
+		if e.Plan.Direction == "short" {
+			indicator := cond.Indicator
+			if cond.Threshold > 0 {
+				indicator = fmt.Sprintf("%.4f", cond.Threshold)
+			}
+			return true, fmt.Sprintf("%s 价格(%.4f)突破%s(%.4f)，计划失效",
+				cond.Timeframe, ctx.CurrentPrice, indicator, targetPrice)
+		}
+	}
+
+	return false, ""
+}
+
+// checkRSIAbove 检查RSI超过阈值
+func (e *PositionEvaluator) checkRSIAbove(ctx *InvalidationCheckContext, cond *ParsedInvalidationCondition) (bool, string) {
+	if ctx.RSI14 == 0 || cond.Threshold == 0 {
+		return false, ""
+	}
+
+	if ctx.RSI14 > cond.Threshold {
+		// RSI超买，对空单可能是失效信号
+		if e.Plan.Direction == "short" && cond.Threshold >= 70 {
+			return true, fmt.Sprintf("%s RSI(%.1f) > %.0f 超买，计划失效",
+				cond.Timeframe, ctx.RSI14, cond.Threshold)
+		}
+		// 也可用于多单的获利了结信号
+		if e.Plan.Direction == "long" && cond.Threshold >= 80 {
+			return true, fmt.Sprintf("%s RSI(%.1f) > %.0f 极度超买，建议获利了结",
+				cond.Timeframe, ctx.RSI14, cond.Threshold)
+		}
+	}
+
+	return false, ""
+}
+
+// checkRSIBelow 检查RSI低于阈值
+func (e *PositionEvaluator) checkRSIBelow(ctx *InvalidationCheckContext, cond *ParsedInvalidationCondition) (bool, string) {
+	if ctx.RSI14 == 0 || cond.Threshold == 0 {
+		return false, ""
+	}
+
+	if ctx.RSI14 < cond.Threshold {
+		// RSI超卖，对多单可能是失效信号
+		if e.Plan.Direction == "long" && cond.Threshold <= 30 {
+			return true, fmt.Sprintf("%s RSI(%.1f) < %.0f 超卖，计划失效",
+				cond.Timeframe, ctx.RSI14, cond.Threshold)
+		}
+		// 也可用于空单的获利了结信号
+		if e.Plan.Direction == "short" && cond.Threshold <= 20 {
+			return true, fmt.Sprintf("%s RSI(%.1f) < %.0f 极度超卖，建议获利了结",
+				cond.Timeframe, ctx.RSI14, cond.Threshold)
+		}
+	}
+
+	return false, ""
+}
+
+// checkADXBelow 检查ADX低于阈值（趋势减弱）
+func (e *PositionEvaluator) checkADXBelow(ctx *InvalidationCheckContext, cond *ParsedInvalidationCondition) (bool, string) {
+	if ctx.ADX14 == 0 || cond.Threshold == 0 {
+		return false, ""
+	}
+
+	if ctx.ADX14 < cond.Threshold {
+		return true, fmt.Sprintf("%s ADX(%.1f) < %.0f 趋势减弱，计划失效",
+			cond.Timeframe, ctx.ADX14, cond.Threshold)
+	}
+
+	return false, ""
+}
+
+// checkMACDCross 检查MACD交叉
+func (e *PositionEvaluator) checkMACDCross(ctx *InvalidationCheckContext, cond *ParsedInvalidationCondition) (bool, string) {
+	if ctx.MACD == 0 && ctx.MACDSignal == 0 {
+		return false, ""
+	}
+
+	if cond.Direction == "DOWN" {
+		// MACD死叉：MACD线下穿信号线
+		if ctx.MACD < ctx.MACDSignal && ctx.MACDHist < 0 {
+			if e.Plan.Direction == "long" {
+				return true, fmt.Sprintf("%s MACD死叉(MACD=%.4f < Signal=%.4f)，计划失效",
+					cond.Timeframe, ctx.MACD, ctx.MACDSignal)
+			}
+		}
+	} else if cond.Direction == "UP" {
+		// MACD金叉：MACD线上穿信号线
+		if ctx.MACD > ctx.MACDSignal && ctx.MACDHist > 0 {
+			if e.Plan.Direction == "short" {
+				return true, fmt.Sprintf("%s MACD金叉(MACD=%.4f > Signal=%.4f)，计划失效",
+					cond.Timeframe, ctx.MACD, ctx.MACDSignal)
+			}
+		}
+	}
+
+	return false, ""
+}
+
+// checkTrendReversal 检查趋势反转
+func (e *PositionEvaluator) checkTrendReversal(ctx *InvalidationCheckContext, cond *ParsedInvalidationCondition) (bool, string) {
+	if ctx.ADX14 == 0 {
+		return false, ""
+	}
+
+	// ADX > 25 表示有明确趋势
+	if ctx.ADX14 > 25 {
+		if e.Plan.Direction == "long" && ctx.DIMinus > ctx.DIPlus {
+			return true, fmt.Sprintf("%s 趋势反转: DI-(%.1f) > DI+(%.1f)，计划失效",
+				cond.Timeframe, ctx.DIMinus, ctx.DIPlus)
+		}
+		if e.Plan.Direction == "short" && ctx.DIPlus > ctx.DIMinus {
+			return true, fmt.Sprintf("%s 趋势反转: DI+(%.1f) > DI-(%.1f)，计划失效",
+				cond.Timeframe, ctx.DIPlus, ctx.DIMinus)
+		}
+	}
+
+	return false, ""
+}
+
+// getEMAValue 获取EMA值
+func (e *PositionEvaluator) getEMAValue(ctx *InvalidationCheckContext, indicator string) float64 {
+	indicator = strings.ToUpper(indicator)
+	switch indicator {
+	case "EMA20":
+		return ctx.EMA20
+	case "EMA50":
+		return ctx.EMA50
+	default:
+		// 尝试解析EMAxx格式
+		if strings.HasPrefix(indicator, "EMA") {
+			// 如果是其他EMA，返回0表示不支持
+			log.Printf("⚠️ 不支持的EMA指标: %s", indicator)
+		}
+		return 0
+	}
+}
+
+// getIndicatorValue 获取指标值
+func (e *PositionEvaluator) getIndicatorValue(ctx *InvalidationCheckContext, indicator string) float64 {
+	indicator = strings.ToUpper(indicator)
+	switch indicator {
+	case "EMA20":
+		return ctx.EMA20
+	case "EMA50":
+		return ctx.EMA50
+	case "VWAP":
+		return ctx.VWAP
+	case "BB_UPPER":
+		return ctx.BBUpper
+	case "BB_LOWER":
+		return ctx.BBLower
+	default:
+		return 0
+	}
 }
 
 // ============================================================================
@@ -1563,24 +2300,34 @@ func CreateTradePlanFromDecision(d *Decision, currentPrice float64) *TradePlan {
 		direction = "short"
 	}
 
+	// 解析失效条件
+	var parsedCondition *ParsedInvalidationCondition
+	if d.InvalidationCondition != "" {
+		parsedCondition = ParseInvalidationCondition(d.InvalidationCondition)
+		if !parsedCondition.IsValid {
+			log.Printf("⚠️ 失效条件解析失败: %s - %s", d.InvalidationCondition, parsedCondition.ParseError)
+		}
+	}
+
 	plan := &TradePlan{
-		ID:                    fmt.Sprintf("%s_%d", d.Symbol, time.Now().UnixNano()),
-		Symbol:                d.Symbol,
-		Direction:             direction,
-		EntryPrice:            currentPrice,
-		StopLoss:              d.StopLoss,
-		TakeProfit:            d.TakeProfit,
-		CurrentStopLoss:       d.StopLoss,
-		PositionSizeUSD:       d.PositionSizeUSD,
-		Leverage:              d.Leverage,
-		EntryReason:           d.Reasoning,
-		InvalidationCondition: d.InvalidationCondition,
-		InvalidationPrice:     d.InvalidationPrice,
-		MinHoldMinutes:        d.MinHoldMinutes,
-		CreatedAt:             time.Now(),
-		Status:                "ACTIVE",
-		Confidence:            d.Confidence,
-		RiskUSD:               d.RiskUSD,
+		ID:                          fmt.Sprintf("%s_%d", d.Symbol, time.Now().UnixNano()),
+		Symbol:                      d.Symbol,
+		Direction:                   direction,
+		EntryPrice:                  currentPrice,
+		StopLoss:                    d.StopLoss,
+		TakeProfit:                  d.TakeProfit,
+		CurrentStopLoss:             d.StopLoss,
+		PositionSizeUSD:             d.PositionSizeUSD,
+		Leverage:                    d.Leverage,
+		EntryReason:                 d.Reasoning,
+		InvalidationCondition:       d.InvalidationCondition,
+		ParsedInvalidationCondition: parsedCondition,
+		InvalidationPrice:           d.InvalidationPrice,
+		MinHoldMinutes:              d.MinHoldMinutes,
+		CreatedAt:                   time.Now(),
+		Status:                      "ACTIVE",
+		Confidence:                  d.Confidence,
+		RiskUSD:                     d.RiskUSD,
 	}
 
 	if plan.MinHoldMinutes == 0 {
@@ -1904,6 +2651,24 @@ func buildSystemPromptOptimized(ctx *Context) string {
 	sb.WriteString("5. **设置止损止盈** → 止损=ATR×2.5, RR≥1:3.5\n")
 	sb.WriteString("6. **定义失效条件** → 什么情况下计划失效\n\n")
 
+	// 🆕 新增：失效条件格式说明
+	sb.WriteString("# 🚫 失效条件格式（重要！）\n\n")
+	sb.WriteString("使用**结构化格式**定义失效条件，系统会自动监控并触发平仓。\n\n")
+	sb.WriteString("**格式**: `时间框架:条件类型:参数1:参数2`\n\n")
+	sb.WriteString("**支持的条件类型**:\n")
+	sb.WriteString("| 类型 | 格式 | 说明 | 示例 |\n")
+	sb.WriteString("|------|------|------|------|\n")
+	sb.WriteString("| EMA死叉 | `TF:EMA_CROSS_DOWN:EMA短:EMA长` | 短期EMA下穿长期EMA | `4H:EMA_CROSS_DOWN:EMA20:EMA50` |\n")
+	sb.WriteString("| EMA金叉 | `TF:EMA_CROSS_UP:EMA短:EMA长` | 短期EMA上穿长期EMA | `4H:EMA_CROSS_UP:EMA20:EMA50` |\n")
+	sb.WriteString("| 价格跌破 | `TF:PRICE_BELOW:指标或价格` | 价格跌破指定位置 | `4H:PRICE_BELOW:EMA50` |\n")
+	sb.WriteString("| 价格突破 | `TF:PRICE_ABOVE:指标或价格` | 价格突破指定位置 | `1H:PRICE_ABOVE:95000` |\n")
+	sb.WriteString("| RSI超买 | `TF:RSI_ABOVE:阈值` | RSI超过阈值 | `4H:RSI_ABOVE:70` |\n")
+	sb.WriteString("| RSI超卖 | `TF:RSI_BELOW:阈值` | RSI低于阈值 | `4H:RSI_BELOW:30` |\n")
+	sb.WriteString("| ADX减弱 | `TF:ADX_BELOW:阈值` | ADX低于阈值 | `4H:ADX_BELOW:20` |\n")
+	sb.WriteString("| MACD交叉 | `TF:MACD_CROSS:方向` | MACD交叉 | `4H:MACD_CROSS:DOWN` |\n")
+	sb.WriteString("| 趋势反转 | `TF:TREND_REVERSAL` | DI反转 | `4H:TREND_REVERSAL` |\n\n")
+	sb.WriteString("**时间框架**: `4H`, `1H`, `15M`, `30M`\n\n")
+
 	sb.WriteString("# 💵 波动率自适应仓位\n\n")
 	sb.WriteString("```\n")
 	sb.WriteString("止损距离 = ATR14 × 倍数（山寨2.5，BTC/ETH 1.8）\n")
@@ -1932,9 +2697,29 @@ func buildSystemPromptOptimized(ctx *Context) string {
 	sb.WriteString("    \"confidence\": 85,\n")
 	sb.WriteString("    \"risk_usd\": 10,\n")
 	sb.WriteString("    \"invalidation_price\": 96000,\n")
-	sb.WriteString("    \"invalidation_condition\": \"4H收盘跌破EMA50\",\n")
+	sb.WriteString("    \"invalidation_condition\": \"4H:EMA_CROSS_DOWN:EMA20:EMA50\",\n")
 	sb.WriteString("    \"min_hold_minutes\": 30,\n")
 	sb.WriteString("    \"reasoning\": \"BTC强势+4H突破+资金费率中性\"\n")
+	sb.WriteString("  }\n")
+	sb.WriteString("]\n")
+	sb.WriteString("```\n\n")
+
+	sb.WriteString("**空单示例**:\n")
+	sb.WriteString("```json\n")
+	sb.WriteString("[\n")
+	sb.WriteString("  {\n")
+	sb.WriteString("    \"symbol\": \"ETHUSDT\",\n")
+	sb.WriteString("    \"action\": \"open_short\",\n")
+	sb.WriteString(fmt.Sprintf("    \"leverage\": %d,\n", btcEthLeverage))
+	sb.WriteString("    \"position_size_usd\": 80,\n")
+	sb.WriteString("    \"stop_loss\": 3500,\n")
+	sb.WriteString("    \"take_profit\": 3200,\n")
+	sb.WriteString("    \"confidence\": 82,\n")
+	sb.WriteString("    \"risk_usd\": 8,\n")
+	sb.WriteString("    \"invalidation_price\": 3450,\n")
+	sb.WriteString("    \"invalidation_condition\": \"4H:EMA_CROSS_UP:EMA20:EMA50\",\n")
+	sb.WriteString("    \"min_hold_minutes\": 30,\n")
+	sb.WriteString("    \"reasoning\": \"ETH弱势+4H跌破支撑+资金费率偏高\"\n")
 	sb.WriteString("  }\n")
 	sb.WriteString("]\n")
 	sb.WriteString("```\n\n")
@@ -1945,7 +2730,7 @@ func buildSystemPromptOptimized(ctx *Context) string {
 	sb.WriteString("```\n\n")
 
 	sb.WriteString("---\n")
-	sb.WriteString("**核心原则**: 宁可错过，不可做错 | 风险回报比≥1:3 | BTC是龙头\n")
+	sb.WriteString("**核心原则**: 宁可错过，不可做错 | 风险回报比≥1:3 | BTC是龙头 | 失效条件必须明确\n")
 
 	return sb.String()
 }
@@ -2211,8 +2996,145 @@ func GetPlanStatus() string {
 		holdingTime := time.Since(plan.CreatedAt).Minutes()
 		sb.WriteString(fmt.Sprintf("  - %s %s: 持仓%.0f分钟, SL=%.4f, TP=%.4f\n",
 			plan.Symbol, plan.Direction, holdingTime, plan.CurrentStopLoss, plan.TakeProfit))
+
+		// 格式化输出失效条件
+		if plan.InvalidationCondition != "" {
+			formattedCond := FormatInvalidationCondition(plan.InvalidationCondition)
+			sb.WriteString(fmt.Sprintf("    └─ 失效条件: %s\n", formattedCond))
+		}
+		if plan.InvalidationPrice > 0 {
+			sb.WriteString(fmt.Sprintf("    └─ 失效价格: %.4f\n", plan.InvalidationPrice))
+		}
 	}
 	return sb.String()
+}
+
+// GetPlanDetails 获取计划详情（用于日志和调试）
+func GetPlanDetails(symbol string) string {
+	plan := planManager.GetPlan(symbol)
+	if plan == nil {
+		return fmt.Sprintf("未找到 %s 的交易计划", symbol)
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("═══ %s 交易计划详情 ═══\n", symbol))
+	sb.WriteString(fmt.Sprintf("方向: %s\n", plan.Direction))
+	sb.WriteString(fmt.Sprintf("入场价: %.4f\n", plan.EntryPrice))
+	sb.WriteString(fmt.Sprintf("止损: %.4f (当前: %.4f)\n", plan.StopLoss, plan.CurrentStopLoss))
+	sb.WriteString(fmt.Sprintf("止盈: %.4f\n", plan.TakeProfit))
+	sb.WriteString(fmt.Sprintf("仓位: %.2f USD\n", plan.PositionSizeUSD))
+	sb.WriteString(fmt.Sprintf("杠杆: %dx\n", plan.Leverage))
+	sb.WriteString(fmt.Sprintf("置信度: %d%%\n", plan.Confidence))
+	sb.WriteString(fmt.Sprintf("最小持仓: %d分钟\n", plan.MinHoldMinutes))
+	sb.WriteString(fmt.Sprintf("创建时间: %s\n", plan.CreatedAt.Format("2006-01-02 15:04:05")))
+	sb.WriteString(fmt.Sprintf("状态: %s\n", plan.Status))
+
+	sb.WriteString("\n--- 失效条件 ---\n")
+	if plan.InvalidationPrice > 0 {
+		sb.WriteString(fmt.Sprintf("失效价格: %.4f\n", plan.InvalidationPrice))
+	}
+	if plan.InvalidationCondition != "" {
+		sb.WriteString(fmt.Sprintf("原始条件: %s\n", plan.InvalidationCondition))
+		sb.WriteString(fmt.Sprintf("格式化: %s\n", FormatInvalidationCondition(plan.InvalidationCondition)))
+
+		if plan.ParsedInvalidationCondition != nil {
+			pc := plan.ParsedInvalidationCondition
+			sb.WriteString(fmt.Sprintf("解析状态: %v\n", pc.IsValid))
+			if pc.IsValid {
+				sb.WriteString(fmt.Sprintf("  类型: %s\n", pc.Type))
+				sb.WriteString(fmt.Sprintf("  时间框架: %s\n", pc.Timeframe))
+				if pc.Indicator != "" {
+					sb.WriteString(fmt.Sprintf("  指标1: %s\n", pc.Indicator))
+				}
+				if pc.Indicator2 != "" {
+					sb.WriteString(fmt.Sprintf("  指标2: %s\n", pc.Indicator2))
+				}
+				if pc.Threshold > 0 {
+					sb.WriteString(fmt.Sprintf("  阈值: %.4f\n", pc.Threshold))
+				}
+			} else {
+				sb.WriteString(fmt.Sprintf("  解析错误: %s\n", pc.ParseError))
+			}
+		}
+	} else {
+		sb.WriteString("未设置失效条件\n")
+	}
+
+	sb.WriteString("\n--- 入场理由 ---\n")
+	sb.WriteString(plan.EntryReason + "\n")
+
+	return sb.String()
+}
+
+// ============================================================================
+// 失效条件验证工具
+// ============================================================================
+
+// ValidateInvalidationCondition 验证失效条件格式是否正确
+func ValidateInvalidationCondition(condition string) (bool, string) {
+	if condition == "" {
+		return false, "失效条件为空"
+	}
+
+	parsed := ParseInvalidationCondition(condition)
+	if !parsed.IsValid {
+		return false, fmt.Sprintf("解析失败: %s", parsed.ParseError)
+	}
+
+	// 检查时间框架
+	validTimeframes := map[string]bool{"4H": true, "1H": true, "15M": true, "30M": true, "1D": true}
+	if parsed.Timeframe != "" && !validTimeframes[parsed.Timeframe] {
+		return false, fmt.Sprintf("不支持的时间框架: %s", parsed.Timeframe)
+	}
+
+	return true, FormatInvalidationCondition(condition)
+}
+
+// GetSupportedInvalidationConditions 获取支持的失效条件类型说明
+func GetSupportedInvalidationConditions() string {
+	return `
+支持的失效条件格式:
+═══════════════════════════════════════════════════════════════
+
+1. EMA死叉 (多单失效)
+   格式: 4H:EMA_CROSS_DOWN:EMA20:EMA50
+   说明: 当4小时EMA20下穿EMA50时触发
+
+2. EMA金叉 (空单失效)
+   格式: 4H:EMA_CROSS_UP:EMA20:EMA50
+   说明: 当4小时EMA20上穿EMA50时触发
+
+3. 价格跌破 (多单失效)
+   格式: 4H:PRICE_BELOW:EMA50 或 4H:PRICE_BELOW:95000
+   说明: 当价格跌破指定EMA或价格时触发
+
+4. 价格突破 (空单失效)
+   格式: 1H:PRICE_ABOVE:EMA20 或 1H:PRICE_ABOVE:100000
+   说明: 当价格突破指定EMA或价格时触发
+
+5. RSI超买 (空单失效)
+   格式: 4H:RSI_ABOVE:70
+   说明: 当RSI超过指定阈值时触发
+
+6. RSI超卖 (多单失效)
+   格式: 4H:RSI_BELOW:30
+   说明: 当RSI低于指定阈值时触发
+
+7. ADX减弱 (任意方向)
+   格式: 4H:ADX_BELOW:20
+   说明: 当ADX低于阈值表示趋势减弱
+
+8. MACD交叉
+   格式: 4H:MACD_CROSS:DOWN 或 4H:MACD_CROSS:UP
+   说明: MACD死叉/金叉
+
+9. 趋势反转
+   格式: 4H:TREND_REVERSAL
+   说明: DI+/DI-反转
+
+═══════════════════════════════════════════════════════════════
+时间框架: 4H, 1H, 30M, 15M, 1D
+`
 }
 
 // GetPlanBySymbol 根据symbol获取计划
