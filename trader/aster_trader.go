@@ -38,6 +38,218 @@ type AsterTrader struct {
 	mu              sync.RWMutex
 }
 
+// GetOrderHistory 获取订单历史
+func (t *AsterTrader) GetOrderHistory(symbol string, startTime, endTime int64, limit int) ([]OrderRecord, error) {
+	params := map[string]interface{}{
+		"symbol": symbol,
+		"limit":  limit,
+	}
+
+	if startTime > 0 {
+		params["startTime"] = startTime
+	}
+	if endTime > 0 {
+		params["endTime"] = endTime
+	}
+
+	body, err := t.request("GET", "/fapi/v3/allOrders", params)
+	if err != nil {
+		return nil, fmt.Errorf("获取订单历史失败: %w", err)
+	}
+
+	var rawOrders []map[string]interface{}
+	if err := json.Unmarshal(body, &rawOrders); err != nil {
+		return nil, fmt.Errorf("解析订单数据失败: %w", err)
+	}
+
+	var orders []OrderRecord
+	for _, raw := range rawOrders {
+		order := t.parseOrderRecord(raw)
+		orders = append(orders, order)
+	}
+
+	return orders, nil
+}
+
+// GetTradeHistory 获取成交历史
+func (t *AsterTrader) GetTradeHistory(symbol string, startTime, endTime int64, limit int) ([]TradeRecord, error) {
+	params := map[string]interface{}{
+		"symbol": symbol,
+		"limit":  limit,
+	}
+
+	if startTime > 0 {
+		params["startTime"] = startTime
+	}
+	if endTime > 0 {
+		params["endTime"] = endTime
+	}
+
+	body, err := t.request("GET", "/fapi/v3/userTrades", params)
+	if err != nil {
+		return nil, fmt.Errorf("获取成交历史失败: %w", err)
+	}
+
+	var rawTrades []map[string]interface{}
+	if err := json.Unmarshal(body, &rawTrades); err != nil {
+		return nil, fmt.Errorf("解析成交数据失败: %w", err)
+	}
+
+	var trades []TradeRecord
+	for _, raw := range rawTrades {
+		trade := t.parseTradeRecord(raw)
+		trades = append(trades, trade)
+	}
+
+	return trades, nil
+}
+
+// GetOrderStatus 获取单个订单状态
+func (t *AsterTrader) GetOrderStatus(symbol string, orderID int64) (*OrderRecord, error) {
+	params := map[string]interface{}{
+		"symbol":  symbol,
+		"orderId": orderID,
+	}
+
+	body, err := t.request("GET", "/fapi/v3/order", params)
+	if err != nil {
+		return nil, fmt.Errorf("获取订单状态失败: %w", err)
+	}
+
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("解析订单数据失败: %w", err)
+	}
+
+	order := t.parseOrderRecord(raw)
+	return &order, nil
+}
+
+// parseOrderRecord 解析订单记录
+func (t *AsterTrader) parseOrderRecord(raw map[string]interface{}) OrderRecord {
+	order := OrderRecord{}
+
+	if v, ok := raw["orderId"].(float64); ok {
+		order.OrderID = int64(v)
+	}
+	if v, ok := raw["symbol"].(string); ok {
+		order.Symbol = v
+	}
+	if v, ok := raw["side"].(string); ok {
+		order.Side = v
+	}
+	if v, ok := raw["positionSide"].(string); ok {
+		order.PositionSide = v
+	}
+	if v, ok := raw["type"].(string); ok {
+		order.Type = v
+	}
+	if v, ok := raw["status"].(string); ok {
+		order.Status = v
+	}
+	if v, ok := raw["price"].(string); ok {
+		order.Price, _ = strconv.ParseFloat(v, 64)
+	}
+	if v, ok := raw["avgPrice"].(string); ok {
+		order.AvgPrice, _ = strconv.ParseFloat(v, 64)
+	}
+	if v, ok := raw["origQty"].(string); ok {
+		order.OrigQty, _ = strconv.ParseFloat(v, 64)
+	}
+	if v, ok := raw["executedQty"].(string); ok {
+		order.ExecutedQty, _ = strconv.ParseFloat(v, 64)
+	}
+	if v, ok := raw["stopPrice"].(string); ok {
+		order.StopPrice, _ = strconv.ParseFloat(v, 64)
+	}
+	if v, ok := raw["realizedPnl"].(string); ok {
+		order.RealizedPnL, _ = strconv.ParseFloat(v, 64)
+	}
+	if v, ok := raw["time"].(float64); ok {
+		order.CreateTime = time.UnixMilli(int64(v))
+	}
+	if v, ok := raw["updateTime"].(float64); ok {
+		order.UpdateTime = time.UnixMilli(int64(v))
+	}
+
+	// 🆕 标记是否为自动平仓
+	order.IsAutoClose = isAutoCloseOrder(order.Type)
+	order.CloseReason = getCloseReason(order.Type)
+
+	return order
+}
+
+// parseTradeRecord 解析成交记录
+func (t *AsterTrader) parseTradeRecord(raw map[string]interface{}) TradeRecord {
+	trade := TradeRecord{}
+
+	if v, ok := raw["id"].(float64); ok {
+		trade.TradeID = int64(v)
+	}
+	if v, ok := raw["orderId"].(float64); ok {
+		trade.OrderID = int64(v)
+	}
+	if v, ok := raw["symbol"].(string); ok {
+		trade.Symbol = v
+	}
+	if v, ok := raw["side"].(string); ok {
+		trade.Side = v
+	}
+	if v, ok := raw["price"].(string); ok {
+		trade.Price, _ = strconv.ParseFloat(v, 64)
+	}
+	if v, ok := raw["qty"].(string); ok {
+		trade.Qty, _ = strconv.ParseFloat(v, 64)
+	}
+	if v, ok := raw["quoteQty"].(string); ok {
+		trade.QuoteQty, _ = strconv.ParseFloat(v, 64)
+	}
+	if v, ok := raw["realizedPnl"].(string); ok {
+		trade.RealizedPnL, _ = strconv.ParseFloat(v, 64)
+	}
+	if v, ok := raw["commission"].(string); ok {
+		trade.Commission, _ = strconv.ParseFloat(v, 64)
+	}
+	if v, ok := raw["time"].(float64); ok {
+		trade.Time = time.UnixMilli(int64(v))
+	}
+	if v, ok := raw["positionSide"].(string); ok {
+		trade.PositionSide = v
+	}
+	if v, ok := raw["buyer"].(bool); ok {
+		trade.Buyer = v
+	}
+	if v, ok := raw["maker"].(bool); ok {
+		trade.Maker = v
+	}
+
+	return trade
+}
+
+// isAutoCloseOrder 判断是否为自动平仓订单
+func isAutoCloseOrder(orderType string) bool {
+	switch orderType {
+	case "STOP_MARKET", "STOP", "TAKE_PROFIT_MARKET", "TAKE_PROFIT", "LIQUIDATION":
+		return true
+	default:
+		return false
+	}
+}
+
+// getCloseReason 获取平仓原因
+func getCloseReason(orderType string) string {
+	switch orderType {
+	case "STOP_MARKET", "STOP":
+		return "STOP_LOSS"
+	case "TAKE_PROFIT_MARKET", "TAKE_PROFIT":
+		return "TAKE_PROFIT"
+	case "LIQUIDATION":
+		return "LIQUIDATION"
+	default:
+		return "MANUAL"
+	}
+}
+
 // SymbolPrecision 交易对精度信息
 type SymbolPrecision struct {
 	PricePrecision    int

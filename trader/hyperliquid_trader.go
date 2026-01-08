@@ -20,6 +20,21 @@ type HyperliquidTrader struct {
 	meta       *hyperliquid.Meta // 缓存meta信息（包含精度等）
 }
 
+func (t *HyperliquidTrader) GetOrderStatus(symbol string, orderID int64) (*OrderRecord, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (t *HyperliquidTrader) GetTradeHistory(symbol string, startTime, endTime int64, limit int) ([]TradeRecord, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (t *HyperliquidTrader) GetOrderHistory(symbol string, startTime, endTime int64, limit int) ([]OrderRecord, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
 // NewHyperliquidTrader 创建Hyperliquid交易器
 func NewHyperliquidTrader(privateKeyHex string, walletAddr string, testnet bool) (*HyperliquidTrader, error) {
 	// 解析私钥

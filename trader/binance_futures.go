@@ -29,6 +29,21 @@ type FuturesTrader struct {
 	cacheDuration time.Duration
 }
 
+func (t *FuturesTrader) GetOrderStatus(symbol string, orderID int64) (*OrderRecord, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (t *FuturesTrader) GetTradeHistory(symbol string, startTime, endTime int64, limit int) ([]TradeRecord, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (t *FuturesTrader) GetOrderHistory(symbol string, startTime, endTime int64, limit int) ([]OrderRecord, error) {
+	//TODO implement me
+	panic("implement me")
+}
+
 // NewFuturesTrader 创建合约交易器
 func NewFuturesTrader(apiKey, secretKey string) *FuturesTrader {
 	client := futures.NewClient(apiKey, secretKey)

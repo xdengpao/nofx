@@ -108,14 +108,6 @@ type TradePlan struct {
 	CurrentStopLoss       float64   `json:"current_stop_loss"`
 }
 
-// PersistentData 持久化数据结构
-type PersistentData struct {
-	Plans      map[string]*TradePlan `json:"plans"`
-	Statistics *TradeStatistics      `json:"statistics"`
-	Returns    []float64             `json:"returns"` // 用于夏普比率计算
-	UpdatedAt  time.Time             `json:"updated_at"`
-}
-
 // TradePlanManager 交易计划管理器（带持久化）
 type TradePlanManager struct {
 	plans       map[string]*TradePlan
@@ -197,10 +189,19 @@ func (m *TradePlanManager) loadFromFile() error {
 		returnsLock.Unlock()
 	}
 
+	// 🆕 恢复已平仓交易记录
+	if persistentData.ClosedTrades != nil {
+		closedTradesLock.Lock()
+		closedTrades = persistentData.ClosedTrades
+		closedTradesLock.Unlock()
+	}
+
 	return nil
 }
 
 // saveToFile 保存计划到文件
+// decision/persistence.go - 修改 saveToFile
+
 func (m *TradePlanManager) saveToFile() error {
 	m.mu.RLock()
 	plansCopy := make(map[string]*TradePlan)
@@ -218,11 +219,18 @@ func (m *TradePlanManager) saveToFile() error {
 	copy(returnsCopy, returnsSeries)
 	returnsLock.RUnlock()
 
+	// 🆕 获取已平仓交易记录
+	closedTradesLock.RLock()
+	closedTradesCopy := make([]ClosedTradeRecord, len(closedTrades))
+	copy(closedTradesCopy, closedTrades)
+	closedTradesLock.RUnlock()
+
 	persistentData := PersistentData{
-		Plans:      plansCopy,
-		Statistics: &statsCopy,
-		Returns:    returnsCopy,
-		UpdatedAt:  time.Now(),
+		Plans:        plansCopy,
+		Statistics:   &statsCopy,
+		Returns:      returnsCopy,
+		ClosedTrades: closedTradesCopy, // 🆕 新增
+		UpdatedAt:    time.Now(),
 	}
 
 	data, err := json.MarshalIndent(persistentData, "", "  ")
@@ -230,7 +238,6 @@ func (m *TradePlanManager) saveToFile() error {
 		return fmt.Errorf("序列化失败: %w", err)
 	}
 
-	// 原子写入：先写临时文件，再重命名
 	tempFile := m.filePath + ".tmp"
 	if err := os.WriteFile(tempFile, data, 0644); err != nil {
 		return fmt.Errorf("写入临时文件失败: %w", err)
@@ -2076,20 +2083,6 @@ func OnPositionOpened(decision *Decision, actualEntryPrice float64) {
 	plan := CreateTradePlanFromDecision(decision, actualEntryPrice)
 	log.Printf("✅ 开仓成功，交易计划已创建: %s %s @ %.4f",
 		plan.Symbol, plan.Direction, actualEntryPrice)
-}
-
-// OnPositionClosed 平仓成功后调用（更新夏普比率）
-func OnPositionClosed(symbol string, reason string, pnlPercent float64, holdTimeMinutes float64) {
-	planManager.RemovePlan(symbol)
-
-	// 记录收益率用于夏普比率计算
-	AddReturn(pnlPercent)
-
-	// 更新统计
-	UpdateStatistics(pnlPercent, holdTimeMinutes)
-
-	log.Printf("✅ 平仓成功: %s (原因: %s, 盈亏: %.2f%%, 持仓: %.0f分钟)",
-		symbol, reason, pnlPercent, holdTimeMinutes)
 }
 
 // OnPositionClosedSimple 简化版平仓回调（向后兼容）

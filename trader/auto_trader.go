@@ -94,6 +94,13 @@ type AutoTrader struct {
 	callCount             int                          // AI调用次数
 	positionFirstSeenTime map[string]int64             // 持仓首次出现时间 (symbol_side -> timestamp毫秒)
 	lastPositions         map[string]*PositionSnapshot // 上一个周期的持仓快照 (symbol_side -> snapshot)
+	orderTracker          *OrderTracker                // 🆕 新增：订单追踪器
+	lastOrderSyncTime     time.Time                    // 🆕 新增：上次订单同步时间
+
+}
+
+func (at *AutoTrader) GetTrader() Trader {
+	return at.trader
 }
 
 // NewAutoTrader 创建自动交易器
@@ -173,7 +180,7 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 	logDir := fmt.Sprintf("decision_logs/%s", config.ID)
 	decisionLogger := logger.NewDecisionLogger(logDir)
 
-	return &AutoTrader{
+	at := &AutoTrader{
 		id:                    config.ID,
 		name:                  config.Name,
 		aiModel:               config.AIModel,
@@ -188,7 +195,10 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		callCount:             0,
 		isRunning:             false,
 		positionFirstSeenTime: make(map[string]int64),
-	}, nil
+	}
+	// 🆕 初始化订单追踪器
+	at.orderTracker = NewOrderTracker(at.trader)
+	return at, nil
 }
 
 // Run 运行自动交易主循环
@@ -301,6 +311,9 @@ func (at *AutoTrader) runCycle() error {
 	log.Printf("\n" + strings.Repeat("=", 70))
 	log.Printf("⏰ %s - AI决策周期 #%d", time.Now().Format("2006-01-02 15:04:05"), at.callCount)
 	log.Printf(strings.Repeat("=", 70))
+
+	// 🆕 **关键步骤**: 在每个周期开始时检查自动成交的订单
+	at.syncAutoClosedOrders()
 
 	// 创建决策记录
 	record := &logger.DecisionRecord{
@@ -464,6 +477,77 @@ func (at *AutoTrader) runCycle() error {
 	}
 
 	return nil
+}
+
+// 🆕 syncAutoClosedOrders 同步自动成交的订单
+func (at *AutoTrader) syncAutoClosedOrders() {
+	log.Println("🔄 检查自动成交订单...")
+
+	autoClosedOrders := at.orderTracker.CheckAutoClosedOrders()
+
+	if len(autoClosedOrders) == 0 {
+		log.Println("  ℹ️ 无自动成交订单")
+		return
+	}
+
+	for _, order := range autoClosedOrders {
+		log.Printf("📋 [AUTO-CLOSE] 检测到自动平仓:")
+		log.Printf("  • 币种: %s %s", order.Symbol, order.Side)
+		log.Printf("  • 原因: %s", order.CloseReason)
+		log.Printf("  • 入场价: %.4f → 出场价: %.4f", order.EntryPrice, order.ExitPrice)
+		log.Printf("  • 盈亏: %.4f USDT (%.2f%%)", order.RealizedPnL, order.PnLPercent)
+		log.Printf("  • 持仓时间: %.1f 分钟", order.HoldTimeMinutes)
+		log.Printf("  • 手续费: %.4f USDT", order.Commission)
+
+		// 🆕 更新统计数据
+		decision.OnPositionClosed(
+			order.Symbol,
+			order.CloseReason,
+			order.PnLPercent,
+			order.HoldTimeMinutes,
+		)
+
+		// 🆕 移除交易计划
+		decision.GetPlanBySymbol(order.Symbol) // 先检查是否存在
+
+		// 🆕 记录到决策日志
+		at.logAutoClosedOrder(order)
+	}
+
+	at.lastOrderSyncTime = time.Now()
+}
+
+// 🆕 logAutoClosedOrder 记录自动平仓到日志
+func (at *AutoTrader) logAutoClosedOrder(order AutoClosedOrder) {
+	action := "auto_close_long"
+	if order.Side == "short" {
+		action = "auto_close_short"
+	}
+
+	actionRecord := logger.DecisionAction{
+		Action:    action,
+		Symbol:    order.Symbol,
+		Quantity:  order.Quantity,
+		Price:     order.ExitPrice,
+		OrderID:   order.OrderID,
+		Timestamp: order.CloseTime,
+		Success:   true,
+		Error:     "",
+	}
+
+	// 创建单独的记录
+	record := &logger.DecisionRecord{
+		ExecutionLog: []string{
+			fmt.Sprintf("[AUTO-CLOSE] %s %s 触发: %s", order.Symbol, order.Side, order.CloseReason),
+			fmt.Sprintf("盈亏: %.4f USDT (%.2f%%)", order.RealizedPnL, order.PnLPercent),
+		},
+		Decisions: []logger.DecisionAction{actionRecord},
+		Success:   true,
+	}
+
+	if err := at.decisionLogger.LogDecision(record); err != nil {
+		log.Printf("⚠️ 记录自动平仓日志失败: %v", err)
+	}
 }
 
 // buildTradingContext 构建交易上下文
@@ -705,11 +789,29 @@ func (at *AutoTrader) executeOpenLongWithRecord(d *decision.Decision, actionReco
 	}
 
 	// 记录订单ID
-	if orderID, ok := order["orderId"].(int64); ok {
-		actionRecord.OrderID = orderID
+	//if orderID, ok := order["orderId"].(int64); ok {
+	//	actionRecord.OrderID = orderID
+	//}
+	var orderID int64
+	if id, ok := order["orderId"].(int64); ok {
+		orderID = id
+		actionRecord.OrderID = id
+	} else if id, ok := order["orderId"].(float64); ok {
+		orderID = int64(id)
+		actionRecord.OrderID = int64(id)
 	}
+	log.Printf("  ✓ 开仓成功，订单ID: %v, 数量: %.4f", orderID, quantity)
 
-	log.Printf("  ✓ 开仓成功，订单ID: %v, 数量: %.4f", order["orderId"], quantity)
+	// 🆕 追踪新仓位
+	at.orderTracker.TrackNewPosition(d.Symbol, "long", orderID, marketData.CurrentPrice, quantity, d.Leverage)
+	// 设置止损
+	if err := at.trader.SetStopLoss(d.Symbol, "LONG", quantity, d.StopLoss); err != nil {
+		log.Printf("  ⚠ 设置止损失败: %v", err)
+	}
+	// 设置止盈
+	if err := at.trader.SetTakeProfit(d.Symbol, "LONG", quantity, d.TakeProfit); err != nil {
+		log.Printf("  ⚠ 设置止盈失败: %v", err)
+	}
 
 	// 记录开仓时间
 	posKey := d.Symbol + "_long"
@@ -717,14 +819,6 @@ func (at *AutoTrader) executeOpenLongWithRecord(d *decision.Decision, actionReco
 
 	// ✅ 新增：创建交易计划
 	decision.OnPositionOpened(d, marketData.CurrentPrice)
-
-	// 设置止损止盈
-	if err := at.trader.SetStopLoss(d.Symbol, "LONG", quantity, d.StopLoss); err != nil {
-		log.Printf("  ⚠ 设置止损失败: %v", err)
-	}
-	if err := at.trader.SetTakeProfit(d.Symbol, "LONG", quantity, d.TakeProfit); err != nil {
-		log.Printf("  ⚠ 设置止盈失败: %v", err)
-	}
 
 	return nil
 }
@@ -759,6 +853,9 @@ func (at *AutoTrader) executeOpenShortWithRecord(d *decision.Decision, actionRec
 	if err != nil {
 		return err
 	}
+
+	// 🆕 停止追踪（手动平仓）
+	at.orderTracker.StopTracking(d.Symbol, "long")
 
 	// 记录订单ID
 	if orderID, ok := order["orderId"].(int64); ok {
@@ -828,6 +925,8 @@ func (at *AutoTrader) executeCloseLongWithRecord(d *decision.Decision, actionRec
 	if orderID, ok := order["orderId"].(int64); ok {
 		actionRecord.OrderID = orderID
 	}
+	// 🆕 停止追踪（手动平仓）
+	at.orderTracker.StopTracking(d.Symbol, "long")
 
 	// ✅ 新增：调用平仓回调（更新统计和夏普比率）
 	decision.OnPositionClosed(d.Symbol, d.Reasoning, pnlPercent, holdTimeMinutes)
@@ -872,6 +971,8 @@ func (at *AutoTrader) executeCloseShortWithRecord(d *decision.Decision, actionRe
 	if err != nil {
 		return err
 	}
+	// 🆕 停止追踪（手动平仓）
+	at.orderTracker.StopTracking(d.Symbol, "long")
 
 	if orderID, ok := order["orderId"].(int64); ok {
 		actionRecord.OrderID = orderID
