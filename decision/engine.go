@@ -1392,16 +1392,12 @@ func (c *PreOpenInvalidationChecker) checkRSIAbove(ctx *InvalidationCheckContext
 	}
 
 	if ctx.RSI14 > cond.Threshold {
-		// RSI超买，对空单可能是失效信号
-		if c.Direction == "short" && cond.Threshold >= 70 {
-			return true, fmt.Sprintf("%s RSI(%.1f) > %.0f 超买，空单计划已失效",
-				cond.Timeframe, ctx.RSI14, cond.Threshold)
-		}
-		// 对于多单，RSI极度超买可能也是警告
+		// RSI超买：对于多单，极度超买(>80)是获利了结信号
 		if c.Direction == "long" && cond.Threshold >= 80 {
 			return true, fmt.Sprintf("%s RSI(%.1f) > %.0f 极度超买，多单计划已失效",
 				cond.Timeframe, ctx.RSI14, cond.Threshold)
 		}
+		// 注意：RSI超买对空单是有利的，不是失效信号
 	}
 
 	return false, ""
@@ -1414,16 +1410,12 @@ func (c *PreOpenInvalidationChecker) checkRSIBelow(ctx *InvalidationCheckContext
 	}
 
 	if ctx.RSI14 < cond.Threshold {
-		// RSI超卖，对多单可能是失效信号
-		if c.Direction == "long" && cond.Threshold <= 30 {
-			return true, fmt.Sprintf("%s RSI(%.1f) < %.0f 超卖，多单计划已失效",
-				cond.Timeframe, ctx.RSI14, cond.Threshold)
-		}
-		// 对于空单，RSI极度超卖可能也是警告
+		// RSI超卖：对于空单，极度超卖(<20)是获利了结信号
 		if c.Direction == "short" && cond.Threshold <= 20 {
 			return true, fmt.Sprintf("%s RSI(%.1f) < %.0f 极度超卖，空单计划已失效",
 				cond.Timeframe, ctx.RSI14, cond.Threshold)
 		}
+		// 注意：RSI超卖对多单是有利的，不是失效信号
 	}
 
 	return false, ""

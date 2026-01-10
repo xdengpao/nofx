@@ -728,8 +728,27 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		CandidateCoins: candidateCoins,
 		Performance:    performance, // 添加历史表现分析
 	}
-
+	// 🆕 在返回前更新持仓快照（用于下一周期检测自动平仓）
+	at.updatePositionSnapshots(positionInfos)
 	return ctx, nil
+}
+
+// 🆕 新增：更新持仓快照
+func (at *AutoTrader) updatePositionSnapshots(positions []decision.PositionInfo) {
+	newSnapshots := make(map[string]*PositionSnapshot)
+
+	for _, pos := range positions {
+		posKey := pos.Symbol + "_" + pos.Side
+		newSnapshots[posKey] = &PositionSnapshot{
+			Symbol:     pos.Symbol,
+			Side:       pos.Side,
+			Quantity:   pos.Quantity,
+			EntryPrice: pos.EntryPrice,
+			Leverage:   pos.Leverage,
+		}
+	}
+
+	at.lastPositions = newSnapshots
 }
 
 // executeDecisionWithRecord 执行AI决策并记录详细信息
