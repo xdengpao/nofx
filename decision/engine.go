@@ -407,6 +407,9 @@ type TradePlan struct {
 	PartialCloseAt1R5           bool                         `json:"partial_close_at_1r5"`
 	TrailingStopActive          bool                         `json:"trailing_stop_active"`
 	CurrentStopLoss             float64                      `json:"current_stop_loss"`
+	ActualQuantity              float64                      `json:"actual_quantity,omitempty"` // ✅ 新增: 实际成交数量
+	ActualEntry                 float64                      `json:"actual_entry,omitempty"`    // ✅ 新增: 实际入场价
+
 }
 
 // TradePlanManager 交易计划管理器（带持久化）
@@ -456,6 +459,9 @@ func InitPlanManager(dataDir string) error {
 	return nil
 }
 
+// ============================================================================
+// 修改: decision/decision.go 中的 loadFromFile
+// ============================================================================
 // loadFromFile 从文件加载计划
 func (m *TradePlanManager) loadFromFile() error {
 	m.mu.Lock()
@@ -568,7 +574,32 @@ func (m *TradePlanManager) autoSaveIfEnabled() {
 func (m *TradePlanManager) GetPlan(symbol string) *TradePlan {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
+	if plan, ok := m.plans[symbol]; ok {
+		// ✅ 返回深拷贝，避免外部无锁修改
+		planCopy := *plan
+		if plan.ParsedInvalidationCondition != nil {
+			condCopy := *plan.ParsedInvalidationCondition
+			planCopy.ParsedInvalidationCondition = &condCopy
+		}
+		return &planCopy
+	}
+	return nil
+}
+
+// GetPlanUnsafe 获取原始指针（仅供内部使用，调用者需持有锁）
+func (m *TradePlanManager) GetPlanUnsafe(symbol string) *TradePlan {
 	return m.plans[symbol]
+}
+
+// UpdatePlan 更新计划（线程安全）
+func (m *TradePlanManager) UpdatePlan(symbol string, updateFn func(*TradePlan)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if plan, ok := m.plans[symbol]; ok {
+		updateFn(plan)
+	}
 }
 
 // SetPlan 设置交易计划（自动持久化）
@@ -1017,7 +1048,6 @@ func fixMissingQuotes(jsonStr string) string {
 	return result
 }
 
-// ExtractDecisionsRobust 健壮的决策提取（使用正则）
 // ExtractDecisionsRobust 健壮的决策提取（修复版）
 func ExtractDecisionsRobust(response string) ([]Decision, string, error) {
 	// 如果响应为空，返回空结果
@@ -1094,6 +1124,435 @@ func extractDecisionsFallback(response string) ([]Decision, string, error) {
 	cotTrace := extractCoTTrace(response)
 	decisions, err := extractDecisions(response)
 	return decisions, cotTrace, err
+}
+
+// ============================================================================
+// 🆕 开仓前失效条件预检查
+// ============================================================================
+
+// PreOpenInvalidationChecker 开仓前失效条件检查器
+type PreOpenInvalidationChecker struct {
+	Symbol       string
+	Direction    string // "long" or "short"
+	MarketData   *market.Data
+	CurrentPrice float64
+}
+
+// CheckInvalidationPrice 检查失效价格是否已触发
+func (c *PreOpenInvalidationChecker) CheckInvalidationPrice(invalidationPrice float64) (bool, string) {
+	if invalidationPrice <= 0 {
+		return false, ""
+	}
+
+	if c.Direction == "long" {
+		// 做多时，如果当前价格已经低于失效价格，则不应开仓
+		if c.CurrentPrice < invalidationPrice {
+			return true, fmt.Sprintf("当前价格(%.4f)已低于失效价格(%.4f)，多单计划已失效",
+				c.CurrentPrice, invalidationPrice)
+		}
+	} else {
+		// 做空时，如果当前价格已经高于失效价格，则不应开仓
+		if c.CurrentPrice > invalidationPrice {
+			return true, fmt.Sprintf("当前价格(%.4f)已高于失效价格(%.4f)，空单计划已失效",
+				c.CurrentPrice, invalidationPrice)
+		}
+	}
+
+	return false, ""
+}
+
+// CheckInvalidationCondition 检查失效条件是否已触发
+func (c *PreOpenInvalidationChecker) CheckInvalidationCondition(conditionStr string) (bool, string) {
+	if conditionStr == "" {
+		return false, ""
+	}
+
+	// 解析失效条件
+	parsed := ParseInvalidationCondition(conditionStr)
+	if !parsed.IsValid {
+		log.Printf("⚠️ 开仓前检查: 失效条件解析失败: %s - %s", conditionStr, parsed.ParseError)
+		return false, "" // 解析失败不阻止开仓，但记录警告
+	}
+
+	// 获取对应时间框架的上下文
+	ctx := c.getContextForTimeframe(parsed.Timeframe)
+	if ctx == nil {
+		log.Printf("⚠️ 开仓前检查: 无法获取 %s 时间框架数据", parsed.Timeframe)
+		return false, ""
+	}
+
+	// 根据条件类型检查
+	switch parsed.Type {
+	case ICT_EMA_CROSS_DOWN:
+		return c.checkEMACrossDown(ctx, parsed)
+	case ICT_EMA_CROSS_UP:
+		return c.checkEMACrossUp(ctx, parsed)
+	case ICT_PRICE_BELOW:
+		return c.checkPriceBelow(ctx, parsed)
+	case ICT_PRICE_ABOVE:
+		return c.checkPriceAbove(ctx, parsed)
+	case ICT_RSI_ABOVE:
+		return c.checkRSIAbove(ctx, parsed)
+	case ICT_RSI_BELOW:
+		return c.checkRSIBelow(ctx, parsed)
+	case ICT_ADX_BELOW:
+		return c.checkADXBelow(ctx, parsed)
+	case ICT_MACD_CROSS:
+		return c.checkMACDCross(ctx, parsed)
+	case ICT_TREND_REVERSAL:
+		return c.checkTrendReversal(ctx, parsed)
+	default:
+		return false, ""
+	}
+}
+
+// getContextForTimeframe 获取指定时间框架的上下文
+func (c *PreOpenInvalidationChecker) getContextForTimeframe(timeframe string) *InvalidationCheckContext {
+	if c.MarketData == nil {
+		return nil
+	}
+
+	ctx := &InvalidationCheckContext{
+		CurrentPrice: c.CurrentPrice,
+		Timeframe:    timeframe,
+	}
+
+	switch strings.ToUpper(timeframe) {
+	case "4H":
+		if c.MarketData.LongerTermContext != nil {
+			ltc := c.MarketData.LongerTermContext
+			ctx.EMA20 = ltc.EMA20
+			ctx.EMA50 = ltc.EMA50
+			ctx.BBUpper = ltc.BollingerUpper
+			ctx.BBLower = ltc.BollingerLower
+			ctx.RSI14 = market.GetLastValue(ltc.RSI14Values)
+			ctx.ADX14 = market.GetLastValue(ltc.ADXValues)
+			ctx.DIPlus = market.GetLastValue(ltc.DIPlus)
+			ctx.DIMinus = market.GetLastValue(ltc.DIMinus)
+			ctx.MACD = market.GetLastValue(ltc.MACDValues)
+			ctx.MACDSignal = market.GetLastValue(ltc.MACDSignal)
+			ctx.MACDHist = market.GetLastValue(ltc.MACDHist)
+		}
+
+	case "1H":
+		if c.MarketData.MidTermSeries1h != nil {
+			mtc := c.MarketData.MidTermSeries1h
+			ctx.EMA20 = market.GetLastValue(mtc.EMA20Values)
+			ctx.EMA50 = market.GetLastValue(mtc.EMA50Values)
+			ctx.RSI14 = market.GetLastValue(mtc.RSI14Values)
+			ctx.ADX14 = market.GetLastValue(mtc.ADXValues)
+			ctx.MACD = market.GetLastValue(mtc.MACDValues)
+			ctx.MACDSignal = market.GetLastValue(mtc.MACDSignal)
+			ctx.MACDHist = market.GetLastValue(mtc.MACDHist)
+			ctx.DIPlus = c.MarketData.CurrentDIPlus
+			ctx.DIMinus = c.MarketData.CurrentDIMinus
+		} else {
+			ctx.EMA20 = c.MarketData.CurrentEMA20
+			ctx.EMA50 = c.MarketData.CurrentEMA50
+			ctx.RSI14 = c.MarketData.CurrentRSI14
+			ctx.ADX14 = c.MarketData.CurrentADX
+			ctx.DIPlus = c.MarketData.CurrentDIPlus
+			ctx.DIMinus = c.MarketData.CurrentDIMinus
+			ctx.MACD = c.MarketData.CurrentMACD
+		}
+
+	case "15M", "30M":
+		if c.MarketData.MidTermSeries15m != nil {
+			mtc := c.MarketData.MidTermSeries15m
+			ctx.EMA20 = market.GetLastValue(mtc.EMA20Values)
+			ctx.EMA50 = market.GetLastValue(mtc.EMA50Values)
+			ctx.RSI14 = market.GetLastValue(mtc.RSI14Values)
+			ctx.ADX14 = market.GetLastValue(mtc.ADXValues)
+			ctx.MACD = market.GetLastValue(mtc.MACDValues)
+			ctx.MACDSignal = market.GetLastValue(mtc.MACDSignal)
+			ctx.MACDHist = market.GetLastValue(mtc.MACDHist)
+			ctx.DIPlus = c.MarketData.CurrentDIPlus
+			ctx.DIMinus = c.MarketData.CurrentDIMinus
+		} else {
+			ctx.EMA20 = c.MarketData.CurrentEMA20
+			ctx.EMA50 = c.MarketData.CurrentEMA50
+			ctx.RSI14 = c.MarketData.CurrentRSI14
+			ctx.ADX14 = c.MarketData.CurrentADX
+			ctx.DIPlus = c.MarketData.CurrentDIPlus
+			ctx.DIMinus = c.MarketData.CurrentDIMinus
+			ctx.MACD = c.MarketData.CurrentMACD
+		}
+
+	default:
+		ctx.EMA20 = c.MarketData.CurrentEMA20
+		ctx.EMA50 = c.MarketData.CurrentEMA50
+		ctx.RSI14 = c.MarketData.CurrentRSI14
+		ctx.ADX14 = c.MarketData.CurrentADX
+		ctx.DIPlus = c.MarketData.CurrentDIPlus
+		ctx.DIMinus = c.MarketData.CurrentDIMinus
+		ctx.MACD = c.MarketData.CurrentMACD
+		if c.MarketData.IntradaySeries != nil {
+			ctx.MACDSignal = market.GetLastValue(c.MarketData.IntradaySeries.MACDSignal)
+			ctx.MACDHist = market.GetLastValue(c.MarketData.IntradaySeries.MACDHist)
+		}
+	}
+
+	return ctx
+}
+
+// checkEMACrossDown 检查EMA死叉（开仓前）
+func (c *PreOpenInvalidationChecker) checkEMACrossDown(ctx *InvalidationCheckContext, cond *ParsedInvalidationCondition) (bool, string) {
+	ema1 := c.getEMAValue(ctx, cond.Indicator)
+	ema2 := c.getEMAValue(ctx, cond.Indicator2)
+
+	if ema1 == 0 || ema2 == 0 {
+		return false, ""
+	}
+
+	// 对于多单，EMA死叉是失效信号
+	if c.Direction == "long" && ema1 < ema2 {
+		return true, fmt.Sprintf("%s EMA已死叉: %s(%.4f) < %s(%.4f)，多单计划已失效",
+			cond.Timeframe, cond.Indicator, ema1, cond.Indicator2, ema2)
+	}
+
+	return false, ""
+}
+
+// checkEMACrossUp 检查EMA金叉（开仓前）
+func (c *PreOpenInvalidationChecker) checkEMACrossUp(ctx *InvalidationCheckContext, cond *ParsedInvalidationCondition) (bool, string) {
+	ema1 := c.getEMAValue(ctx, cond.Indicator)
+	ema2 := c.getEMAValue(ctx, cond.Indicator2)
+
+	if ema1 == 0 || ema2 == 0 {
+		return false, ""
+	}
+
+	// 对于空单，EMA金叉是失效信号
+	if c.Direction == "short" && ema1 > ema2 {
+		return true, fmt.Sprintf("%s EMA已金叉: %s(%.4f) > %s(%.4f)，空单计划已失效",
+			cond.Timeframe, cond.Indicator, ema1, cond.Indicator2, ema2)
+	}
+
+	return false, ""
+}
+
+// checkPriceBelow 检查价格跌破（开仓前）
+func (c *PreOpenInvalidationChecker) checkPriceBelow(ctx *InvalidationCheckContext, cond *ParsedInvalidationCondition) (bool, string) {
+	var targetPrice float64
+
+	if cond.Threshold > 0 {
+		targetPrice = cond.Threshold
+	} else {
+		targetPrice = c.getIndicatorValue(ctx, cond.Indicator)
+	}
+
+	if targetPrice == 0 {
+		return false, ""
+	}
+
+	// 对于多单，价格跌破是失效信号
+	if c.Direction == "long" && ctx.CurrentPrice < targetPrice {
+		indicator := cond.Indicator
+		if cond.Threshold > 0 {
+			indicator = fmt.Sprintf("%.4f", cond.Threshold)
+		}
+		return true, fmt.Sprintf("%s 价格(%.4f)已跌破%s(%.4f)，多单计划已失效",
+			cond.Timeframe, ctx.CurrentPrice, indicator, targetPrice)
+	}
+
+	return false, ""
+}
+
+// checkPriceAbove 检查价格突破（开仓前）
+func (c *PreOpenInvalidationChecker) checkPriceAbove(ctx *InvalidationCheckContext, cond *ParsedInvalidationCondition) (bool, string) {
+	var targetPrice float64
+
+	if cond.Threshold > 0 {
+		targetPrice = cond.Threshold
+	} else {
+		targetPrice = c.getIndicatorValue(ctx, cond.Indicator)
+	}
+
+	if targetPrice == 0 {
+		return false, ""
+	}
+
+	// 对于空单，价格突破是失效信号
+	if c.Direction == "short" && ctx.CurrentPrice > targetPrice {
+		indicator := cond.Indicator
+		if cond.Threshold > 0 {
+			indicator = fmt.Sprintf("%.4f", cond.Threshold)
+		}
+		return true, fmt.Sprintf("%s 价格(%.4f)已突破%s(%.4f)，空单计划已失效",
+			cond.Timeframe, ctx.CurrentPrice, indicator, targetPrice)
+	}
+
+	return false, ""
+}
+
+// checkRSIAbove 检查RSI超过阈值（开仓前）
+func (c *PreOpenInvalidationChecker) checkRSIAbove(ctx *InvalidationCheckContext, cond *ParsedInvalidationCondition) (bool, string) {
+	if ctx.RSI14 == 0 || cond.Threshold == 0 {
+		return false, ""
+	}
+
+	if ctx.RSI14 > cond.Threshold {
+		// RSI超买，对空单可能是失效信号
+		if c.Direction == "short" && cond.Threshold >= 70 {
+			return true, fmt.Sprintf("%s RSI(%.1f) > %.0f 超买，空单计划已失效",
+				cond.Timeframe, ctx.RSI14, cond.Threshold)
+		}
+		// 对于多单，RSI极度超买可能也是警告
+		if c.Direction == "long" && cond.Threshold >= 80 {
+			return true, fmt.Sprintf("%s RSI(%.1f) > %.0f 极度超买，多单计划已失效",
+				cond.Timeframe, ctx.RSI14, cond.Threshold)
+		}
+	}
+
+	return false, ""
+}
+
+// checkRSIBelow 检查RSI低于阈值（开仓前）
+func (c *PreOpenInvalidationChecker) checkRSIBelow(ctx *InvalidationCheckContext, cond *ParsedInvalidationCondition) (bool, string) {
+	if ctx.RSI14 == 0 || cond.Threshold == 0 {
+		return false, ""
+	}
+
+	if ctx.RSI14 < cond.Threshold {
+		// RSI超卖，对多单可能是失效信号
+		if c.Direction == "long" && cond.Threshold <= 30 {
+			return true, fmt.Sprintf("%s RSI(%.1f) < %.0f 超卖，多单计划已失效",
+				cond.Timeframe, ctx.RSI14, cond.Threshold)
+		}
+		// 对于空单，RSI极度超卖可能也是警告
+		if c.Direction == "short" && cond.Threshold <= 20 {
+			return true, fmt.Sprintf("%s RSI(%.1f) < %.0f 极度超卖，空单计划已失效",
+				cond.Timeframe, ctx.RSI14, cond.Threshold)
+		}
+	}
+
+	return false, ""
+}
+
+// checkADXBelow 检查ADX低于阈值（开仓前）
+func (c *PreOpenInvalidationChecker) checkADXBelow(ctx *InvalidationCheckContext, cond *ParsedInvalidationCondition) (bool, string) {
+	if ctx.ADX14 == 0 || cond.Threshold == 0 {
+		return false, ""
+	}
+
+	if ctx.ADX14 < cond.Threshold {
+		return true, fmt.Sprintf("%s ADX(%.1f) < %.0f 趋势过弱，计划已失效",
+			cond.Timeframe, ctx.ADX14, cond.Threshold)
+	}
+
+	return false, ""
+}
+
+// checkMACDCross 检查MACD交叉（开仓前）
+func (c *PreOpenInvalidationChecker) checkMACDCross(ctx *InvalidationCheckContext, cond *ParsedInvalidationCondition) (bool, string) {
+	if ctx.MACD == 0 && ctx.MACDSignal == 0 {
+		return false, ""
+	}
+
+	if cond.Direction == "DOWN" {
+		// MACD死叉
+		if ctx.MACD < ctx.MACDSignal && ctx.MACDHist < 0 {
+			if c.Direction == "long" {
+				return true, fmt.Sprintf("%s MACD已死叉(MACD=%.4f < Signal=%.4f)，多单计划已失效",
+					cond.Timeframe, ctx.MACD, ctx.MACDSignal)
+			}
+		}
+	} else if cond.Direction == "UP" {
+		// MACD金叉
+		if ctx.MACD > ctx.MACDSignal && ctx.MACDHist > 0 {
+			if c.Direction == "short" {
+				return true, fmt.Sprintf("%s MACD已金叉(MACD=%.4f > Signal=%.4f)，空单计划已失效",
+					cond.Timeframe, ctx.MACD, ctx.MACDSignal)
+			}
+		}
+	}
+
+	return false, ""
+}
+
+// checkTrendReversal 检查趋势反转（开仓前）
+func (c *PreOpenInvalidationChecker) checkTrendReversal(ctx *InvalidationCheckContext, cond *ParsedInvalidationCondition) (bool, string) {
+	if ctx.ADX14 == 0 {
+		return false, ""
+	}
+
+	// ADX > 25 表示有明确趋势
+	if ctx.ADX14 > 25 {
+		if c.Direction == "long" && ctx.DIMinus > ctx.DIPlus {
+			return true, fmt.Sprintf("%s 趋势已反转: DI-(%.1f) > DI+(%.1f)，多单计划已失效",
+				cond.Timeframe, ctx.DIMinus, ctx.DIPlus)
+		}
+		if c.Direction == "short" && ctx.DIPlus > ctx.DIMinus {
+			return true, fmt.Sprintf("%s 趋势已反转: DI+(%.1f) > DI-(%.1f)，空单计划已失效",
+				cond.Timeframe, ctx.DIPlus, ctx.DIMinus)
+		}
+	}
+
+	return false, ""
+}
+
+// getEMAValue 获取EMA值（开仓前检查器）
+func (c *PreOpenInvalidationChecker) getEMAValue(ctx *InvalidationCheckContext, indicator string) float64 {
+	indicator = strings.ToUpper(indicator)
+	switch indicator {
+	case "EMA20":
+		return ctx.EMA20
+	case "EMA50":
+		return ctx.EMA50
+	default:
+		return 0
+	}
+}
+
+// getIndicatorValue 获取指标值（开仓前检查器）
+func (c *PreOpenInvalidationChecker) getIndicatorValue(ctx *InvalidationCheckContext, indicator string) float64 {
+	indicator = strings.ToUpper(indicator)
+	switch indicator {
+	case "EMA20":
+		return ctx.EMA20
+	case "EMA50":
+		return ctx.EMA50
+	case "VWAP":
+		return ctx.VWAP
+	case "BB_UPPER":
+		return ctx.BBUpper
+	case "BB_LOWER":
+		return ctx.BBLower
+	default:
+		return 0
+	}
+}
+
+// CheckPreOpenInvalidation 开仓前综合检查失效条件
+// 返回: (是否已失效, 失效原因)
+func CheckPreOpenInvalidation(d *Decision, marketData *market.Data) (bool, string) {
+	if marketData == nil {
+		return false, ""
+	}
+
+	direction := "long"
+	if d.Action == "open_short" {
+		direction = "short"
+	}
+
+	checker := &PreOpenInvalidationChecker{
+		Symbol:       d.Symbol,
+		Direction:    direction,
+		MarketData:   marketData,
+		CurrentPrice: marketData.CurrentPrice,
+	}
+
+	// 1. 检查失效价格
+	if invalidated, reason := checker.CheckInvalidationPrice(d.InvalidationPrice); invalidated {
+		return true, reason
+	}
+
+	// 2. 检查失效条件
+	if invalidated, reason := checker.CheckInvalidationCondition(d.InvalidationCondition); invalidated {
+		return true, reason
+	}
+
+	return false, ""
 }
 
 // ============================================================================
@@ -2195,8 +2654,20 @@ func mergeDecisions(positionDecisions, aiDecisions []Decision) []Decision {
 	return result
 }
 
-// validateOpenDecision 验证开仓决策
+// validateOpenDecision 验证开仓决策（🆕 增加失效条件预检查）
 func validateOpenDecision(d *Decision, ctx *Context) error {
+	// ========== 🆕 新增：开仓前失效条件预检查 ==========
+	marketData, ok := ctx.MarketDataMap[d.Symbol]
+	if !ok {
+		return fmt.Errorf("缺少 %s 市场数据", d.Symbol)
+	}
+
+	// 🆕 检查失效条件是否已触发
+	if invalidated, reason := CheckPreOpenInvalidation(d, marketData); invalidated {
+		return fmt.Errorf("开仓前失效条件检查失败: %s", reason)
+	}
+
+	// ========== 以下为原有验证逻辑 ==========
 	for _, pos := range ctx.Positions {
 		if pos.Symbol == d.Symbol {
 			return fmt.Errorf("%s 已有持仓，不能重复开仓", d.Symbol)
@@ -2237,7 +2708,7 @@ func validateOpenDecision(d *Decision, ctx *Context) error {
 		return fmt.Errorf("止损止盈必须>0")
 	}
 
-	marketData, ok := ctx.MarketDataMap[d.Symbol]
+	marketData, ok = ctx.MarketDataMap[d.Symbol]
 	if !ok {
 		return fmt.Errorf("缺少 %s 市场数据", d.Symbol)
 	}
@@ -2294,7 +2765,7 @@ func validateFinalDecisions(decisions []Decision, ctx *Context) error {
 }
 
 // CreateTradePlanFromDecision 从决策创建交易计划
-func CreateTradePlanFromDecision(d *Decision, currentPrice float64) *TradePlan {
+func CreateTradePlanFromDecision(d *Decision, actualEntryPrice float64) *TradePlan {
 	direction := "long"
 	if d.Action == "open_short" {
 		direction = "short"
@@ -2309,14 +2780,45 @@ func CreateTradePlanFromDecision(d *Decision, currentPrice float64) *TradePlan {
 		}
 	}
 
+	//百分比方式调整入场价
+	var adjustedSL, adjustedTP float64
+	if direction == "long" {
+		// 保持相同的止损百分比
+		slPct := (d.StopLoss - actualEntryPrice) / actualEntryPrice
+		tpPct := (d.TakeProfit - actualEntryPrice) / actualEntryPrice
+
+		// 如果滑点导致入场价变化，按比例调整
+		if actualEntryPrice != d.StopLoss && d.StopLoss > 0 {
+			adjustedSL = actualEntryPrice * (1 + slPct)
+			adjustedTP = actualEntryPrice * (1 + tpPct)
+		} else {
+			adjustedSL = d.StopLoss
+			adjustedTP = d.TakeProfit
+		}
+	} else {
+		slPct := (d.StopLoss - actualEntryPrice) / actualEntryPrice
+		tpPct := (d.TakeProfit - actualEntryPrice) / actualEntryPrice
+		adjustedSL = actualEntryPrice * (1 + slPct)
+		adjustedTP = actualEntryPrice * (1 + tpPct)
+	}
+
+	// 使用原始值如果调整后的值无效
+	if adjustedSL <= 0 {
+		adjustedSL = d.StopLoss
+	}
+	if adjustedTP <= 0 {
+		adjustedTP = d.TakeProfit
+	}
+
 	plan := &TradePlan{
 		ID:                          fmt.Sprintf("%s_%d", d.Symbol, time.Now().UnixNano()),
 		Symbol:                      d.Symbol,
 		Direction:                   direction,
-		EntryPrice:                  currentPrice,
-		StopLoss:                    d.StopLoss,
-		TakeProfit:                  d.TakeProfit,
-		CurrentStopLoss:             d.StopLoss,
+		EntryPrice:                  actualEntryPrice,
+		ActualEntry:                 actualEntryPrice,
+		StopLoss:                    adjustedSL,
+		TakeProfit:                  adjustedTP,
+		CurrentStopLoss:             adjustedSL,
 		PositionSizeUSD:             d.PositionSizeUSD,
 		Leverage:                    d.Leverage,
 		EntryReason:                 d.Reasoning,
@@ -2863,11 +3365,25 @@ func buildUserPromptOptimized(ctx *Context, remainingBudget float64) string {
 // 交易执行回调
 // ============================================================================
 
-// OnPositionOpened 开仓成功后调用
-func OnPositionOpened(decision *Decision, actualEntryPrice float64) {
+// OnPositionOpened 开仓成功后调用（修复版）
+func OnPositionOpened(decision *Decision, actualEntryPrice float64, actualQuantity float64) error {
+	// ✅ 验证入场价
+	if actualEntryPrice <= 0 {
+		return fmt.Errorf("无效的入场价格: %.4f", actualEntryPrice)
+	}
+
 	plan := CreateTradePlanFromDecision(decision, actualEntryPrice)
-	log.Printf("✅ 开仓成功，交易计划已创建: %s %s @ %.4f",
-		plan.Symbol, plan.Direction, actualEntryPrice)
+
+	// ✅ 更新实际数量
+	if actualQuantity > 0 {
+		plan.ActualQuantity = actualQuantity
+		plan.PositionSizeUSD = actualQuantity * actualEntryPrice
+	}
+
+	log.Printf("✅ 开仓成功，交易计划已创建: %s %s @ %.4f (数量: %.6f)",
+		plan.Symbol, plan.Direction, actualEntryPrice, actualQuantity)
+
+	return nil
 }
 
 // OnPositionClosedSimple 简化版平仓回调（向后兼容）
@@ -3340,27 +3856,28 @@ func GetTradingRecommendation(ctx *Context, symbol string) string {
 
 // DecisionExecutor 执行决策的接口定义
 type DecisionExecutor interface {
-	OpenPosition(symbol, side string, leverage int, sizeUSD, stopLoss, takeProfit float64) error
+	OpenPosition(symbol, side string, leverage int, sizeUSD, stopLoss, takeProfit float64) (*OpenPositionResult, error)
 	ClosePosition(symbol string, percentage float64) error
 	UpdateStopLoss(symbol string, newStopLoss float64) error
 }
 
 // ProcessDecisions 处理决策列表
-func ProcessDecisions(decisions []Decision, executor DecisionExecutor) error {
+func ProcessDecisions(decisions []Decision, executor DecisionExecutor, marketData map[string]*market.Data) error {
 	for _, d := range decisions {
 		var err error
 
 		switch d.Action {
 		case "open_long":
-			err = executor.OpenPosition(d.Symbol, "long", d.Leverage, d.PositionSizeUSD, d.StopLoss, d.TakeProfit)
+			// ✅ 执行开仓并获取实际成交信息
+			result, err := executor.OpenPosition(d.Symbol, "long", d.Leverage, d.PositionSizeUSD, d.StopLoss, d.TakeProfit)
 			if err == nil {
-				OnPositionOpened(&d, 0)
+				OnPositionOpened(&d, result.EntryPrice, result.Quantity)
 			}
 
 		case "open_short":
-			err = executor.OpenPosition(d.Symbol, "short", d.Leverage, d.PositionSizeUSD, d.StopLoss, d.TakeProfit)
+			result, err := executor.OpenPosition(d.Symbol, "short", d.Leverage, d.PositionSizeUSD, d.StopLoss, d.TakeProfit)
 			if err == nil {
-				OnPositionOpened(&d, 0)
+				OnPositionOpened(&d, result.EntryPrice, result.Quantity)
 			}
 
 		case "close_long", "close_short":
@@ -3391,6 +3908,14 @@ func ProcessDecisions(decisions []Decision, executor DecisionExecutor) error {
 	}
 
 	return nil
+}
+
+// OpenPositionResult 开仓结果
+type OpenPositionResult struct {
+	EntryPrice float64
+	Quantity   float64
+	OrderID    string
+	Timestamp  time.Time
 }
 
 // ============================================================================
