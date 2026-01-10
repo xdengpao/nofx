@@ -818,7 +818,10 @@ func (at *AutoTrader) executeOpenLongWithRecord(d *decision.Decision, actionReco
 	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
 
 	// ✅ 新增：创建交易计划
-	decision.OnPositionOpened(d, marketData.CurrentPrice)
+	err = decision.OnPositionOpened(d, marketData.CurrentPrice, quantity)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -854,21 +857,24 @@ func (at *AutoTrader) executeOpenShortWithRecord(d *decision.Decision, actionRec
 		return err
 	}
 
-	// 🆕 停止追踪（手动平仓）
-	at.orderTracker.StopTracking(d.Symbol, "long")
-
 	// 记录订单ID
-	if orderID, ok := order["orderId"].(int64); ok {
-		actionRecord.OrderID = orderID
+	var orderID int64
+	if id, ok := order["orderId"].(int64); ok {
+		orderID = id
+		actionRecord.OrderID = id
+	} else if id, ok := order["orderId"].(float64); ok {
+		orderID = int64(id)
+		actionRecord.OrderID = int64(id)
 	}
 
 	log.Printf("  ✓ 开仓成功，订单ID: %v, 数量: %.4f", order["orderId"], quantity)
 
+	// 🆕 追踪新仓位
+	at.orderTracker.TrackNewPosition(d.Symbol, "short", orderID, marketData.CurrentPrice, quantity, d.Leverage)
+
 	// 记录开仓时间
 	posKey := d.Symbol + "_short"
 	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
-	// ✅ 新增：创建交易计划
-	decision.OnPositionOpened(d, marketData.CurrentPrice)
 
 	// 设置止损止盈
 	if err := at.trader.SetStopLoss(d.Symbol, "SHORT", quantity, d.StopLoss); err != nil {
@@ -876,6 +882,11 @@ func (at *AutoTrader) executeOpenShortWithRecord(d *decision.Decision, actionRec
 	}
 	if err := at.trader.SetTakeProfit(d.Symbol, "SHORT", quantity, d.TakeProfit); err != nil {
 		log.Printf("  ⚠ 设置止盈失败: %v", err)
+	}
+	// ✅ 新增：创建交易计划
+	err = decision.OnPositionOpened(d, marketData.CurrentPrice, quantity)
+	if err != nil {
+		return err
 	}
 
 	return nil
@@ -972,7 +983,7 @@ func (at *AutoTrader) executeCloseShortWithRecord(d *decision.Decision, actionRe
 		return err
 	}
 	// 🆕 停止追踪（手动平仓）
-	at.orderTracker.StopTracking(d.Symbol, "long")
+	at.orderTracker.StopTracking(d.Symbol, "short")
 
 	if orderID, ok := order["orderId"].(int64); ok {
 		actionRecord.OrderID = orderID
