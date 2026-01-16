@@ -502,9 +502,10 @@ func (at *AutoTrader) syncAutoClosedOrders() {
 		// 🆕 更新统计数据
 		decision.OnPositionClosed(
 			order.Symbol,
-			order.CloseReason,
+			order.ExitPrice,
 			order.PnLPercent,
-			order.HoldTimeMinutes,
+			order.RealizedPnL,
+			order.CloseReason,
 		)
 
 		// 🆕 移除交易计划
@@ -917,6 +918,7 @@ func (at *AutoTrader) executeCloseLongWithRecord(d *decision.Decision, actionRec
 
 	// ✅ 新增：获取平仓前的持仓信息（用于计算盈亏）
 	var pnlPercent float64
+	var pnlUSD float64
 	var holdTimeMinutes float64
 	positions, _ := at.trader.GetPositions()
 	for _, pos := range positions {
@@ -930,6 +932,10 @@ func (at *AutoTrader) executeCloseLongWithRecord(d *decision.Decision, actionRec
 			}
 			pnlPercent = ((markPrice - entryPrice) / entryPrice) * float64(leverage) * 100
 
+			// 🆕 直接使用交易所返回的未实现盈亏
+			if unrealizedPnl, ok := pos["unRealizedProfit"].(float64); ok {
+				pnlUSD = unrealizedPnl
+			}
 			// 计算持仓时间
 			posKey := d.Symbol + "_long"
 			if startTime, ok := at.positionFirstSeenTime[posKey]; ok {
@@ -959,7 +965,8 @@ func (at *AutoTrader) executeCloseLongWithRecord(d *decision.Decision, actionRec
 	at.orderTracker.StopTracking(d.Symbol, "long")
 
 	// ✅ 新增：调用平仓回调（更新统计和夏普比率）
-	decision.OnPositionClosed(d.Symbol, d.Reasoning, pnlPercent, holdTimeMinutes)
+
+	decision.OnPositionClosed(d.Symbol, marketData.CurrentPrice, pnlPercent, pnlUSD, d.Reasoning)
 
 	log.Printf("  ✓ 平仓成功 (盈亏: %.2f%%, 持仓: %.0f分钟)", pnlPercent, holdTimeMinutes)
 	return nil
@@ -971,6 +978,7 @@ func (at *AutoTrader) executeCloseShortWithRecord(d *decision.Decision, actionRe
 
 	// ✅ 新增：获取平仓前的持仓信息
 	var pnlPercent float64
+	var pnlUSD float64
 	var holdTimeMinutes float64
 	positions, _ := at.trader.GetPositions()
 	for _, pos := range positions {
@@ -982,6 +990,10 @@ func (at *AutoTrader) executeCloseShortWithRecord(d *decision.Decision, actionRe
 				leverage = int(lev)
 			}
 			pnlPercent = ((entryPrice - markPrice) / entryPrice) * float64(leverage) * 100
+			// 🆕 直接使用交易所返回的未实现盈亏
+			if unrealizedPnl, ok := pos["unRealizedProfit"].(float64); ok {
+				pnlUSD = unrealizedPnl
+			}
 
 			posKey := d.Symbol + "_short"
 			if startTime, ok := at.positionFirstSeenTime[posKey]; ok {
@@ -1009,7 +1021,7 @@ func (at *AutoTrader) executeCloseShortWithRecord(d *decision.Decision, actionRe
 	}
 
 	// ✅ 新增：调用平仓回调
-	decision.OnPositionClosed(d.Symbol, d.Reasoning, pnlPercent, holdTimeMinutes)
+	decision.OnPositionClosed(d.Symbol, marketData.CurrentPrice, pnlPercent, pnlUSD, d.Reasoning)
 
 	log.Printf("  ✓ 平仓成功 (盈亏: %.2f%%, 持仓: %.0f分钟)", pnlPercent, holdTimeMinutes)
 	return nil

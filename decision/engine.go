@@ -403,13 +403,28 @@ type TradePlan struct {
 	Status                      string                       `json:"status"`
 	Confidence                  int                          `json:"confidence"`
 	RiskUSD                     float64                      `json:"risk_usd"`
-	PartialCloseAt1R3           bool                         `json:"partial_close_at_1r3"`
-	PartialCloseAt1R5           bool                         `json:"partial_close_at_1r5"`
-	TrailingStopActive          bool                         `json:"trailing_stop_active"`
-	CurrentStopLoss             float64                      `json:"current_stop_loss"`
-	ActualQuantity              float64                      `json:"actual_quantity,omitempty"` // ✅ 新增: 实际成交数量
-	ActualEntry                 float64                      `json:"actual_entry,omitempty"`    // ✅ 新增: 实际入场价
 
+	// 🔧 分批止盈相关 - 使用档位索引记录
+	ExecutedTranches    map[int]bool `json:"executed_tranches,omitempty"`
+	LastExecutedTranche int          `json:"last_executed_tranche"`
+	TotalClosedPercent  float64      `json:"total_closed_percent"`
+
+	// 移动止损相关
+	TrailingStopActive bool    `json:"trailing_stop_active"`
+	CurrentStopLoss    float64 `json:"current_stop_loss"`
+
+	// 实际成交信息
+	ActualQuantity float64 `json:"actual_quantity,omitempty"`
+	ActualEntry    float64 `json:"actual_entry,omitempty"`
+
+	// 🔧 修复: 峰值追踪 - 这些字段必须通过 UpdatePlan 方法更新
+	EntryATR       float64 `json:"entry_atr,omitempty"`
+	PeakPrice      float64 `json:"peak_price,omitempty"`
+	PeakPnLPercent float64 `json:"peak_pnl_percent,omitempty"`
+
+	// 🆕 新增: 动态止盈追踪
+	OriginalTakeProfit float64   `json:"original_take_profit,omitempty"`
+	LastTPAdjustTime   time.Time `json:"last_tp_adjust_time,omitempty"`
 }
 
 // TradePlanManager 交易计划管理器（带持久化）
@@ -482,6 +497,16 @@ func (m *TradePlanManager) loadFromFile() error {
 
 	if persistentData.Plans != nil {
 		m.plans = persistentData.Plans
+
+		// 🔧 确保所有计划的 ExecutedTranches 已初始化
+		for _, plan := range m.plans {
+			if plan.ExecutedTranches == nil {
+				plan.ExecutedTranches = make(map[int]bool)
+			}
+			if plan.OriginalTakeProfit == 0 {
+				plan.OriginalTakeProfit = plan.TakeProfit
+			}
+		}
 	}
 
 	// 恢复统计数据
@@ -582,6 +607,13 @@ func (m *TradePlanManager) GetPlan(symbol string) *TradePlan {
 			condCopy := *plan.ParsedInvalidationCondition
 			planCopy.ParsedInvalidationCondition = &condCopy
 		}
+		// 🔧 深拷贝 ExecutedTranches map
+		if plan.ExecutedTranches != nil {
+			planCopy.ExecutedTranches = make(map[int]bool)
+			for k, v := range plan.ExecutedTranches {
+				planCopy.ExecutedTranches[k] = v
+			}
+		}
 		return &planCopy
 	}
 	return nil
@@ -605,6 +637,17 @@ func (m *TradePlanManager) UpdatePlan(symbol string, updateFn func(*TradePlan)) 
 // SetPlan 设置交易计划（自动持久化）
 func (m *TradePlanManager) SetPlan(plan *TradePlan) {
 	m.mu.Lock()
+
+	// 🔧 确保 ExecutedTranches 已初始化
+	if plan.ExecutedTranches == nil {
+		plan.ExecutedTranches = make(map[int]bool)
+	}
+
+	// 🔧 记录原始止盈价
+	if plan.OriginalTakeProfit == 0 {
+		plan.OriginalTakeProfit = plan.TakeProfit
+	}
+
 	m.plans[plan.Symbol] = plan
 	m.mu.Unlock()
 
@@ -625,7 +668,8 @@ func (m *TradePlanManager) SetPlan(plan *TradePlan) {
 func (m *TradePlanManager) RemovePlan(symbol string) {
 	m.mu.Lock()
 	if plan, exists := m.plans[symbol]; exists {
-		log.Printf("📋 移除交易计划: %s (状态: %s)", symbol, plan.Status)
+		log.Printf("📋 移除交易计划: %s (状态: %s, 峰值盈利: %.2f%%)",
+			symbol, plan.Status, plan.PeakPnLPercent)
 		delete(m.plans, symbol)
 	}
 	m.mu.Unlock()
@@ -1556,6 +1600,7 @@ type PositionEvaluator struct {
 	Position   *PositionInfo
 	Plan       *TradePlan
 	MarketData *market.Data
+	Symbol     string // 🆕 新增: 保存symbol用于更新
 }
 
 // EvaluationResult 评估结果
@@ -1563,14 +1608,22 @@ type EvaluationResult struct {
 	Action            string
 	Reason            string
 	NewStopLoss       float64
+	NewTakeProfit     float64 // 🆕 新增
 	ClosePercentage   float64
 	IsHardStop        bool
 	IsPlanInvalidated bool
+	TrancheIndex      int  // 🆕 新增: 分批止盈档位索引
+	ShouldUpdatePeak  bool // 🆕 新增: 是否需要更新峰值
 }
 
 // Evaluate 评估持仓
 func (e *PositionEvaluator) Evaluate() *EvaluationResult {
-	result := &EvaluationResult{Action: "hold", Reason: "继续持有"}
+	result := &EvaluationResult{
+		Action:           "hold",
+		Reason:           "继续持有",
+		ShouldUpdatePeak: true, // 默认需要更新峰值
+		TrancheIndex:     -1,
+	}
 
 	if e.Position == nil || e.MarketData == nil {
 		return result
@@ -1579,125 +1632,118 @@ func (e *PositionEvaluator) Evaluate() *EvaluationResult {
 	currentPrice := e.MarketData.CurrentPrice
 	holdingMinutes := e.getHoldingMinutes()
 
-	// ========== 第一优先级：硬性止损/止盈检查 ==========
+	// ========================================================================
+	// 第一优先级：硬性止损检查
+	// ========================================================================
 	if e.Plan != nil {
-		effectiveSL := e.Plan.CurrentStopLoss
-		if effectiveSL == 0 {
-			effectiveSL = e.Plan.StopLoss
-		}
+		effectiveSL := e.getEffectiveStopLoss()
 
-		// 检查止损
 		if e.Plan.Direction == "long" && currentPrice <= effectiveSL {
 			return &EvaluationResult{
 				Action:     "close",
-				Reason:     fmt.Sprintf("触发止损: 当前价%.4f <= 止损价%.4f", currentPrice, effectiveSL),
+				Reason:     fmt.Sprintf("🛑 触发止损: 当前价%.4f <= 止损价%.4f", currentPrice, effectiveSL),
 				IsHardStop: true,
 			}
 		}
 		if e.Plan.Direction == "short" && currentPrice >= effectiveSL {
 			return &EvaluationResult{
 				Action:     "close",
-				Reason:     fmt.Sprintf("触发止损: 当前价%.4f >= 止损价%.4f", currentPrice, effectiveSL),
+				Reason:     fmt.Sprintf("🛑 触发止损: 当前价%.4f >= 止损价%.4f", currentPrice, effectiveSL),
 				IsHardStop: true,
 			}
 		}
+	}
 
-		// 检查止盈
+	// ========================================================================
+	// 第二优先级：固定止盈检查
+	// ========================================================================
+	if e.Plan != nil && e.Plan.TakeProfit > 0 {
 		if e.Plan.Direction == "long" && currentPrice >= e.Plan.TakeProfit {
 			return &EvaluationResult{
 				Action:     "close",
-				Reason:     fmt.Sprintf("触发止盈: 当前价%.4f >= 止盈价%.4f", currentPrice, e.Plan.TakeProfit),
+				Reason:     fmt.Sprintf("🎯 触发止盈: 当前价%.4f >= 止盈价%.4f", currentPrice, e.Plan.TakeProfit),
 				IsHardStop: true,
 			}
 		}
 		if e.Plan.Direction == "short" && currentPrice <= e.Plan.TakeProfit {
 			return &EvaluationResult{
 				Action:     "close",
-				Reason:     fmt.Sprintf("触发止盈: 当前价%.4f <= 止盈价%.4f", currentPrice, e.Plan.TakeProfit),
+				Reason:     fmt.Sprintf("🎯 触发止盈: 当前价%.4f <= 止盈价%.4f", currentPrice, e.Plan.TakeProfit),
 				IsHardStop: true,
 			}
 		}
 	}
 
-	// ========== 第二优先级：最小持仓时间保护 ==========
+	// ========================================================================
+	// 第三优先级：最小持仓时间保护
+	// ========================================================================
 	minHoldMinutes := 30
 	if e.Plan != nil && e.Plan.MinHoldMinutes > 0 {
 		minHoldMinutes = e.Plan.MinHoldMinutes
 	}
 
 	if holdingMinutes < int64(minHoldMinutes) {
+		// 保护期内只有极端亏损才平仓
 		if e.Position.UnrealizedPnLPct < -3.0 {
 			return &EvaluationResult{
 				Action:     "close",
-				Reason:     fmt.Sprintf("保护期内极端亏损(%.2f%% < -3%%)，紧急平仓", e.Position.UnrealizedPnLPct),
+				Reason:     fmt.Sprintf("⚠️ 保护期内极端亏损(%.2f%% < -3%%)，紧急平仓", e.Position.UnrealizedPnLPct),
 				IsHardStop: true,
 			}
 		}
-		result.Reason = fmt.Sprintf("持仓保护期(%d/%d分钟)，继续持有", holdingMinutes, minHoldMinutes)
+		result.Reason = fmt.Sprintf("📋 持仓保护期(%d/%d分钟)，继续持有", holdingMinutes, minHoldMinutes)
 		return result
 	}
 
-	// ========== 第三优先级：移动止损检查（修复版） ==========
+	// ========================================================================
+	// 第四优先级：利润保护机制（防止大幅回撤）
+	// ========================================================================
+	tpConfig := GetTakeProfitConfig()
+	if tpConfig.EnableProfitProtect && e.Plan != nil {
+		if protectResult := e.checkProfitProtectionFixed(tpConfig); protectResult != nil {
+			return protectResult
+		}
+	}
+
+	// ========================================================================
+	// 第五优先级：ATR跟踪止盈
+	// ========================================================================
+	if tpConfig.EnableATRTrailing && e.Position.UnrealizedPnLPct > 5.0 && e.Plan != nil {
+		if atrResult := e.evaluateATRTrailingTakeProfitFixed(tpConfig); atrResult != nil {
+			return atrResult
+		}
+	}
+
+	// ========================================================================
+	// 第六优先级：智能分批止盈
+	// ========================================================================
+	if tpConfig.EnableScaledExit && e.Plan != nil && e.Position.UnrealizedPnLPct > 0 {
+		if scaledResult := e.evaluateScaledExitFixed(); scaledResult != nil {
+			return scaledResult
+		}
+	}
+
+	// ========================================================================
+	// 第七优先级：移动止损（保护盈利）
+	// ========================================================================
 	if e.Position.UnrealizedPnLPct > 0 && e.Plan != nil {
-		newSL := e.calculateTrailingStop()
-
-		// ✅ 只有返回有效的止损价格才考虑更新
-		if newSL > 0 {
-			effectiveSL := e.Plan.CurrentStopLoss
-			if effectiveSL == 0 {
-				effectiveSL = e.Plan.StopLoss
-			}
-
-			shouldUpdate := false
-			if e.Plan.Direction == "long" && newSL > effectiveSL {
-				// ✅ 二次验证：确保新止损低于当前价格
-				if newSL < currentPrice {
-					shouldUpdate = true
-				}
-			}
-			if e.Plan.Direction == "short" && newSL < effectiveSL {
-				// ✅ 二次验证：确保新止损高于当前价格
-				if newSL > currentPrice {
-					shouldUpdate = true
-				}
-			}
-
-			if shouldUpdate {
-				return &EvaluationResult{
-					Action:      "update_stop_loss",
-					NewStopLoss: newSL,
-					Reason:      fmt.Sprintf("移动止损: %.4f → %.4f (盈利%.2f%%)", effectiveSL, newSL, e.Position.UnrealizedPnLPct),
-				}
-			}
+		if trailingResult := e.evaluateTrailingStop(); trailingResult != nil {
+			return trailingResult
 		}
 	}
 
-	// ========== 第四优先级：分批止盈检查 ==========
-	if e.Plan != nil && e.Position.UnrealizedPnLPct > 0 {
-		riskDistance := math.Abs(e.Plan.EntryPrice - e.Plan.StopLoss)
-		if riskDistance > 0 {
-			currentDistance := math.Abs(currentPrice - e.Plan.EntryPrice)
-			currentRR := currentDistance / riskDistance
-
-			if currentRR >= 3.0 && !e.Plan.PartialCloseAt1R3 {
-				return &EvaluationResult{
-					Action:          "partial_close",
-					ClosePercentage: 50,
-					Reason:          fmt.Sprintf("达到RR 1:3 (当前%.2f:1)，平仓50%%", currentRR),
-				}
-			}
-
-			if currentRR >= 5.0 && !e.Plan.PartialCloseAt1R5 && e.Plan.PartialCloseAt1R3 {
-				return &EvaluationResult{
-					Action:          "partial_close",
-					ClosePercentage: 30,
-					Reason:          fmt.Sprintf("达到RR 1:5 (当前%.2f:1)，平仓30%%", currentRR),
-				}
-			}
+	// ========================================================================
+	// 第八优先级：动态止盈调整
+	// ========================================================================
+	if tpConfig.EnableDynamicTP && e.Plan != nil {
+		if newTP := e.calculateDynamicTakeProfit(tpConfig); newTP > 0 {
+			result.NewTakeProfit = newTP
 		}
 	}
 
-	// ========== 第五优先级：计划失效条件检查 ==========
+	// ========================================================================
+	// 第九优先级：计划失效条件检查
+	// ========================================================================
 	if holdingMinutes >= 60 && e.Plan != nil {
 		if invalidated, reason := e.checkPlanInvalidation(); invalidated {
 			return &EvaluationResult{
@@ -1730,13 +1776,7 @@ func (e *PositionEvaluator) calculateTrailingStop() float64 {
 	currentPrice := e.MarketData.CurrentPrice
 
 	// 获取ATR用于动态计算安全边际
-	atr := 0.0
-	if e.MarketData.LongerTermContext != nil {
-		atr = e.MarketData.LongerTermContext.ATR14
-	}
-	if atr == 0 {
-		atr = currentPrice * 0.01 // 默认1%作为ATR
-	}
+	atr := e.getATR()
 
 	// 安全边际：至少0.3%或0.5倍ATR，取较大值
 	safetyMarginPct := 0.003
@@ -1747,73 +1787,66 @@ func (e *PositionEvaluator) calculateTrailingStop() float64 {
 	var targetSLReason string
 
 	if e.Plan.Direction == "long" {
-		// 多单：根据盈利百分比设置止损
-		if pnlPct >= 15 {
-			newSL = entryPrice * 1.05
+		// 多单移动止损逻辑
+		if pnlPct >= 20 {
+			newSL = entryPrice * 1.10 // 保护10%利润
+			targetSLReason = "保护10%利润"
+		} else if pnlPct >= 15 {
+			newSL = entryPrice * 1.05 // 保护5%利润
 			targetSLReason = "保护5%利润"
 		} else if pnlPct >= 10 {
-			newSL = entryPrice * 1.02
+			newSL = entryPrice * 1.02 // 保护2%利润
 			targetSLReason = "保护2%利润"
 		} else if pnlPct >= 7 {
-			newSL = entryPrice
+			newSL = entryPrice // 保本
 			targetSLReason = "保本"
 		} else {
 			return 0 // 盈利不足，不移动止损
 		}
 
-		// 计算允许的最大止损价格
+		// 计算允许的最大止损价格（留出安全边际）
 		maxAllowedSL := currentPrice * (1 - safetyMargin)
 
 		if newSL >= maxAllowedSL {
-			effectiveSL := e.Plan.CurrentStopLoss
-			if effectiveSL == 0 {
-				effectiveSL = e.Plan.StopLoss
-			}
-
+			effectiveSL := e.getEffectiveStopLoss()
 			if maxAllowedSL > effectiveSL {
-				// 使用安全边际价格
-				log.Printf("  ⚠️ %s止损 %.4f 高于安全线 %.4f，调整为 %.4f",
-					targetSLReason, newSL, maxAllowedSL, maxAllowedSL)
+				log.Printf("  ⚠️ %s: %s止损 %.4f 高于安全线 %.4f，调整为 %.4f",
+					e.Plan.Symbol, targetSLReason, newSL, maxAllowedSL, maxAllowedSL)
 				newSL = maxAllowedSL
 			} else {
-				// 无法有效更新
-				log.Printf("  ℹ️ 价格%.4f回落，安全止损%.4f ≤ 原止损%.4f，暂不更新",
-					currentPrice, maxAllowedSL, effectiveSL)
-				return 0
+				return 0 // 无法有效更新
 			}
 		}
 
-	} else { // short
-		if pnlPct >= 15 {
-			newSL = entryPrice * 0.95
+	} else {
+		// 空单移动止损逻辑
+		if pnlPct >= 20 {
+			newSL = entryPrice * 0.90 // 保护10%利润
+			targetSLReason = "保护10%利润"
+		} else if pnlPct >= 15 {
+			newSL = entryPrice * 0.95 // 保护5%利润
 			targetSLReason = "保护5%利润"
 		} else if pnlPct >= 10 {
-			newSL = entryPrice * 0.98
+			newSL = entryPrice * 0.98 // 保护2%利润
 			targetSLReason = "保护2%利润"
 		} else if pnlPct >= 7 {
-			newSL = entryPrice
+			newSL = entryPrice // 保本
 			targetSLReason = "保本"
 		} else {
 			return 0
 		}
 
-		// 计算允许的最小止损价格
+		// 计算允许的最小止损价格（留出安全边际）
 		minAllowedSL := currentPrice * (1 + safetyMargin)
 
 		if newSL <= minAllowedSL {
-			effectiveSL := e.Plan.CurrentStopLoss
-			if effectiveSL == 0 {
-				effectiveSL = e.Plan.StopLoss
-			}
-
+			effectiveSL := e.getEffectiveStopLoss()
 			if minAllowedSL < effectiveSL {
-				log.Printf("  ⚠️ %s止损 %.4f 低于安全线 %.4f，调整为 %.4f",
-					targetSLReason, newSL, minAllowedSL, minAllowedSL)
+				log.Printf("  ⚠️ %s: %s止损 %.4f 低于安全线 %.4f，调整为 %.4f",
+					e.Plan.Symbol, targetSLReason, newSL, minAllowedSL, minAllowedSL)
 				newSL = minAllowedSL
 			} else {
-				log.Printf("  ℹ️ 价格%.4f反弹，安全止损%.4f ≥ 原止损%.4f，暂不更新",
-					currentPrice, minAllowedSL, effectiveSL)
-				return 0
+				return 0 // 无法有效更新
 			}
 		}
 	}
@@ -2335,6 +2368,7 @@ type Decision struct {
 	InvalidationPrice     float64 `json:"invalidation_price,omitempty"`
 	InvalidationCondition string  `json:"invalidation_condition,omitempty"`
 	MinHoldMinutes        int     `json:"min_hold_minutes,omitempty"`
+	TrancheIndex          int     `json:"tranche_index,omitempty"` // 🆕 分批止盈档位
 }
 
 // FullDecision AI的完整决策
@@ -2530,9 +2564,31 @@ func evaluateExistingPositions(ctx *Context) []Decision {
 			Position:   &pos,
 			Plan:       plan,
 			MarketData: marketData,
+			Symbol:     pos.Symbol, // 🔧 保存symbol
 		}
 
 		result := evaluator.Evaluate()
+
+		// 🔧 新增: 更新峰值数据（如果需要）
+		if result.ShouldUpdatePeak && marketData != nil {
+			planManager.UpdatePlanPeakData(pos.Symbol, marketData.CurrentPrice, pos.UnrealizedPnLPct)
+		}
+
+		// 🔧 新增: 更新入场ATR（首次）
+		if plan != nil && plan.EntryATR == 0 && marketData != nil {
+			atr := 0.0
+			if marketData.LongerTermContext != nil {
+				atr = marketData.LongerTermContext.ATR14
+			}
+			if atr > 0 {
+				planManager.UpdatePlanEntryATR(pos.Symbol, atr)
+			}
+		}
+
+		// 🔧 新增: 更新动态止盈
+		if result.NewTakeProfit > 0 {
+			planManager.UpdatePlanTakeProfit(pos.Symbol, result.NewTakeProfit)
+		}
 
 		switch result.Action {
 		case "close":
@@ -2546,7 +2602,9 @@ func evaluateExistingPositions(ctx *Context) []Decision {
 				Reasoning: result.Reason,
 			})
 			if result.IsPlanInvalidated && plan != nil {
-				plan.Status = "INVALIDATED"
+				planManager.UpdatePlan(pos.Symbol, func(p *TradePlan) {
+					p.Status = "INVALIDATED"
+				})
 			}
 			planManager.RemovePlan(pos.Symbol)
 
@@ -2555,16 +2613,21 @@ func evaluateExistingPositions(ctx *Context) []Decision {
 				Symbol:          pos.Symbol,
 				Action:          "partial_close",
 				ClosePercentage: result.ClosePercentage,
+				NewStopLoss:     result.NewStopLoss,
 				Reasoning:       result.Reason,
 			})
-			if plan != nil {
-				if result.ClosePercentage == 50 {
-					plan.PartialCloseAt1R3 = true
-				} else if result.ClosePercentage == 30 {
-					plan.PartialCloseAt1R5 = true
-				}
-				planManager.autoSaveIfEnabled()
+
+			// 🔧 修复: 使用档位索引标记已执行
+			if result.TrancheIndex >= 0 {
+				planManager.MarkTrancheExecuted(pos.Symbol, result.TrancheIndex, result.ClosePercentage)
 			}
+
+			// 🔧 同时更新止损
+			if result.NewStopLoss > 0 {
+				planManager.UpdatePlanStopLoss(pos.Symbol, result.NewStopLoss)
+			}
+
+			planManager.autoSaveIfEnabled()
 
 		case "update_stop_loss":
 			decisions = append(decisions, Decision{
@@ -2810,6 +2873,7 @@ func CreateTradePlanFromDecision(d *Decision, actualEntryPrice float64) *TradePl
 		ActualEntry:                 actualEntryPrice,
 		StopLoss:                    adjustedSL,
 		TakeProfit:                  adjustedTP,
+		OriginalTakeProfit:          adjustedTP, // 🆕 记录原始止盈
 		CurrentStopLoss:             adjustedSL,
 		PositionSizeUSD:             d.PositionSizeUSD,
 		Leverage:                    d.Leverage,
@@ -2822,6 +2886,7 @@ func CreateTradePlanFromDecision(d *Decision, actualEntryPrice float64) *TradePl
 		Status:                      "ACTIVE",
 		Confidence:                  d.Confidence,
 		RiskUSD:                     d.RiskUSD,
+		ExecutedTranches:            make(map[int]bool), // 🆕 初始化分批止盈记录
 	}
 
 	if plan.MinHoldMinutes == 0 {
@@ -3368,8 +3433,10 @@ func OnPositionOpened(decision *Decision, actualEntryPrice float64, actualQuanti
 
 	// ✅ 更新实际数量
 	if actualQuantity > 0 {
-		plan.ActualQuantity = actualQuantity
-		plan.PositionSizeUSD = actualQuantity * actualEntryPrice
+		planManager.UpdatePlan(decision.Symbol, func(p *TradePlan) {
+			p.ActualQuantity = actualQuantity
+			p.PositionSizeUSD = actualQuantity * actualEntryPrice
+		})
 	}
 
 	log.Printf("✅ 开仓成功，交易计划已创建: %s %s @ %.4f (数量: %.6f)",
@@ -3380,26 +3447,31 @@ func OnPositionOpened(decision *Decision, actualEntryPrice float64, actualQuanti
 
 // OnPositionClosedSimple 简化版平仓回调（向后兼容）
 func OnPositionClosedSimple(symbol string, reason string) {
+	plan := planManager.GetPlan(symbol)
+	peakPnL := 0.0
+	if plan != nil {
+		peakPnL = plan.PeakPnLPercent
+	}
+
 	planManager.RemovePlan(symbol)
-	log.Printf("✅ 平仓成功，交易计划已移除: %s (原因: %s)", symbol, reason)
+	log.Printf("✅ 平仓成功，交易计划已移除: %s (峰值盈利: %.2f%%, 原因: %s)",
+		symbol, peakPnL, reason)
 }
 
 // OnPartialClose 部分平仓成功后调用
-func OnPartialClose(symbol string, percentage float64) {
-	plan := planManager.GetPlan(symbol)
-	if plan == nil {
-		return
+func OnPartialClose(symbol string, trancheIndex int, percentage float64, newStopLoss float64) {
+	// 标记档位已执行
+	if trancheIndex >= 0 {
+		planManager.MarkTrancheExecuted(symbol, trancheIndex, percentage)
 	}
 
-	if percentage >= 50 && !plan.PartialCloseAt1R3 {
-		plan.PartialCloseAt1R3 = true
-		log.Printf("✅ %s 部分平仓50%% @ RR 1:3", symbol)
-	} else if percentage >= 30 && plan.PartialCloseAt1R3 && !plan.PartialCloseAt1R5 {
-		plan.PartialCloseAt1R5 = true
-		log.Printf("✅ %s 部分平仓30%% @ RR 1:5", symbol)
+	// 更新止损
+	if newStopLoss > 0 {
+		planManager.UpdatePlanStopLoss(symbol, newStopLoss)
 	}
 
-	planManager.autoSaveIfEnabled()
+	log.Printf("✅ %s 部分平仓%.0f%% (档位%d), 新止损: %.4f",
+		symbol, percentage, trancheIndex+1, newStopLoss)
 }
 
 // OnStopLossUpdated 止损更新成功后调用
@@ -3500,18 +3572,33 @@ func GetPlanStatus() string {
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("活跃计划: %d个\n", len(plans)))
+
 	for _, plan := range plans {
 		holdingTime := time.Since(plan.CreatedAt).Minutes()
-		sb.WriteString(fmt.Sprintf("  - %s %s: 持仓%.0f分钟, SL=%.4f, TP=%.4f\n",
-			plan.Symbol, plan.Direction, holdingTime, plan.CurrentStopLoss, plan.TakeProfit))
 
-		// 格式化输出失效条件
+		// 🆕 显示峰值信息
+		peakInfo := ""
+		if plan.PeakPnLPercent > 0 {
+			peakInfo = fmt.Sprintf(", 峰值盈利=%.2f%%", plan.PeakPnLPercent)
+		}
+		if plan.PeakPrice > 0 {
+			peakInfo += fmt.Sprintf(", 峰值价=%.4f", plan.PeakPrice)
+		}
+
+		// 🆕 显示分批止盈进度
+		trancheInfo := ""
+		if plan.TotalClosedPercent > 0 {
+			trancheInfo = fmt.Sprintf(", 已平仓%.0f%%", plan.TotalClosedPercent)
+		}
+
+		sb.WriteString(fmt.Sprintf("  - %s %s: 持仓%.0f分钟, SL=%.4f, TP=%.4f%s%s\n",
+			plan.Symbol, plan.Direction, holdingTime,
+			plan.CurrentStopLoss, plan.TakeProfit,
+			peakInfo, trancheInfo))
+
 		if plan.InvalidationCondition != "" {
 			formattedCond := FormatInvalidationCondition(plan.InvalidationCondition)
 			sb.WriteString(fmt.Sprintf("    └─ 失效条件: %s\n", formattedCond))
-		}
-		if plan.InvalidationPrice > 0 {
-			sb.WriteString(fmt.Sprintf("    └─ 失效价格: %.4f\n", plan.InvalidationPrice))
 		}
 	}
 	return sb.String()
@@ -3529,46 +3616,47 @@ func GetPlanDetails(symbol string) string {
 	sb.WriteString(fmt.Sprintf("方向: %s\n", plan.Direction))
 	sb.WriteString(fmt.Sprintf("入场价: %.4f\n", plan.EntryPrice))
 	sb.WriteString(fmt.Sprintf("止损: %.4f (当前: %.4f)\n", plan.StopLoss, plan.CurrentStopLoss))
-	sb.WriteString(fmt.Sprintf("止盈: %.4f\n", plan.TakeProfit))
+	sb.WriteString(fmt.Sprintf("止盈: %.4f (原始: %.4f)\n", plan.TakeProfit, plan.OriginalTakeProfit))
 	sb.WriteString(fmt.Sprintf("仓位: %.2f USD\n", plan.PositionSizeUSD))
 	sb.WriteString(fmt.Sprintf("杠杆: %dx\n", plan.Leverage))
 	sb.WriteString(fmt.Sprintf("置信度: %d%%\n", plan.Confidence))
 	sb.WriteString(fmt.Sprintf("最小持仓: %d分钟\n", plan.MinHoldMinutes))
 	sb.WriteString(fmt.Sprintf("创建时间: %s\n", plan.CreatedAt.Format("2006-01-02 15:04:05")))
-	sb.WriteString(fmt.Sprintf("状态: %s\n", plan.Status))
+	sb.WriteString(fmt.Sprintf("状态: %s\n\n", plan.Status))
 
-	sb.WriteString("\n--- 失效条件 ---\n")
+	// 🆕 峰值追踪信息
+	sb.WriteString("--- 峰值追踪 ---\n")
+	sb.WriteString(fmt.Sprintf("峰值价格: %.4f\n", plan.PeakPrice))
+	sb.WriteString(fmt.Sprintf("峰值盈利: %.2f%%\n", plan.PeakPnLPercent))
+	sb.WriteString(fmt.Sprintf("入场ATR: %.4f\n\n", plan.EntryATR))
+
+	// 🆕 分批止盈进度
+	sb.WriteString("--- 分批止盈进度 ---\n")
+	sb.WriteString(fmt.Sprintf("累计平仓: %.0f%%\n", plan.TotalClosedPercent))
+	sb.WriteString(fmt.Sprintf("最后执行档位: %d\n", plan.LastExecutedTranche))
+	if plan.ExecutedTranches != nil {
+		for i, tranche := range defaultExitTranches {
+			status := "⏳ 待执行"
+			if plan.ExecutedTranches[i] {
+				status = "✅ 已执行"
+			}
+			sb.WriteString(fmt.Sprintf("  档位%d (RR %.1f): %s\n", i+1, tranche.TriggerRR, status))
+		}
+	}
+	sb.WriteString("\n")
+
+	// 失效条件
+	sb.WriteString("--- 失效条件 ---\n")
 	if plan.InvalidationPrice > 0 {
 		sb.WriteString(fmt.Sprintf("失效价格: %.4f\n", plan.InvalidationPrice))
 	}
 	if plan.InvalidationCondition != "" {
 		sb.WriteString(fmt.Sprintf("原始条件: %s\n", plan.InvalidationCondition))
 		sb.WriteString(fmt.Sprintf("格式化: %s\n", FormatInvalidationCondition(plan.InvalidationCondition)))
-
-		if plan.ParsedInvalidationCondition != nil {
-			pc := plan.ParsedInvalidationCondition
-			sb.WriteString(fmt.Sprintf("解析状态: %v\n", pc.IsValid))
-			if pc.IsValid {
-				sb.WriteString(fmt.Sprintf("  类型: %s\n", pc.Type))
-				sb.WriteString(fmt.Sprintf("  时间框架: %s\n", pc.Timeframe))
-				if pc.Indicator != "" {
-					sb.WriteString(fmt.Sprintf("  指标1: %s\n", pc.Indicator))
-				}
-				if pc.Indicator2 != "" {
-					sb.WriteString(fmt.Sprintf("  指标2: %s\n", pc.Indicator2))
-				}
-				if pc.Threshold > 0 {
-					sb.WriteString(fmt.Sprintf("  阈值: %.4f\n", pc.Threshold))
-				}
-			} else {
-				sb.WriteString(fmt.Sprintf("  解析错误: %s\n", pc.ParseError))
-			}
-		}
-	} else {
-		sb.WriteString("未设置失效条件\n")
 	}
+	sb.WriteString("\n")
 
-	sb.WriteString("\n--- 入场理由 ---\n")
+	sb.WriteString("--- 入场理由 ---\n")
 	sb.WriteString(plan.EntryReason + "\n")
 
 	return sb.String()
@@ -3875,13 +3963,30 @@ func ProcessDecisions(decisions []Decision, executor DecisionExecutor, marketDat
 		case "close_long", "close_short":
 			err = executor.ClosePosition(d.Symbol, 100)
 			if err == nil {
-				OnPositionClosedSimple(d.Symbol, d.Reasoning)
+				// 🔧 使用增强版回调（如果有市场数据可以计算盈亏）
+				if md, ok := marketData[d.Symbol]; ok {
+					plan := planManager.GetPlan(d.Symbol)
+					if plan != nil {
+						var pnlPct float64
+						if plan.Direction == "long" {
+							pnlPct = (md.CurrentPrice - plan.EntryPrice) / plan.EntryPrice * 100
+						} else {
+							pnlPct = (plan.EntryPrice - md.CurrentPrice) / plan.EntryPrice * 100
+						}
+						OnPositionClosed(d.Symbol, md.CurrentPrice, pnlPct, 0, d.Reasoning)
+					} else {
+						OnPositionClosedSimple(d.Symbol, d.Reasoning)
+					}
+				} else {
+					OnPositionClosedSimple(d.Symbol, d.Reasoning)
+				}
 			}
 
 		case "partial_close":
 			err = executor.ClosePosition(d.Symbol, d.ClosePercentage)
 			if err == nil {
-				OnPartialClose(d.Symbol, d.ClosePercentage)
+				// 🔧 使用档位索引
+				OnPartialClose(d.Symbol, d.TrancheIndex, d.ClosePercentage, d.NewStopLoss)
 			}
 
 		case "update_stop_loss":
@@ -4235,4 +4340,992 @@ func ImportData(data []byte) error {
 		len(importData.Plans), len(importData.Returns))
 
 	return nil
+}
+
+// ============================================================================
+// 止盈配置结构
+// ============================================================================
+
+// TakeProfitEngineConfig 止盈引擎配置
+type TakeProfitEngineConfig struct {
+	EnableDynamicTP      bool    `json:"enable_dynamic_tp"`
+	EnableScaledExit     bool    `json:"enable_scaled_exit"`
+	EnableATRTrailing    bool    `json:"enable_atr_trailing"`
+	EnableProfitProtect  bool    `json:"enable_profit_protect"`
+	PriorityMode         string  `json:"priority_mode"` // "aggressive", "conservative", "balanced"
+	MinimumProfitLock    float64 `json:"minimum_profit_lock"`
+	ATRTrailingMult      float64 `json:"atr_trailing_mult"`
+	ProfitProtectTrigger float64 `json:"profit_protect_trigger"`
+	ProfitProtectRatio   float64 `json:"profit_protect_ratio"`
+}
+
+// ExitTranche 分批止盈档位
+type ExitTranche struct {
+	TriggerRR        float64 `json:"trigger_rr"`
+	ClosePercent     float64 `json:"close_percent"`
+	MoveStopTo       string  `json:"move_stop_to"`
+	RequiresMomentum bool    `json:"requires_momentum"`
+}
+
+// 默认配置
+var defaultTPConfig = &TakeProfitEngineConfig{
+	EnableDynamicTP:      true,
+	EnableScaledExit:     true,
+	EnableATRTrailing:    true,
+	EnableProfitProtect:  true,
+	PriorityMode:         "balanced",
+	MinimumProfitLock:    5.0,
+	ATRTrailingMult:      2.5,
+	ProfitProtectTrigger: 8.0,
+	ProfitProtectRatio:   0.5,
+}
+
+// 默认分批止盈配置
+var defaultExitTranches = []ExitTranche{
+	{TriggerRR: 2.0, ClosePercent: 25, MoveStopTo: "breakeven", RequiresMomentum: false},
+	{TriggerRR: 3.0, ClosePercent: 25, MoveStopTo: "lock_1r", RequiresMomentum: false},
+	{TriggerRR: 5.0, ClosePercent: 25, MoveStopTo: "lock_2r", RequiresMomentum: true},
+	{TriggerRR: 8.0, ClosePercent: 25, MoveStopTo: "lock_3r", RequiresMomentum: true},
+}
+
+// GetTakeProfitConfig 获取止盈配置（可从外部配置加载）
+func GetTakeProfitConfig() *TakeProfitEngineConfig {
+	return defaultTPConfig
+}
+
+// ============================================================================
+// 辅助方法
+// ============================================================================
+
+// getEffectiveStopLoss 获取有效止损价
+func (e *PositionEvaluator) getEffectiveStopLoss() float64 {
+	if e.Plan == nil {
+		return 0
+	}
+	if e.Plan.CurrentStopLoss > 0 {
+		return e.Plan.CurrentStopLoss
+	}
+	return e.Plan.StopLoss
+}
+
+// calculateCurrentRR 计算当前风险回报比
+func (e *PositionEvaluator) calculateCurrentRR() float64 {
+	if e.Plan == nil {
+		return 0
+	}
+
+	riskDistance := math.Abs(e.Plan.EntryPrice - e.Plan.StopLoss)
+	if riskDistance == 0 {
+		return 0
+	}
+
+	currentDistance := math.Abs(e.MarketData.CurrentPrice - e.Plan.EntryPrice)
+	return currentDistance / riskDistance
+}
+
+// getATR 获取ATR值
+func (e *PositionEvaluator) getATR() float64 {
+	if e.MarketData.LongerTermContext != nil && e.MarketData.LongerTermContext.ATR14 > 0 {
+		return e.MarketData.LongerTermContext.ATR14
+	}
+	// 默认使用价格的2%作为ATR估算
+	return e.MarketData.CurrentPrice * 0.02
+}
+
+// updatePeakData 更新峰值数据
+func (e *PositionEvaluator) updatePeakData() {
+	if e.Plan == nil {
+		return
+	}
+
+	currentPrice := e.MarketData.CurrentPrice
+	pnlPct := e.Position.UnrealizedPnLPct
+
+	// 更新峰值价格
+	if e.Plan.Direction == "long" {
+		if currentPrice > e.Plan.PeakPrice || e.Plan.PeakPrice == 0 {
+			e.Plan.PeakPrice = currentPrice
+		}
+	} else {
+		if currentPrice < e.Plan.PeakPrice || e.Plan.PeakPrice == 0 {
+			e.Plan.PeakPrice = currentPrice
+		}
+	}
+
+	// 更新峰值盈亏
+	if pnlPct > e.Plan.PeakPnLPercent {
+		e.Plan.PeakPnLPercent = pnlPct
+	}
+}
+
+// ============================================================================
+// 利润保护机制
+// ============================================================================
+
+// checkProfitProtection 检查利润保护条件
+func (e *PositionEvaluator) checkProfitProtection(config *TakeProfitEngineConfig) *EvaluationResult {
+	if e.Plan == nil {
+		return nil
+	}
+
+	pnlPct := e.Position.UnrealizedPnLPct
+	peakPnL := e.Plan.PeakPnLPercent
+
+	// 如果从未盈利超过触发阈值，不触发保护
+	if peakPnL < config.ProfitProtectTrigger {
+		return nil
+	}
+
+	// 计算保护线：峰值盈利的一定比例
+	protectLine := peakPnL * config.ProfitProtectRatio
+
+	// 如果当前盈利跌破保护线
+	if pnlPct < protectLine {
+		return &EvaluationResult{
+			Action: "close",
+			Reason: fmt.Sprintf("🛡️ 利润保护触发: 峰值盈利%.2f%%, 当前%.2f%%, 保护线%.2f%%",
+				peakPnL, pnlPct, protectLine),
+		}
+	}
+
+	// 如果曾经盈利很多但现在接近回本，也触发保护
+	if peakPnL >= 10.0 && pnlPct < 2.0 {
+		return &EvaluationResult{
+			Action: "close",
+			Reason: fmt.Sprintf("🛡️ 利润保护触发: 曾盈利%.2f%%，现仅剩%.2f%%，保护残余利润",
+				peakPnL, pnlPct),
+		}
+	}
+
+	return nil
+}
+
+// ============================================================================
+// ATR跟踪止盈
+// ============================================================================
+
+// evaluateATRTrailingTakeProfit ATR跟踪止盈评估
+func (e *PositionEvaluator) evaluateATRTrailingTakeProfit(config *TakeProfitEngineConfig) *EvaluationResult {
+	if e.Plan == nil {
+		return nil
+	}
+
+	currentPrice := e.MarketData.CurrentPrice
+	atr := e.getATR()
+	trailingDistance := atr * config.ATRTrailingMult
+
+	if e.Plan.Direction == "long" {
+		// 多单：从最高点回落超过ATR距离则止盈
+		peakPrice := e.Plan.PeakPrice
+		if peakPrice == 0 {
+			peakPrice = currentPrice
+		}
+
+		trailingTP := peakPrice - trailingDistance
+
+		// 确保跟踪止盈价高于入场价（保证盈利）
+		if trailingTP > e.Plan.EntryPrice && currentPrice <= trailingTP {
+			profit := (trailingTP - e.Plan.EntryPrice) / e.Plan.EntryPrice * 100
+			return &EvaluationResult{
+				Action: "close",
+				Reason: fmt.Sprintf("📈 ATR跟踪止盈: 从高点%.4f回落%.4f (%.1fATR), 锁定利润%.2f%%",
+					peakPrice, trailingDistance, config.ATRTrailingMult, profit),
+			}
+		}
+	} else {
+		// 空单：从最低点反弹超过ATR距离则止盈
+		peakPrice := e.Plan.PeakPrice
+		if peakPrice == 0 {
+			peakPrice = currentPrice
+		}
+
+		trailingTP := peakPrice + trailingDistance
+
+		// 确保跟踪止盈价低于入场价（保证盈利）
+		if trailingTP < e.Plan.EntryPrice && currentPrice >= trailingTP {
+			profit := (e.Plan.EntryPrice - trailingTP) / e.Plan.EntryPrice * 100
+			return &EvaluationResult{
+				Action: "close",
+				Reason: fmt.Sprintf("📉 ATR跟踪止盈: 从低点%.4f反弹%.4f (%.1fATR), 锁定利润%.2f%%",
+					peakPrice, trailingDistance, config.ATRTrailingMult, profit),
+			}
+		}
+	}
+
+	return nil
+}
+
+// ============================================================================
+// 智能分批止盈
+// ============================================================================
+
+// evaluateScaledExit 智能分批止盈评估
+func (e *PositionEvaluator) evaluateScaledExit() *EvaluationResult {
+	if e.Plan == nil {
+		return nil
+	}
+
+	currentRR := e.calculateCurrentRR()
+
+	// 初始化已执行档位记录
+	if e.Plan.ExecutedTranches == nil {
+		e.Plan.ExecutedTranches = make(map[int]bool)
+	}
+
+	for i, tranche := range defaultExitTranches {
+		// 检查是否已执行该档
+		if e.Plan.ExecutedTranches[i] {
+			continue
+		}
+
+		if currentRR >= tranche.TriggerRR {
+			// 检查动量条件
+			if tranche.RequiresMomentum && !e.checkMomentumConfirmation() {
+				log.Printf("📊 %s 达到RR %.1f但动量不支持，等待更好时机", e.Plan.Symbol, currentRR)
+				continue
+			}
+
+			// 计算新止损价
+			newStopLoss := e.calculateStopLossForTranche(tranche.MoveStopTo)
+
+			// 标记该档已执行
+			e.Plan.ExecutedTranches[i] = true
+
+			return &EvaluationResult{
+				Action:          "partial_close",
+				ClosePercentage: tranche.ClosePercent,
+				NewStopLoss:     newStopLoss,
+				Reason: fmt.Sprintf("📊 分批止盈第%d档: RR %.2f:1, 平仓%.0f%%, 止损移至%s",
+					i+1, currentRR, tranche.ClosePercent, tranche.MoveStopTo),
+			}
+		}
+	}
+
+	return nil
+}
+
+// checkMomentumConfirmation 检查动量确认
+func (e *PositionEvaluator) checkMomentumConfirmation() bool {
+	// 1. RSI检查
+	rsi := e.MarketData.CurrentRSI14
+	if e.Plan.Direction == "long" {
+		// 多单：RSI超买区（>75）动量减弱
+		if rsi > 75 {
+			return false
+		}
+	} else {
+		// 空单：RSI超卖区（<25）动量减弱
+		if rsi < 25 {
+			return false
+		}
+	}
+
+	// 2. MACD柱状图检查
+	if e.MarketData.IntradaySeries != nil {
+		macdHist := market.GetLastValue(e.MarketData.IntradaySeries.MACDHist)
+		prevHist := e.getSecondLastMACDHist()
+
+		if e.Plan.Direction == "long" {
+			// 多单：MACD柱状图应该为正且扩张
+			if macdHist < 0 || macdHist < prevHist {
+				return false
+			}
+		} else {
+			// 空单：MACD柱状图应该为负且扩张（更负）
+			if macdHist > 0 || macdHist > prevHist {
+				return false
+			}
+		}
+	}
+
+	// 3. ADX趋势强度检查
+	if e.MarketData.CurrentADX < 20 {
+		return false // 趋势太弱
+	}
+
+	return true
+}
+
+// getSecondLastMACDHist 获取倒数第二个MACD柱状图值
+func (e *PositionEvaluator) getSecondLastMACDHist() float64 {
+	if e.MarketData.IntradaySeries == nil {
+		return 0
+	}
+	hist := e.MarketData.IntradaySeries.MACDHist
+	if len(hist) < 2 {
+		return 0
+	}
+	return hist[len(hist)-2]
+}
+
+// calculateStopLossForTranche 根据档位计算新止损价
+func (e *PositionEvaluator) calculateStopLossForTranche(moveStopTo string) float64 {
+	if e.Plan == nil {
+		return 0
+	}
+
+	entryPrice := e.Plan.EntryPrice
+	riskDistance := math.Abs(entryPrice - e.Plan.StopLoss)
+
+	switch moveStopTo {
+	case "breakeven":
+		// 移动到保本
+		return entryPrice
+
+	case "lock_1r":
+		// 锁定1倍风险距离的利润
+		if e.Plan.Direction == "long" {
+			return entryPrice + riskDistance
+		}
+		return entryPrice - riskDistance
+
+	case "lock_2r":
+		// 锁定2倍风险距离的利润
+		if e.Plan.Direction == "long" {
+			return entryPrice + riskDistance*2
+		}
+		return entryPrice - riskDistance*2
+
+	case "lock_3r":
+		// 锁定3倍风险距离的利润
+		if e.Plan.Direction == "long" {
+			return entryPrice + riskDistance*3
+		}
+		return entryPrice - riskDistance*3
+
+	default:
+		return e.getEffectiveStopLoss()
+	}
+}
+
+// ============================================================================
+// 移动止损
+// ============================================================================
+
+// evaluateTrailingStop 评估移动止损
+func (e *PositionEvaluator) evaluateTrailingStop() *EvaluationResult {
+	newSL := e.calculateTrailingStop()
+
+	if newSL <= 0 {
+		return nil
+	}
+
+	effectiveSL := e.getEffectiveStopLoss()
+	currentPrice := e.MarketData.CurrentPrice
+
+	shouldUpdate := false
+
+	if e.Plan.Direction == "long" {
+		// 多单：新止损必须高于原止损，且低于当前价格
+		if newSL > effectiveSL && newSL < currentPrice {
+			shouldUpdate = true
+		}
+	} else {
+		// 空单：新止损必须低于原止损，且高于当前价格
+		if newSL < effectiveSL && newSL > currentPrice {
+			shouldUpdate = true
+		}
+	}
+
+	if shouldUpdate {
+		return &EvaluationResult{
+			Action:           "update_stop_loss",
+			NewStopLoss:      newSL,
+			Reason:           fmt.Sprintf("📈 移动止损: %.4f → %.4f (盈利%.2f%%)", effectiveSL, newSL, e.Position.UnrealizedPnLPct),
+			ShouldUpdatePeak: true,
+		}
+	}
+
+	return nil
+}
+
+// ============================================================================
+// 动态止盈调整
+// ============================================================================
+
+// adjustDynamicTakeProfit 动态调整止盈价格
+func (e *PositionEvaluator) adjustDynamicTakeProfit(config *TakeProfitEngineConfig) {
+	if e.Plan == nil {
+		return
+	}
+
+	baseTP := e.Plan.TakeProfit
+	entryPrice := e.Plan.EntryPrice
+
+	// 1. 获取市场状态调整因子
+	marketState, confidence := market.GetMarketState(e.MarketData)
+	stateMultiplier := e.getStateMultiplier(marketState, confidence)
+
+	// 2. 波动率调整因子
+	currentATR := e.getATR()
+	// 如果没有记录入场ATR，使用当前ATR
+	entryATR := e.Plan.EntryATR
+	if entryATR == 0 {
+		entryATR = currentATR
+		e.Plan.EntryATR = currentATR
+	}
+
+	volAdjustment := 1.0
+	if entryATR > 0 {
+		volatilityRatio := currentATR / entryATR
+		if volatilityRatio > 1.3 {
+			volAdjustment = 1.2 // 波动率大幅上升，扩大目标
+		} else if volatilityRatio < 0.7 {
+			volAdjustment = 0.85 // 波动率下降，收紧目标
+		}
+	}
+
+	// 3. 时间衰减因子
+	timeAdjustment := 1.0
+	holdHours := time.Since(e.Plan.CreatedAt).Hours()
+	maxHoldHours := 72.0 // 最大持仓72小时
+
+	if holdHours > maxHoldHours {
+		// 超过最大持仓时间，逐步降低止盈目标
+		decayFactor := 1.0 - (holdHours-maxHoldHours)/maxHoldHours*0.3
+		timeAdjustment = math.Max(0.7, decayFactor)
+	}
+
+	// 计算调整后的止盈价
+	originalDistance := math.Abs(baseTP - entryPrice)
+	adjustedDistance := originalDistance * stateMultiplier * volAdjustment * timeAdjustment
+
+	var newTP float64
+	if e.Plan.Direction == "long" {
+		newTP = entryPrice + adjustedDistance
+	} else {
+		newTP = entryPrice - adjustedDistance
+	}
+
+	// 只有变化超过0.5%才更新
+	if math.Abs(newTP-e.Plan.TakeProfit)/e.Plan.TakeProfit > 0.005 {
+		log.Printf("📊 %s 动态止盈调整: %.4f → %.4f (状态:%.2f, 波动:%.2f, 时间:%.2f)",
+			e.Plan.Symbol, e.Plan.TakeProfit, newTP, stateMultiplier, volAdjustment, timeAdjustment)
+		e.Plan.TakeProfit = newTP
+		planManager.autoSaveIfEnabled()
+	}
+}
+
+// getStateMultiplier 获取市场状态乘数
+func (e *PositionEvaluator) getStateMultiplier(state string, confidence int) float64 {
+	switch state {
+	case "STRONG_UPTREND":
+		if e.Plan.Direction == "long" && confidence >= 80 {
+			return 1.5 // 强上升趋势做多，扩大目标
+		}
+		return 1.2
+	case "STRONG_DOWNTREND":
+		if e.Plan.Direction == "short" && confidence >= 80 {
+			return 1.5 // 强下降趋势做空，扩大目标
+		}
+		return 1.2
+	case "UPTREND":
+		if e.Plan.Direction == "long" {
+			return 1.3
+		}
+		return 0.9 // 上升趋势中的空单，收紧目标
+	case "DOWNTREND":
+		if e.Plan.Direction == "short" {
+			return 1.3
+		}
+		return 0.9 // 下降趋势中的多单，收紧目标
+	case "RANGING", "CONSOLIDATION":
+		return 0.8 // 震荡市，收紧目标
+	default:
+		return 1.0
+	}
+}
+
+// 🔧 新增: UpdatePlanPeakData 更新峰值数据（专用方法）
+func (m *TradePlanManager) UpdatePlanPeakData(symbol string, currentPrice float64, currentPnLPct float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	plan, ok := m.plans[symbol]
+	if !ok {
+		return
+	}
+
+	updated := false
+
+	// 更新峰值盈亏百分比
+	if currentPnLPct > plan.PeakPnLPercent {
+		plan.PeakPnLPercent = currentPnLPct
+		updated = true
+	}
+
+	// 更新峰值价格
+	if plan.Direction == "long" {
+		if currentPrice > plan.PeakPrice || plan.PeakPrice == 0 {
+			plan.PeakPrice = currentPrice
+			updated = true
+		}
+	} else {
+		if plan.PeakPrice == 0 || currentPrice < plan.PeakPrice {
+			plan.PeakPrice = currentPrice
+			updated = true
+		}
+	}
+
+	if updated {
+		log.Printf("📊 %s 峰值更新: PeakPrice=%.4f, PeakPnL=%.2f%%",
+			symbol, plan.PeakPrice, plan.PeakPnLPercent)
+	}
+}
+
+// 🔧 新增: UpdatePlanTakeProfit 更新动态止盈价格
+func (m *TradePlanManager) UpdatePlanTakeProfit(symbol string, newTP float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	plan, ok := m.plans[symbol]
+	if !ok {
+		return
+	}
+
+	// 记录原始止盈价（如果还没记录）
+	if plan.OriginalTakeProfit == 0 {
+		plan.OriginalTakeProfit = plan.TakeProfit
+	}
+
+	oldTP := plan.TakeProfit
+	plan.TakeProfit = newTP
+	plan.LastTPAdjustTime = time.Now()
+
+	log.Printf("📈 %s 动态止盈调整: %.4f → %.4f", symbol, oldTP, newTP)
+}
+
+// 🔧 新增: MarkTrancheExecuted 标记分批止盈档位已执行
+func (m *TradePlanManager) MarkTrancheExecuted(symbol string, trancheIndex int, closePercent float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	plan, ok := m.plans[symbol]
+	if !ok {
+		return
+	}
+
+	if plan.ExecutedTranches == nil {
+		plan.ExecutedTranches = make(map[int]bool)
+	}
+
+	plan.ExecutedTranches[trancheIndex] = true
+	plan.LastExecutedTranche = trancheIndex
+	plan.TotalClosedPercent += closePercent
+
+	log.Printf("📊 %s 分批止盈: 档位%d已执行, 累计平仓%.0f%%",
+		symbol, trancheIndex+1, plan.TotalClosedPercent)
+}
+
+// 🔧 新增: UpdatePlanEntryATR 更新入场时ATR
+func (m *TradePlanManager) UpdatePlanEntryATR(symbol string, atr float64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if plan, ok := m.plans[symbol]; ok {
+		if plan.EntryATR == 0 {
+			plan.EntryATR = atr
+			log.Printf("📊 %s 记录入场ATR: %.4f", symbol, atr)
+		}
+	}
+}
+
+// 🔧 新增: GetPlanPeakData 获取峰值数据（用于日志和显示）
+func (m *TradePlanManager) GetPlanPeakData(symbol string) (peakPrice, peakPnL float64) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if plan, ok := m.plans[symbol]; ok {
+		return plan.PeakPrice, plan.PeakPnLPercent
+	}
+	return 0, 0
+}
+
+// 🔧 新增: IsTrancheExecuted 检查档位是否已执行
+func (m *TradePlanManager) IsTrancheExecuted(symbol string, trancheIndex int) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if plan, ok := m.plans[symbol]; ok {
+		if plan.ExecutedTranches == nil {
+			return false
+		}
+		return plan.ExecutedTranches[trancheIndex]
+	}
+	return false
+}
+
+// 🔧 修复: checkProfitProtectionFixed 利润保护检查（使用Plan中的峰值）
+func (e *PositionEvaluator) checkProfitProtectionFixed(config *TakeProfitEngineConfig) *EvaluationResult {
+	if e.Plan == nil {
+		return nil
+	}
+
+	pnlPct := e.Position.UnrealizedPnLPct
+	peakPnL := e.Plan.PeakPnLPercent
+
+	// 如果当前盈利超过记录的峰值，说明峰值需要更新（但这里只做检查，不修改）
+	// 实际更新由外部 evaluateExistingPositions 处理
+	if pnlPct > peakPnL {
+		peakPnL = pnlPct // 使用当前值作为临时峰值进行计算
+	}
+
+	// 如果从未盈利超过触发阈值，不触发保护
+	if peakPnL < config.ProfitProtectTrigger {
+		return nil
+	}
+
+	// 计算保护线：峰值盈利的一定比例
+	protectLine := peakPnL * config.ProfitProtectRatio
+
+	// 如果当前盈利跌破保护线
+	if pnlPct < protectLine {
+		return &EvaluationResult{
+			Action: "close",
+			Reason: fmt.Sprintf("🛡️ 利润保护触发: 峰值盈利%.2f%%, 当前%.2f%%, 保护线%.2f%%",
+				peakPnL, pnlPct, protectLine),
+			ShouldUpdatePeak: false, // 平仓不需要更新峰值
+		}
+	}
+
+	// 如果曾经盈利很多但现在接近回本，也触发保护
+	if peakPnL >= 10.0 && pnlPct < 2.0 {
+		return &EvaluationResult{
+			Action: "close",
+			Reason: fmt.Sprintf("🛡️ 利润保护触发: 曾盈利%.2f%%，现仅剩%.2f%%，保护残余利润",
+				peakPnL, pnlPct),
+			ShouldUpdatePeak: false,
+		}
+	}
+
+	return nil
+}
+
+// 🔧 修复: evaluateATRTrailingTakeProfitFixed ATR跟踪止盈（使用Plan中的峰值价格）
+func (e *PositionEvaluator) evaluateATRTrailingTakeProfitFixed(config *TakeProfitEngineConfig) *EvaluationResult {
+	if e.Plan == nil {
+		return nil
+	}
+
+	currentPrice := e.MarketData.CurrentPrice
+	atr := e.getATR()
+	trailingDistance := atr * config.ATRTrailingMult
+
+	// 使用Plan中记录的峰值价格
+	peakPrice := e.Plan.PeakPrice
+
+	// 如果当前价格创新高/新低，更新临时峰值（实际更新由外部处理）
+	if e.Plan.Direction == "long" {
+		if peakPrice == 0 || currentPrice > peakPrice {
+			peakPrice = currentPrice
+		}
+	} else {
+		if peakPrice == 0 || currentPrice < peakPrice {
+			peakPrice = currentPrice
+		}
+	}
+
+	if e.Plan.Direction == "long" {
+		trailingTP := peakPrice - trailingDistance
+
+		// 确保跟踪止盈价高于入场价（保证盈利）
+		if trailingTP > e.Plan.EntryPrice && currentPrice <= trailingTP {
+			profit := (trailingTP - e.Plan.EntryPrice) / e.Plan.EntryPrice * 100
+			return &EvaluationResult{
+				Action: "close",
+				Reason: fmt.Sprintf("📈 ATR跟踪止盈: 从高点%.4f回落%.4f (%.1fATR), 锁定利润%.2f%%",
+					peakPrice, trailingDistance, config.ATRTrailingMult, profit),
+				ShouldUpdatePeak: false,
+			}
+		}
+	} else {
+		trailingTP := peakPrice + trailingDistance
+
+		if trailingTP < e.Plan.EntryPrice && currentPrice >= trailingTP {
+			profit := (e.Plan.EntryPrice - trailingTP) / e.Plan.EntryPrice * 100
+			return &EvaluationResult{
+				Action: "close",
+				Reason: fmt.Sprintf("📉 ATR跟踪止盈: 从低点%.4f反弹%.4f (%.1fATR), 锁定利润%.2f%%",
+					peakPrice, trailingDistance, config.ATRTrailingMult, profit),
+				ShouldUpdatePeak: false,
+			}
+		}
+	}
+
+	return nil
+}
+
+// 🔧 修复: evaluateScaledExitFixed 智能分批止盈（通过planManager检查档位）
+func (e *PositionEvaluator) evaluateScaledExitFixed() *EvaluationResult {
+	if e.Plan == nil {
+		return nil
+	}
+
+	currentRR := e.calculateCurrentRR()
+
+	for i, tranche := range defaultExitTranches {
+		// 🔧 通过 planManager 检查档位是否已执行
+		if planManager.IsTrancheExecuted(e.Symbol, i) {
+			continue
+		}
+
+		if currentRR >= tranche.TriggerRR {
+			// 检查动量条件
+			if tranche.RequiresMomentum && !e.checkMomentumConfirmation() {
+				log.Printf("📊 %s 达到RR %.1f但动量不支持，等待更好时机", e.Symbol, currentRR)
+				continue
+			}
+
+			// 计算新止损价
+			newStopLoss := e.calculateStopLossForTranche(tranche.MoveStopTo)
+
+			return &EvaluationResult{
+				Action:          "partial_close",
+				ClosePercentage: tranche.ClosePercent,
+				NewStopLoss:     newStopLoss,
+				TrancheIndex:    i, // 🔧 记录档位索引
+				Reason: fmt.Sprintf("📊 分批止盈第%d档: RR %.2f:1, 平仓%.0f%%, 止损移至%s",
+					i+1, currentRR, tranche.ClosePercent, tranche.MoveStopTo),
+				ShouldUpdatePeak: false,
+			}
+		}
+	}
+
+	return nil
+}
+
+// 🔧 新增: calculateDynamicTakeProfit 计算动态止盈价格（返回新值而不是直接修改）
+func (e *PositionEvaluator) calculateDynamicTakeProfit(config *TakeProfitEngineConfig) float64 {
+	if e.Plan == nil {
+		return 0
+	}
+
+	// 使用原始止盈价作为基准
+	baseTP := e.Plan.OriginalTakeProfit
+	if baseTP == 0 {
+		baseTP = e.Plan.TakeProfit
+	}
+	entryPrice := e.Plan.EntryPrice
+
+	// 1. 获取市场状态调整因子
+	marketState, confidence := market.GetMarketState(e.MarketData)
+	stateMultiplier := e.getStateMultiplier(marketState, confidence)
+
+	// 2. 波动率调整因子
+	currentATR := e.getATR()
+	entryATR := e.Plan.EntryATR
+	if entryATR == 0 {
+		entryATR = currentATR
+	}
+
+	volAdjustment := 1.0
+	if entryATR > 0 {
+		volatilityRatio := currentATR / entryATR
+		if volatilityRatio > 1.3 {
+			volAdjustment = 1.2
+		} else if volatilityRatio < 0.7 {
+			volAdjustment = 0.85
+		}
+	}
+
+	// 3. 时间衰减因子
+	timeAdjustment := 1.0
+	holdHours := time.Since(e.Plan.CreatedAt).Hours()
+	maxHoldHours := 72.0
+
+	if holdHours > maxHoldHours {
+		decayFactor := 1.0 - (holdHours-maxHoldHours)/maxHoldHours*0.3
+		timeAdjustment = math.Max(0.7, decayFactor)
+	}
+
+	// 计算调整后的止盈价
+	originalDistance := math.Abs(baseTP - entryPrice)
+	adjustedDistance := originalDistance * stateMultiplier * volAdjustment * timeAdjustment
+
+	var newTP float64
+	if e.Plan.Direction == "long" {
+		newTP = entryPrice + adjustedDistance
+	} else {
+		newTP = entryPrice - adjustedDistance
+	}
+
+	// 只有变化超过0.5%才返回新值
+	if math.Abs(newTP-e.Plan.TakeProfit)/e.Plan.TakeProfit > 0.005 {
+		return newTP
+	}
+
+	return 0 // 返回0表示不需要更新
+}
+
+// ============================================================================
+// 🔧 修复6: 持久化结构更新
+// ============================================================================
+
+// PersistentData 持久化数据结构
+type PersistentData struct {
+	Plans        map[string]*TradePlan `json:"plans"`
+	Statistics   *TradeStatistics      `json:"statistics"`
+	Returns      []float64             `json:"returns"`
+	ClosedTrades []ClosedTradeRecord   `json:"closed_trades"`
+	UpdatedAt    time.Time             `json:"updated_at"`
+}
+
+// ============================================================================
+// 数据结构定义
+// ============================================================================
+
+// ClosedTradeRecord 已平仓交易记录
+type ClosedTradeRecord struct {
+	Symbol         string    `json:"symbol"`
+	Side           string    `json:"side"`
+	CloseReason    string    `json:"close_reason"`
+	EntryPrice     float64   `json:"entry_price"`
+	ExitPrice      float64   `json:"exit_price"`
+	Quantity       float64   `json:"quantity"`
+	Leverage       int       `json:"leverage"`
+	RealizedPnL    float64   `json:"realized_pnl"`
+	PnLPercent     float64   `json:"pnl_percent"`
+	HoldingMinutes int64     `json:"holding_minutes"`
+	EntryTime      time.Time `json:"entry_time"`
+	ExitTime       time.Time `json:"exit_time"`
+	Commission     float64   `json:"commission"`
+	Direction      string    `json:"direction"`
+	PnLUSD         float64   `json:"pnl_usd"`
+	ExitReason     string    `json:"exit_reason"`
+	PeakPnLPercent float64   `json:"peak_pnl_percent"` // 🆕 记录峰值盈利
+	ClosedAt       time.Time `json:"closed_at"`
+}
+
+var (
+	closedTrades     []ClosedTradeRecord
+	closedTradesLock sync.RWMutex
+)
+
+// ============================================================================
+// 🔧 修复7: 平仓回调增强
+// ============================================================================
+
+// OnPositionClosed 平仓成功后调用（增强版，记录峰值信息）
+func OnPositionClosed(symbol string, exitPrice float64, pnlPercent float64, pnlUSD float64, reason string) {
+	// 获取计划信息用于记录
+	plan := planManager.GetPlan(symbol)
+
+	var record ClosedTradeRecord
+	record.Symbol = symbol
+	record.ExitPrice = exitPrice
+	record.PnLPercent = pnlPercent
+	record.PnLUSD = pnlUSD
+	record.ExitReason = reason
+	record.ClosedAt = time.Now()
+
+	if plan != nil {
+		record.Direction = plan.Direction
+		record.EntryPrice = plan.EntryPrice
+		record.PeakPnLPercent = plan.PeakPnLPercent
+		record.HoldingMinutes = int64(time.Since(plan.CreatedAt).Minutes())
+	}
+
+	// 记录已平仓交易
+	closedTradesLock.Lock()
+	closedTrades = append(closedTrades, record)
+	// 保留最近100笔
+	if len(closedTrades) > 100 {
+		closedTrades = closedTrades[len(closedTrades)-100:]
+	}
+	closedTradesLock.Unlock()
+
+	// 更新统计
+	UpdateStatistics(pnlPercent, float64(record.HoldingMinutes))
+	// 记录收益率用于夏普比率计算（returnsLock）
+	AddReturn(pnlPercent)
+
+	// 移除计划
+	planManager.RemovePlan(symbol)
+
+	log.Printf("✅ 平仓成功: %s 盈亏%.2f%% (峰值%.2f%%), 原因: %s",
+		symbol, pnlPercent, record.PeakPnLPercent, reason)
+}
+
+// ============================================================================
+// 🔧 修复11: 单元测试辅助函数
+// ============================================================================
+
+// TestEvaluateTakeProfit 测试止盈逻辑（供单元测试使用）
+func TestEvaluateTakeProfit(
+	symbol string,
+	direction string,
+	entryPrice float64,
+	currentPrice float64,
+	stopLoss float64,
+	takeProfit float64,
+	peakPrice float64,
+	peakPnLPct float64,
+	pnlPct float64,
+	executedTranches map[int]bool,
+) *EvaluationResult {
+
+	// 创建模拟的Plan
+	plan := &TradePlan{
+		Symbol:             symbol,
+		Direction:          direction,
+		EntryPrice:         entryPrice,
+		StopLoss:           stopLoss,
+		TakeProfit:         takeProfit,
+		OriginalTakeProfit: takeProfit,
+		CurrentStopLoss:    stopLoss,
+		PeakPrice:          peakPrice,
+		PeakPnLPercent:     peakPnLPct,
+		ExecutedTranches:   executedTranches,
+		CreatedAt:          time.Now().Add(-2 * time.Hour), // 假设持仓2小时
+		MinHoldMinutes:     30,
+	}
+
+	if plan.ExecutedTranches == nil {
+		plan.ExecutedTranches = make(map[int]bool)
+	}
+
+	// 创建模拟的Position
+	position := &PositionInfo{
+		Symbol:           symbol,
+		Side:             direction,
+		EntryPrice:       entryPrice,
+		MarkPrice:        currentPrice,
+		UnrealizedPnLPct: pnlPct,
+		UpdateTime:       time.Now().Add(-2 * time.Hour).UnixMilli(),
+	}
+
+	// 创建模拟的MarketData
+	marketData := &market.Data{
+		CurrentPrice: currentPrice,
+		CurrentRSI14: 50, // 中性
+		CurrentADX:   30, // 有趋势
+	}
+
+	// 临时设置Plan用于测试
+	if planManager == nil {
+		planManager = &TradePlanManager{
+			plans:    make(map[string]*TradePlan),
+			autoSave: false,
+		}
+	}
+	planManager.mu.Lock()
+	planManager.plans[symbol] = plan
+	planManager.mu.Unlock()
+
+	// 创建评估器并评估
+	evaluator := &PositionEvaluator{
+		Position:   position,
+		Plan:       plan,
+		MarketData: marketData,
+		Symbol:     symbol,
+	}
+
+	result := evaluator.Evaluate()
+
+	// 清理
+	planManager.mu.Lock()
+	delete(planManager.plans, symbol)
+	planManager.mu.Unlock()
+
+	return result
 }
