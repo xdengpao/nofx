@@ -296,6 +296,10 @@ func CheckCircuitBreaker(ctx *Context, stats *TradeStatistics) *CircuitBreakerSt
 		}
 		// 冷却结束，重置
 		cb.IsTriggered = false
+		//减少亏损次数
+		if stats != nil && stats.ConsecutiveLosses >= config.MaxConsecutiveLosses{
+			stats.ConsecutiveLosses=stats.ConsecutiveLosses-1
+		}
 	}
 
 	// 检查BTC闪崩
