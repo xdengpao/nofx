@@ -1,0 +1,13 @@
+{
+  "enabled": true,
+  "name": "任务执行前检查",
+  "description": "在开始执行 spec 任务前，提醒检查前置任务是否完成、需求映射是否正确。",
+  "version": "1",
+  "when": {
+    "type": "preTaskExecution"
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "在开始执行此任务前，请确认：1) 该任务的前置依赖任务已全部完成 2) 理解该任务对应的需求编号和正确性属性 3) 如果是属性基测试任务，确认已安装 gopter 依赖。确认后继续执行。"
+  }
+}

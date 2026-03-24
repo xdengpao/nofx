@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "name": "Go 代码写入审查",
+  "description": "在 agent 写入 Go 文件前，审查代码是否遵循项目规范：不硬编码 API 密钥、使用正确的错误处理模式、遵循 Go 命名约定。",
+  "version": "1",
+  "when": {
+    "type": "preToolUse",
+    "toolTypes": [
+      "write"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "在写入 Go 文件前，请验证以下规范：1) 不包含硬编码的 API 密钥或私钥 2) 所有错误都被正确处理（不忽略 error 返回值）3) 遵循 Go 命名约定（驼峰命名、导出函数大写开头）4) 日志使用 log.Printf 而非 fmt.Println 5) 并发操作使用适当的同步机制（mutex/channel）。如果代码符合规范，直接继续执行。"
+  }
+}

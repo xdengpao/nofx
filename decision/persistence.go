@@ -118,6 +118,20 @@ func (m *TradePlanManager) loadFromFile() error {
 		closedTradesLock.Unlock()
 	}
 
+	// 恢复熔断状态
+	if persistentData.CircuitBreaker != nil && persistentData.CircuitBreaker.IsTriggered {
+		cooldownEnd := persistentData.CircuitBreaker.TriggerTime.Add(
+			time.Duration(persistentData.CircuitBreaker.CooldownMinutes) * time.Minute)
+		if time.Now().Before(cooldownEnd) {
+			// 冷却未过期，恢复熔断状态
+			SetCircuitBreakerState(persistentData.CircuitBreaker)
+			log.Printf("🔄 恢复熔断状态: %s (剩余冷却 %d 分钟)",
+				persistentData.CircuitBreaker.TriggerReason,
+				int(cooldownEnd.Sub(time.Now()).Minutes()))
+		}
+		// 冷却已过期则忽略，状态保持默认未触发
+	}
+
 	return nil
 }
 
@@ -144,11 +158,12 @@ func (m *TradePlanManager) saveToFile() error {
 	closedTradesLock.RUnlock()
 
 	persistentData := PersistentData{
-		Plans:        plansCopy,
-		Statistics:   &statsCopy,
-		Returns:      returnsCopy,
-		ClosedTrades: closedTradesCopy,
-		UpdatedAt:    time.Now(),
+		Plans:          plansCopy,
+		Statistics:     &statsCopy,
+		Returns:        returnsCopy,
+		ClosedTrades:   closedTradesCopy,
+		CircuitBreaker: GetCircuitBreakerState(),
+		UpdatedAt:      time.Now(),
 	}
 
 	data, err := json.MarshalIndent(persistentData, "", "  ")

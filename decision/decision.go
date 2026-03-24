@@ -57,6 +57,9 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 	stats := GetStatistics()
 	cb := CheckCircuitBreaker(ctx, stats)
 	if cb.IsTriggered {
+		// CheckCircuitBreaker 内部已调用 SetCircuitBreakerState，
+		// 此处同步到 ctx 以便日志输出
+		ctx.CircuitBreaker = cb
 		return &FullDecision{
 			CoTTrace: "🛑 触发熔断保护，暂停交易",
 			Decisions: []Decision{{
@@ -151,23 +154,26 @@ func initializeDefaults(ctx *Context) {
 }
 
 func checkCircuitBreakerState(ctx *Context) *FullDecision {
-	if ctx.CircuitBreaker != nil && ctx.CircuitBreaker.IsTriggered {
-		cooldownEnd := ctx.CircuitBreaker.TriggerTime.Add(
-			time.Duration(ctx.CircuitBreaker.CooldownMinutes) * time.Minute)
+	// 从全局状态读取熔断信息，不再依赖 ctx.CircuitBreaker
+	cbState := GetCircuitBreakerState()
+	if cbState != nil && cbState.IsTriggered {
+		cooldownEnd := cbState.TriggerTime.Add(
+			time.Duration(cbState.CooldownMinutes) * time.Minute)
 		if time.Now().Before(cooldownEnd) {
 			remainingMinutes := int(cooldownEnd.Sub(time.Now()).Minutes())
 			return &FullDecision{
 				CoTTrace: fmt.Sprintf("⚠️ 熔断中: %s | 剩余冷却时间: %d分钟",
-					ctx.CircuitBreaker.TriggerReason, remainingMinutes),
+					cbState.TriggerReason, remainingMinutes),
 				Decisions: []Decision{{
 					Symbol:    "ALL",
 					Action:    "wait",
-					Reasoning: fmt.Sprintf("熔断保护触发: %s", ctx.CircuitBreaker.TriggerReason),
+					Reasoning: fmt.Sprintf("熔断保护触发: %s", cbState.TriggerReason),
 				}},
 				Timestamp: time.Now(),
 			}
 		}
-		ctx.CircuitBreaker.IsTriggered = false
+		// 冷却已过期，清除全局状态
+		SetCircuitBreakerState(nil)
 	}
 	return nil
 }

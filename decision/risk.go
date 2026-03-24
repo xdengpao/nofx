@@ -257,6 +257,42 @@ func (d *DynamicRiskAdjuster) SetBaseRisk(risk float64) {
 }
 
 // ============================================================================
+// 全局熔断状态管理器
+// ============================================================================
+
+var (
+	globalCircuitBreakerState *CircuitBreakerState
+	cbStateLock               sync.RWMutex
+)
+
+// GetCircuitBreakerState 返回当前全局熔断状态的深拷贝（线程安全）
+func GetCircuitBreakerState() *CircuitBreakerState {
+	cbStateLock.RLock()
+	defer cbStateLock.RUnlock()
+
+	if globalCircuitBreakerState == nil {
+		return nil
+	}
+
+	copy := *globalCircuitBreakerState
+	return &copy
+}
+
+// SetCircuitBreakerState 更新全局熔断状态（线程安全）
+func SetCircuitBreakerState(state *CircuitBreakerState) {
+	cbStateLock.Lock()
+	defer cbStateLock.Unlock()
+
+	if state == nil {
+		globalCircuitBreakerState = nil
+		return
+	}
+
+	copy := *state
+	globalCircuitBreakerState = &copy
+}
+
+// ============================================================================
 // 熔断机制
 // ============================================================================
 
@@ -296,10 +332,11 @@ func CheckCircuitBreaker(ctx *Context, stats *TradeStatistics) *CircuitBreakerSt
 		}
 		// 冷却结束，重置
 		cb.IsTriggered = false
-		//减少亏损次数
-		if stats != nil && stats.ConsecutiveLosses >= config.MaxConsecutiveLosses{
-			stats.ConsecutiveLosses=stats.ConsecutiveLosses-1
+		if stats != nil {
+			stats.ConsecutiveLosses = 0
 		}
+		// 同步全局状态：冷却结束，清除熔断
+		SetCircuitBreakerState(nil)
 	}
 
 	// 检查BTC闪崩
@@ -309,6 +346,7 @@ func CheckCircuitBreaker(ctx *Context, stats *TradeStatistics) *CircuitBreakerSt
 			cb.TriggerReason = fmt.Sprintf("BTC 1小时暴跌 %.2f%%", btcData.PriceChange1h)
 			cb.TriggerTime = time.Now()
 			cb.CooldownMinutes = config.SevereCooldownMin
+			SetCircuitBreakerState(cb)
 			log.Printf("🛑 熔断触发: %s", cb.TriggerReason)
 			return cb
 		}
@@ -320,6 +358,7 @@ func CheckCircuitBreaker(ctx *Context, stats *TradeStatistics) *CircuitBreakerSt
 		cb.TriggerReason = fmt.Sprintf("账户回撤 %.2f%% 超过%.0f%%", ctx.Account.TotalPnLPct, config.MaxDailyLoss)
 		cb.TriggerTime = time.Now()
 		cb.CooldownMinutes = config.SevereCooldownMin
+		SetCircuitBreakerState(cb)
 		log.Printf("🛑 熔断触发: %s", cb.TriggerReason)
 		return cb
 	}
@@ -331,6 +370,7 @@ func CheckCircuitBreaker(ctx *Context, stats *TradeStatistics) *CircuitBreakerSt
 		cb.TriggerTime = time.Now()
 		cb.CooldownMinutes = config.DefaultCooldownMin
 		cb.ConsecutiveLosses = stats.ConsecutiveLosses
+		SetCircuitBreakerState(cb)
 		log.Printf("🛑 熔断触发: %s", cb.TriggerReason)
 		return cb
 	}
@@ -341,6 +381,7 @@ func CheckCircuitBreaker(ctx *Context, stats *TradeStatistics) *CircuitBreakerSt
 		cb.TriggerReason = fmt.Sprintf("保证金使用率 %.2f%% 过高", ctx.Account.MarginUsedPct)
 		cb.TriggerTime = time.Now()
 		cb.CooldownMinutes = config.DefaultCooldownMin
+		SetCircuitBreakerState(cb)
 		log.Printf("🛑 熔断触发: %s", cb.TriggerReason)
 		return cb
 	}

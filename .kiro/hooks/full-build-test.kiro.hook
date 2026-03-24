@@ -1,0 +1,14 @@
+{
+  "enabled": true,
+  "name": "完整构建与测试",
+  "description": "手动触发完整的 Go 构建和测试流程，包括编译检查和全量测试运行。",
+  "version": "1",
+  "when": {
+    "type": "userTriggered"
+  },
+  "then": {
+    "type": "runCommand",
+    "command": "go build ./...",
+    "timeout": 60
+  }
+}

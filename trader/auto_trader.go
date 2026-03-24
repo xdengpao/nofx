@@ -731,6 +731,10 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	}
 	// 🆕 在返回前更新持仓快照（用于下一周期检测自动平仓）
 	at.updatePositionSnapshots(positionInfos)
+
+	// 注入全局熔断状态，确保每个周期的 Context 包含当前熔断状态
+	ctx.CircuitBreaker = decision.GetCircuitBreakerState()
+
 	return ctx, nil
 }
 

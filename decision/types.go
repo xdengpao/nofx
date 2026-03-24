@@ -262,11 +262,12 @@ type ClosedTradeRecord struct {
 
 // PersistentData 持久化数据结构
 type PersistentData struct {
-	Plans        map[string]*TradePlan `json:"plans"`
-	Statistics   *TradeStatistics      `json:"statistics"`
-	Returns      []float64             `json:"returns"`
-	ClosedTrades []ClosedTradeRecord   `json:"closed_trades"`
-	UpdatedAt    time.Time             `json:"updated_at"`
+	Plans          map[string]*TradePlan `json:"plans"`
+	Statistics     *TradeStatistics      `json:"statistics"`
+	Returns        []float64             `json:"returns"`
+	ClosedTrades   []ClosedTradeRecord   `json:"closed_trades"`
+	CircuitBreaker *CircuitBreakerState  `json:"circuit_breaker,omitempty"`
+	UpdatedAt      time.Time             `json:"updated_at"`
 }
 
 // ============================================================================
