@@ -54,6 +54,7 @@ func TestProperty1a_CrossCycleStateLoss(t *testing.T) {
 				CooldownMinutes: cooldownMin,
 			})
 			defer SetCircuitBreakerState(nil) // 清理全局状态
+			defer ResetDrawdownBaseline()     // 清理回撤基准线
 
 			// 模拟 buildTradingContext 创建新 Context（CircuitBreaker == nil）
 			ctx := &Context{
@@ -130,6 +131,8 @@ func TestProperty1b_CooldownCounterReset(t *testing.T) {
 
 			// 调用 CheckCircuitBreaker，冷却已过期应触发重置
 			CheckCircuitBreaker(ctx, stats)
+			ResetDrawdownBaseline()     // 清理回撤基准线
+			SetCircuitBreakerState(nil) // 清理全局状态
 
 			// 期望: ConsecutiveLosses 重置为 0
 			// 实际(Bug): ConsecutiveLosses = consecutiveLosses - 1

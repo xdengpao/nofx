@@ -34,6 +34,8 @@ import (
 // 保证金使用率 0-89%），验证 CheckCircuitBreaker 返回 IsTriggered == false
 
 func TestProperty2a_NormalTradingUnaffected(t *testing.T) {
+	SetCircuitBreakerState(nil)
+	ResetDrawdownBaseline()
 	parameters := gopter.DefaultTestParameters()
 	parameters.MinSuccessfulTests = 100
 	parameters.Rng.Seed(42)
@@ -84,6 +86,8 @@ func TestProperty2a_NormalTradingUnaffected(t *testing.T) {
 // BTC暴跌/账户回撤: 120 分钟，连续亏损/保证金过高: 30 分钟
 
 func TestProperty2b_TriggerLogicPreserved(t *testing.T) {
+	SetCircuitBreakerState(nil)
+	ResetDrawdownBaseline()
 	parameters := gopter.DefaultTestParameters()
 	parameters.MinSuccessfulTests = 100
 	parameters.Rng.Seed(42)
@@ -221,6 +225,8 @@ func TestProperty2b_TriggerLogicPreserved(t *testing.T) {
 // 正确更新 ConsecutiveLosses、ConsecutiveWins、WinRate、ProfitFactor
 
 func TestProperty2c_StatisticsUpdatePreserved(t *testing.T) {
+	SetCircuitBreakerState(nil)
+	ResetDrawdownBaseline()
 	parameters := gopter.DefaultTestParameters()
 	parameters.MinSuccessfulTests = 100
 	parameters.Rng.Seed(42)

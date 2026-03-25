@@ -263,6 +263,10 @@ func (d *DynamicRiskAdjuster) SetBaseRisk(risk float64) {
 var (
 	globalCircuitBreakerState *CircuitBreakerState
 	cbStateLock               sync.RWMutex
+	// 回撤基准线：冷却结束后记录当时的回撤水平，只有在此基础上再跌 MaxDailyLoss% 才重新触发
+	drawdownBaseline    float64
+	hasDrawdownBaseline bool
+	drawdownBaselineMu  sync.RWMutex
 )
 
 // GetCircuitBreakerState 返回当前全局熔断状态的深拷贝（线程安全）
@@ -290,6 +294,14 @@ func SetCircuitBreakerState(state *CircuitBreakerState) {
 
 	copy := *state
 	globalCircuitBreakerState = &copy
+}
+
+// ResetDrawdownBaseline 重置回撤基准线（用于测试和系统重置）
+func ResetDrawdownBaseline() {
+	drawdownBaselineMu.Lock()
+	defer drawdownBaselineMu.Unlock()
+	drawdownBaseline = 0
+	hasDrawdownBaseline = false
 }
 
 // ============================================================================
@@ -324,19 +336,30 @@ func CheckCircuitBreaker(ctx *Context, stats *TradeStatistics) *CircuitBreakerSt
 	cb := ctx.CircuitBreaker
 	config := defaultCircuitConfig
 
+	// 记录冷却结束时的回撤水平，用于判断是否进一步恶化
+	var cooldownJustEnded bool
+
 	// 检查是否在冷却中
 	if cb.IsTriggered {
 		cooldownEnd := cb.TriggerTime.Add(time.Duration(cb.CooldownMinutes) * time.Minute)
 		if time.Now().Before(cooldownEnd) {
 			return cb // 仍在冷却中
 		}
-		// 冷却结束，重置
+		cooldownJustEnded = true
+		// 冷却结束，设置回撤基准线为当前回撤水平
+		drawdownBaselineMu.Lock()
+		drawdownBaseline = ctx.Account.TotalPnLPct
+		hasDrawdownBaseline = true
+		drawdownBaselineMu.Unlock()
+		// 重置
 		cb.IsTriggered = false
 		if stats != nil {
 			stats.ConsecutiveLosses = 0
 		}
 		// 同步全局状态：冷却结束，清除熔断
 		SetCircuitBreakerState(nil)
+		log.Printf("✅ 熔断冷却结束，恢复交易（当前回撤: %.2f%%，新基准线: %.2f%%，再跌%.0f%%才重新触发）",
+			ctx.Account.TotalPnLPct, ctx.Account.TotalPnLPct, config.MaxDailyLoss)
 	}
 
 	// 检查BTC闪崩
@@ -353,14 +376,50 @@ func CheckCircuitBreaker(ctx *Context, stats *TradeStatistics) *CircuitBreakerSt
 	}
 
 	// 检查账户回撤
-	if ctx.Account.TotalPnLPct < -config.MaxDailyLoss {
-		cb.IsTriggered = true
-		cb.TriggerReason = fmt.Sprintf("账户回撤 %.2f%% 超过%.0f%%", ctx.Account.TotalPnLPct, config.MaxDailyLoss)
-		cb.TriggerTime = time.Now()
-		cb.CooldownMinutes = config.SevereCooldownMin
-		SetCircuitBreakerState(cb)
-		log.Printf("🛑 熔断触发: %s", cb.TriggerReason)
-		return cb
+	// 冷却结束后，以恢复时的回撤水平为基准线，在此基础上再跌 MaxDailyLoss% 才重新触发
+	drawdownBaselineMu.RLock()
+	hasBaseline := hasDrawdownBaseline
+	baseline := drawdownBaseline
+	drawdownBaselineMu.RUnlock()
+
+	if hasBaseline {
+		// 有基准线：基于基准线判断，回撤需要在基准线基础上再恶化 MaxDailyLoss% 才触发
+		retriggerThreshold := baseline - config.MaxDailyLoss
+		if ctx.Account.TotalPnLPct < retriggerThreshold {
+			cb.IsTriggered = true
+			cb.TriggerReason = fmt.Sprintf("账户回撤 %.2f%% 在基准 %.2f%% 上再跌超%.0f%%",
+				ctx.Account.TotalPnLPct, baseline, config.MaxDailyLoss)
+			cb.TriggerTime = time.Now()
+			cb.CooldownMinutes = config.SevereCooldownMin
+			cb.DailyLoss = ctx.Account.TotalPnLPct
+			// 清除基准线，下次冷却结束会重新设置
+			drawdownBaselineMu.Lock()
+			hasDrawdownBaseline = false
+			drawdownBaselineMu.Unlock()
+			SetCircuitBreakerState(cb)
+			log.Printf("🛑 熔断触发: %s", cb.TriggerReason)
+			return cb
+		}
+		if !cooldownJustEnded {
+			// 回撤好转时更新基准线（取较好的值），让基准线跟随恢复
+			if ctx.Account.TotalPnLPct > baseline {
+				drawdownBaselineMu.Lock()
+				drawdownBaseline = ctx.Account.TotalPnLPct
+				drawdownBaselineMu.Unlock()
+			}
+		}
+	} else {
+		// 无基准线：首次触发，使用原始阈值
+		if ctx.Account.TotalPnLPct < -config.MaxDailyLoss {
+			cb.IsTriggered = true
+			cb.TriggerReason = fmt.Sprintf("账户回撤 %.2f%% 超过%.0f%%", ctx.Account.TotalPnLPct, config.MaxDailyLoss)
+			cb.TriggerTime = time.Now()
+			cb.CooldownMinutes = config.SevereCooldownMin
+			cb.DailyLoss = ctx.Account.TotalPnLPct
+			SetCircuitBreakerState(cb)
+			log.Printf("🛑 熔断触发: %s", cb.TriggerReason)
+			return cb
+		}
 	}
 
 	// 检查连续亏损
