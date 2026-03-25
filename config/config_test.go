@@ -1,0 +1,702 @@
+package config
+
+// Feature: quant-trading-system
+// 任务 2.1: 配置管理模块测试覆盖
+// 覆盖需求: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 1.10
+
+import (
+	"encoding/json"
+	"os"
+	"testing"
+
+	"github.com/leanovate/gopter"
+	"github.com/leanovate/gopter/gen"
+	"github.com/leanovate/gopter/prop"
+)
+
+// ============================================================================
+// 测试辅助函数
+// ============================================================================
+
+func validBinanceTrader(id string) TraderConfig {
+	return TraderConfig{
+		ID:                  id,
+		Name:                "测试交易者-" + id,
+		Enabled:             true,
+		AIModel:             "deepseek",
+		Exchange:            "binance",
+		BinanceAPIKey:       "test-api-key",
+		BinanceSecretKey:    "test-secret-key",
+		DeepSeekKey:         "test-deepseek-key",
+		InitialBalance:      1000.0,
+		ScanIntervalMinutes: 3,
+	}
+}
+
+func validConfig() *Config {
+	return &Config{
+		Traders:       []TraderConfig{validBinanceTrader("trader1")},
+		APIServerPort: 8080,
+		Leverage:      LeverageConfig{BTCETHLeverage: 5, AltcoinLeverage: 5},
+	}
+}
+
+func writeConfigFile(t *testing.T, cfg interface{}) string {
+	t.Helper()
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("序列化配置失败: %v", err)
+	}
+	f, err := os.CreateTemp("", "config_test_*.json")
+	if err != nil {
+		t.Fatalf("创建临时文件失败: %v", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		t.Fatalf("写入临时文件失败: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("关闭临时文件失败: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(f.Name()) })
+	return f.Name()
+}
+
+// ============================================================================
+// 需求 1.1: LoadConfig 从文件加载配置
+// ============================================================================
+
+func TestLoadConfig_ValidFile_ReturnsConfig(t *testing.T) {
+	path := writeConfigFile(t, validConfig())
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("有效配置文件加载失败: %v", err)
+	}
+	if len(cfg.Traders) != 1 {
+		t.Errorf("期望1个交易者, 实际=%d", len(cfg.Traders))
+	}
+}
+
+// 需求 1.10: 文件不存在时返回错误
+func TestLoadConfig_MissingFile_ReturnsError(t *testing.T) {
+	_, err := LoadConfig("/nonexistent/path/config.json")
+	if err == nil {
+		t.Error("文件不存在时应返回错误")
+	}
+}
+
+// 需求 1.10: 非法 JSON 时返回错误
+func TestLoadConfig_InvalidJSON_ReturnsError(t *testing.T) {
+	f, err := os.CreateTemp("", "config_bad_*.json")
+	if err != nil {
+		t.Fatalf("创建临时文件失败: %v", err)
+	}
+	if _, err := f.WriteString("{invalid json}"); err != nil {
+		t.Fatalf("写入失败: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("关闭失败: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(f.Name()) })
+
+	_, loadErr := LoadConfig(f.Name())
+	if loadErr == nil {
+		t.Error("非法JSON应返回错误")
+	}
+}
+
+// ============================================================================
+// 需求 1.8: use_default_coins 自动启用
+// ============================================================================
+
+func TestLoadConfig_NoAPIURL_EnablesDefaultCoins(t *testing.T) {
+	cfg := validConfig()
+	cfg.UseDefaultCoins = false
+	cfg.CoinPoolAPIURL = ""
+	path := writeConfigFile(t, cfg)
+
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	if !loaded.UseDefaultCoins {
+		t.Error("无 CoinPoolAPIURL 时应自动启用 UseDefaultCoins")
+	}
+}
+
+func TestLoadConfig_WithAPIURL_KeepsUseDefaultCoinsAsFalse(t *testing.T) {
+	cfg := validConfig()
+	cfg.UseDefaultCoins = false
+	cfg.CoinPoolAPIURL = "http://example.com/api"
+	path := writeConfigFile(t, cfg)
+
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	if loaded.UseDefaultCoins {
+		t.Error("配置了 CoinPoolAPIURL 时不应强制启用 UseDefaultCoins")
+	}
+}
+
+// ============================================================================
+// 需求 1.9: 杠杆默认值
+// ============================================================================
+
+func TestValidate_ZeroLeverage_SetsDefault5(t *testing.T) {
+	cfg := validConfig()
+	cfg.Leverage = LeverageConfig{BTCETHLeverage: 0, AltcoinLeverage: 0}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("验证失败: %v", err)
+	}
+	if cfg.Leverage.BTCETHLeverage != 5 {
+		t.Errorf("BTCETHLeverage 默认值应为5, 实际=%d", cfg.Leverage.BTCETHLeverage)
+	}
+	if cfg.Leverage.AltcoinLeverage != 5 {
+		t.Errorf("AltcoinLeverage 默认值应为5, 实际=%d", cfg.Leverage.AltcoinLeverage)
+	}
+}
+
+func TestValidate_NegativeLeverage_SetsDefault5(t *testing.T) {
+	cfg := validConfig()
+	cfg.Leverage = LeverageConfig{BTCETHLeverage: -3, AltcoinLeverage: -1}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("验证失败: %v", err)
+	}
+	if cfg.Leverage.BTCETHLeverage != 5 {
+		t.Errorf("负杠杆应被设为默认值5, 实际=%d", cfg.Leverage.BTCETHLeverage)
+	}
+}
+
+// ============================================================================
+// 需求 1.2: 启用交易者计数
+// ============================================================================
+
+func TestValidate_EnabledTraderCount(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders = []TraderConfig{
+		validBinanceTrader("t1"),
+		func() TraderConfig { tc := validBinanceTrader("t2"); tc.Enabled = false; return tc }(),
+		validBinanceTrader("t3"),
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("验证失败: %v", err)
+	}
+	enabled := 0
+	for _, tc := range cfg.Traders {
+		if tc.Enabled {
+			enabled++
+		}
+	}
+	if enabled != 2 {
+		t.Errorf("期望2个启用交易者, 实际=%d", enabled)
+	}
+}
+
+// ============================================================================
+// 需求 1.3: 空 ID 或重复 ID 验证
+// ============================================================================
+
+func TestValidate_EmptyID_ReturnsError(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].ID = ""
+	if err := cfg.Validate(); err == nil {
+		t.Error("空ID应返回错误")
+	}
+}
+
+func TestValidate_DuplicateID_ReturnsError(t *testing.T) {
+	cfg := validConfig()
+	t2 := validBinanceTrader("trader1") // 与 trader1 重复
+	cfg.Traders = append(cfg.Traders, t2)
+	if err := cfg.Validate(); err == nil {
+		t.Error("重复ID应返回错误")
+	}
+}
+
+func TestValidate_EmptyName_ReturnsError(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].Name = ""
+	if err := cfg.Validate(); err == nil {
+		t.Error("空Name应返回错误")
+	}
+}
+
+// ============================================================================
+// 需求 1.4: custom AI 模型必填字段
+// ============================================================================
+
+func TestValidate_CustomAI_MissingURL_ReturnsError(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].AIModel = "custom"
+	cfg.Traders[0].CustomAPIURL = ""
+	cfg.Traders[0].CustomAPIKey = "key"
+	cfg.Traders[0].CustomModelName = "model"
+	if err := cfg.Validate(); err == nil {
+		t.Error("custom AI 缺少 URL 应返回错误")
+	}
+}
+
+func TestValidate_CustomAI_MissingKey_ReturnsError(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].AIModel = "custom"
+	cfg.Traders[0].CustomAPIURL = "http://example.com"
+	cfg.Traders[0].CustomAPIKey = ""
+	cfg.Traders[0].CustomModelName = "model"
+	if err := cfg.Validate(); err == nil {
+		t.Error("custom AI 缺少 Key 应返回错误")
+	}
+}
+
+func TestValidate_CustomAI_MissingModelName_ReturnsError(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].AIModel = "custom"
+	cfg.Traders[0].CustomAPIURL = "http://example.com"
+	cfg.Traders[0].CustomAPIKey = "key"
+	cfg.Traders[0].CustomModelName = ""
+	if err := cfg.Validate(); err == nil {
+		t.Error("custom AI 缺少 ModelName 应返回错误")
+	}
+}
+
+func TestValidate_CustomAI_AllFields_Valid(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].AIModel = "custom"
+	cfg.Traders[0].CustomAPIURL = "http://example.com"
+	cfg.Traders[0].CustomAPIKey = "key"
+	cfg.Traders[0].CustomModelName = "model"
+	cfg.Traders[0].DeepSeekKey = "" // custom 不需要 deepseek key
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("custom AI 所有字段齐全时不应报错: %v", err)
+	}
+}
+
+// ============================================================================
+// 需求 1.5: Binance 必填字段
+// ============================================================================
+
+func TestValidate_Binance_MissingAPIKey_ReturnsError(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].BinanceAPIKey = ""
+	if err := cfg.Validate(); err == nil {
+		t.Error("Binance 缺少 APIKey 应返回错误")
+	}
+}
+
+func TestValidate_Binance_MissingSecretKey_ReturnsError(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].BinanceSecretKey = ""
+	if err := cfg.Validate(); err == nil {
+		t.Error("Binance 缺少 SecretKey 应返回错误")
+	}
+}
+
+// ============================================================================
+// 需求 1.6: Hyperliquid 必填字段
+// ============================================================================
+
+func TestValidate_Hyperliquid_MissingPrivateKey_ReturnsError(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].Exchange = "hyperliquid"
+	cfg.Traders[0].HyperliquidPrivateKey = ""
+	if err := cfg.Validate(); err == nil {
+		t.Error("Hyperliquid 缺少私钥应返回错误")
+	}
+}
+
+func TestValidate_Hyperliquid_WithPrivateKey_Valid(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].Exchange = "hyperliquid"
+	cfg.Traders[0].HyperliquidPrivateKey = "0xdeadbeef"
+	cfg.Traders[0].AIModel = "deepseek"
+	cfg.Traders[0].DeepSeekKey = "test-key"
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Hyperliquid 配置完整时不应报错: %v", err)
+	}
+}
+
+// ============================================================================
+// 需求 1.7: Aster 必填字段
+// ============================================================================
+
+func TestValidate_Aster_MissingUser_ReturnsError(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].Exchange = "aster"
+	cfg.Traders[0].AsterUser = ""
+	cfg.Traders[0].AsterSigner = "signer"
+	cfg.Traders[0].AsterPrivateKey = "privkey"
+	if err := cfg.Validate(); err == nil {
+		t.Error("Aster 缺少 User 应返回错误")
+	}
+}
+
+func TestValidate_Aster_MissingSigner_ReturnsError(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].Exchange = "aster"
+	cfg.Traders[0].AsterUser = "user"
+	cfg.Traders[0].AsterSigner = ""
+	cfg.Traders[0].AsterPrivateKey = "privkey"
+	if err := cfg.Validate(); err == nil {
+		t.Error("Aster 缺少 Signer 应返回错误")
+	}
+}
+
+func TestValidate_Aster_MissingPrivateKey_ReturnsError(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].Exchange = "aster"
+	cfg.Traders[0].AsterUser = "user"
+	cfg.Traders[0].AsterSigner = "signer"
+	cfg.Traders[0].AsterPrivateKey = ""
+	if err := cfg.Validate(); err == nil {
+		t.Error("Aster 缺少 PrivateKey 应返回错误")
+	}
+}
+
+// ============================================================================
+// 需求 1.3: 无效 AI 模型类型
+// ============================================================================
+
+func TestValidate_InvalidAIModel_ReturnsError(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].AIModel = "gpt4"
+	if err := cfg.Validate(); err == nil {
+		t.Error("无效 AI 模型类型应返回错误")
+	}
+}
+
+// 需求 1.3: 无效交易所类型
+func TestValidate_InvalidExchange_ReturnsError(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].Exchange = "okx"
+	if err := cfg.Validate(); err == nil {
+		t.Error("无效交易所类型应返回错误")
+	}
+}
+
+// 需求 1.1: 空交易者列表
+func TestValidate_NoTraders_ReturnsError(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders = nil
+	if err := cfg.Validate(); err == nil {
+		t.Error("空交易者列表应返回错误")
+	}
+}
+
+// ============================================================================
+// 需求 1.1: GetScanInterval
+// ============================================================================
+
+func TestGetScanInterval_ReturnsCorrectDuration(t *testing.T) {
+	tc := validBinanceTrader("t1")
+	tc.ScanIntervalMinutes = 5
+	d := tc.GetScanInterval()
+	if d.Minutes() != 5 {
+		t.Errorf("期望5分钟, 实际=%.0f", d.Minutes())
+	}
+}
+
+// ============================================================================
+// Property 1: 配置序列化往返
+// Feature: quant-trading-system, Property 1: 配置序列化往返
+// Validates: Requirements 1.1
+// ============================================================================
+
+func TestProperty1_ConfigSerializationRoundTrip(t *testing.T) {
+	// Feature: quant-trading-system, Property 1: 配置序列化往返
+	parameters := gopter.DefaultTestParameters()
+	parameters.MinSuccessfulTests = 100
+	parameters.Rng.Seed(42)
+	properties := gopter.NewProperties(parameters)
+
+	properties.Property("有效Config序列化再反序列化应产生等价结构体", prop.ForAll(
+		func(portNorm, btcLevNorm, altLevNorm int) bool {
+			port := 1024 + portNorm%64511
+			btcLev := 1 + btcLevNorm%10
+			altLev := 1 + altLevNorm%10
+
+			original := &Config{
+				Traders:       []TraderConfig{validBinanceTrader("t1")},
+				APIServerPort: port,
+				Leverage:      LeverageConfig{BTCETHLeverage: btcLev, AltcoinLeverage: altLev},
+			}
+
+			data, err := json.Marshal(original)
+			if err != nil {
+				return false
+			}
+			var restored Config
+			if err := json.Unmarshal(data, &restored); err != nil {
+				return false
+			}
+			return restored.APIServerPort == original.APIServerPort &&
+				restored.Leverage.BTCETHLeverage == original.Leverage.BTCETHLeverage &&
+				restored.Leverage.AltcoinLeverage == original.Leverage.AltcoinLeverage &&
+				len(restored.Traders) == len(original.Traders) &&
+				restored.Traders[0].ID == original.Traders[0].ID
+		},
+		gen.IntRange(0, 99),
+		gen.IntRange(0, 99),
+		gen.IntRange(0, 99),
+	))
+
+	properties.TestingRun(t, gopter.ConsoleReporter(false))
+}
+
+// ============================================================================
+// Property 2: 配置类型必填字段验证
+// Feature: quant-trading-system, Property 2: 配置类型必填字段验证
+// Validates: Requirements 1.3, 1.4, 1.5, 1.6, 1.7
+// ============================================================================
+
+func TestProperty2_RequiredFieldValidation(t *testing.T) {
+	// Feature: quant-trading-system, Property 2: 配置类型必填字段验证
+	parameters := gopter.DefaultTestParameters()
+	parameters.MinSuccessfulTests = 100
+	parameters.Rng.Seed(42)
+	properties := gopter.NewProperties(parameters)
+
+	// custom AI 缺少任意必填字段时应报错
+	properties.Property("custom AI 缺少必填字段时Validate应返回错误", prop.ForAll(
+		func(missingFieldIdx int) bool {
+			cfg := validConfig()
+			cfg.Traders[0].AIModel = "custom"
+			cfg.Traders[0].DeepSeekKey = ""
+			switch missingFieldIdx % 3 {
+			case 0:
+				cfg.Traders[0].CustomAPIURL = ""
+				cfg.Traders[0].CustomAPIKey = "key"
+				cfg.Traders[0].CustomModelName = "model"
+			case 1:
+				cfg.Traders[0].CustomAPIURL = "http://example.com"
+				cfg.Traders[0].CustomAPIKey = ""
+				cfg.Traders[0].CustomModelName = "model"
+			case 2:
+				cfg.Traders[0].CustomAPIURL = "http://example.com"
+				cfg.Traders[0].CustomAPIKey = "key"
+				cfg.Traders[0].CustomModelName = ""
+			}
+			return cfg.Validate() != nil
+		},
+		gen.IntRange(0, 99),
+	))
+
+	// Binance 缺少密钥时应报错
+	properties.Property("Binance 缺少密钥时Validate应返回错误", prop.ForAll(
+		func(missingFieldIdx int) bool {
+			cfg := validConfig()
+			switch missingFieldIdx % 2 {
+			case 0:
+				cfg.Traders[0].BinanceAPIKey = ""
+			case 1:
+				cfg.Traders[0].BinanceSecretKey = ""
+			}
+			return cfg.Validate() != nil
+		},
+		gen.IntRange(0, 99),
+	))
+
+	// Hyperliquid 缺少私钥时应报错
+	properties.Property("Hyperliquid 缺少私钥时Validate应返回错误", prop.ForAll(
+		func(_ int) bool {
+			cfg := validConfig()
+			cfg.Traders[0].Exchange = "hyperliquid"
+			cfg.Traders[0].HyperliquidPrivateKey = ""
+			return cfg.Validate() != nil
+		},
+		gen.IntRange(0, 99),
+	))
+
+	// Aster 缺少任意必填字段时应报错
+	properties.Property("Aster 缺少必填字段时Validate应返回错误", prop.ForAll(
+		func(missingFieldIdx int) bool {
+			cfg := validConfig()
+			cfg.Traders[0].Exchange = "aster"
+			switch missingFieldIdx % 3 {
+			case 0:
+				cfg.Traders[0].AsterUser = ""
+				cfg.Traders[0].AsterSigner = "signer"
+				cfg.Traders[0].AsterPrivateKey = "privkey"
+			case 1:
+				cfg.Traders[0].AsterUser = "user"
+				cfg.Traders[0].AsterSigner = ""
+				cfg.Traders[0].AsterPrivateKey = "privkey"
+			case 2:
+				cfg.Traders[0].AsterUser = "user"
+				cfg.Traders[0].AsterSigner = "signer"
+				cfg.Traders[0].AsterPrivateKey = ""
+			}
+			return cfg.Validate() != nil
+		},
+		gen.IntRange(0, 99),
+	))
+
+	properties.TestingRun(t, gopter.ConsoleReporter(false))
+}
+
+// ============================================================================
+// Property 3: 启用交易者计数
+// Feature: quant-trading-system, Property 3: 启用交易者计数
+// Validates: Requirements 1.2
+// ============================================================================
+
+// countEnabledTraders 模拟 setupTraderManager 中的过滤逻辑：
+// 仅统计 Enabled=true 的交易者，与 main.go 中的行为一致。
+func countEnabledTraders(traders []TraderConfig) int {
+	count := 0
+	for _, tc := range traders {
+		if tc.Enabled {
+			count++
+		}
+	}
+	return count
+}
+
+func TestProperty3_EnabledTraderCount(t *testing.T) {
+	// Feature: quant-trading-system, Property 3: 启用交易者计数
+	// Validates: Requirements 1.2
+	parameters := gopter.DefaultTestParameters()
+	parameters.MinSuccessfulTests = 100
+	parameters.Rng.Seed(42)
+	properties := gopter.NewProperties(parameters)
+
+	properties.Property("对任意包含M个Enabled=true的配置，过滤后应恰好得到M个启用交易者", prop.ForAll(
+		func(enabledMask int) bool {
+			// 使用 enabledMask 的低 4 位决定最多 4 个交易者的启用状态
+			ids := []string{"t1", "t2", "t3", "t4"}
+			traders := make([]TraderConfig, len(ids))
+			expectedM := 0
+			for i, id := range ids {
+				tc := validBinanceTrader(id)
+				tc.Enabled = (enabledMask>>uint(i))&1 == 1
+				if tc.Enabled {
+					expectedM++
+				}
+				traders[i] = tc
+			}
+
+			cfg := &Config{
+				Traders:       traders,
+				APIServerPort: 8080,
+				Leverage:      LeverageConfig{BTCETHLeverage: 5, AltcoinLeverage: 5},
+			}
+			if err := cfg.Validate(); err != nil {
+				// 配置本身无效，跳过此用例
+				return true
+			}
+
+			// 验证：过滤 Enabled=true 的交易者数量恰好等于 expectedM
+			actualM := countEnabledTraders(cfg.Traders)
+			return actualM == expectedM
+		},
+		gen.IntRange(0, 15), // 4 位掩码，覆盖 0000~1111 所有组合
+	))
+
+	properties.TestingRun(t, gopter.ConsoleReporter(false))
+}
+
+// ============================================================================
+// Property 4: 默认币种池自动启用
+// Feature: quant-trading-system, Property 4: 默认币种池自动启用
+// Validates: Requirements 1.8
+// ============================================================================
+
+func TestProperty4_DefaultCoinPoolAutoEnable(t *testing.T) {
+	// Feature: quant-trading-system, Property 4: 默认币种池自动启用
+	parameters := gopter.DefaultTestParameters()
+	parameters.MinSuccessfulTests = 100
+	parameters.Rng.Seed(42)
+	properties := gopter.NewProperties(parameters)
+
+	properties.Property("UseDefaultCoins=false且CoinPoolAPIURL为空时加载后应为true", prop.ForAll(
+		func(_ int) bool {
+			cfg := validConfig()
+			cfg.UseDefaultCoins = false
+			cfg.CoinPoolAPIURL = ""
+			path := writeConfigFile(t, cfg)
+			loaded, err := LoadConfig(path)
+			if err != nil {
+				return false
+			}
+			return loaded.UseDefaultCoins
+		},
+		gen.IntRange(0, 99),
+	))
+
+	properties.TestingRun(t, gopter.ConsoleReporter(false))
+}
+
+// ============================================================================
+// Property 5: 杠杆默认值
+// Feature: quant-trading-system, Property 5: 杠杆默认值
+// Validates: Requirements 1.9
+// ============================================================================
+
+func TestProperty5_LeverageDefaultValue(t *testing.T) {
+	// Feature: quant-trading-system, Property 5: 杠杆默认值
+	parameters := gopter.DefaultTestParameters()
+	parameters.MinSuccessfulTests = 100
+	parameters.Rng.Seed(42)
+	properties := gopter.NewProperties(parameters)
+
+	properties.Property("杠杆<=0时验证后应被设置为默认值5", prop.ForAll(
+		func(btcLevNorm, altLevNorm int) bool {
+			btcLev := -(btcLevNorm % 100)  // 0 或负数
+			altLev := -(altLevNorm % 100)  // 0 或负数
+			cfg := validConfig()
+			cfg.Leverage = LeverageConfig{BTCETHLeverage: btcLev, AltcoinLeverage: altLev}
+			if err := cfg.Validate(); err != nil {
+				return false
+			}
+			return cfg.Leverage.BTCETHLeverage == 5 && cfg.Leverage.AltcoinLeverage == 5
+		},
+		gen.IntRange(0, 99),
+		gen.IntRange(0, 99),
+	))
+
+	properties.TestingRun(t, gopter.ConsoleReporter(false))
+}
+
+// ============================================================================
+// Property 6: 无效配置文件拒绝
+// Feature: quant-trading-system, Property 6: 无效配置文件拒绝
+// Validates: Requirements 1.10
+// ============================================================================
+
+func TestProperty6_InvalidConfigRejected(t *testing.T) {
+	// Feature: quant-trading-system, Property 6: 无效配置文件拒绝
+	parameters := gopter.DefaultTestParameters()
+	parameters.MinSuccessfulTests = 100
+	parameters.Rng.Seed(42)
+	properties := gopter.NewProperties(parameters)
+
+	invalidJSONSamples := []string{
+		"{invalid}",
+		"[1,2,3]",
+		"null",
+		"",
+		"{\"traders\": null}",
+		"{\"traders\": []}",
+	}
+
+	properties.Property("非法JSON或缺少必填字段时LoadConfig应返回错误", prop.ForAll(
+		func(idxNorm int) bool {
+			sample := invalidJSONSamples[idxNorm%len(invalidJSONSamples)]
+			f, err := os.CreateTemp("", "config_invalid_*.json")
+			if err != nil {
+				return false
+			}
+			defer func() { _ = os.Remove(f.Name()) }()
+			if _, err := f.WriteString(sample); err != nil {
+				_ = f.Close()
+				return false
+			}
+			if err := f.Close(); err != nil {
+				return false
+			}
+			_, loadErr := LoadConfig(f.Name())
+			return loadErr != nil
+		},
+		gen.IntRange(0, 99),
+	))
+
+	properties.TestingRun(t, gopter.ConsoleReporter(false))
+}

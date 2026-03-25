@@ -118,17 +118,15 @@ func (l *DecisionLogger) GetLatestRecords(n int) ([]*DecisionRecord, error) {
 		return nil, fmt.Errorf("读取日志目录失败: %w", err)
 	}
 
-	// 先按修改时间倒序收集（最新的在前）
-	var records []*DecisionRecord
-	count := 0
-	for i := len(files) - 1; i >= 0 && count < n; i-- {
-		file := files[i]
+	// 读取所有记录
+	var allRecords []*DecisionRecord
+	for _, file := range files {
 		if file.IsDir() {
 			continue
 		}
 
-		filepath := filepath.Join(l.logDir, file.Name())
-		data, err := ioutil.ReadFile(filepath)
+		fp := filepath.Join(l.logDir, file.Name())
+		data, err := ioutil.ReadFile(fp)
 		if err != nil {
 			continue
 		}
@@ -138,16 +136,21 @@ func (l *DecisionLogger) GetLatestRecords(n int) ([]*DecisionRecord, error) {
 			continue
 		}
 
-		records = append(records, &record)
-		count++
+		allRecords = append(allRecords, &record)
 	}
 
-	// 反转数组，让时间从旧到新排列（用于图表显示）
-	for i, j := 0, len(records)-1; i < j; i, j = i+1, j-1 {
-		records[i], records[j] = records[j], records[i]
+	// 按时间戳升序排序（确保正确的时间顺序，不依赖文件名排序）
+	for i := 1; i < len(allRecords); i++ {
+		for j := i; j > 0 && allRecords[j].Timestamp.Before(allRecords[j-1].Timestamp); j-- {
+			allRecords[j], allRecords[j-1] = allRecords[j-1], allRecords[j]
+		}
 	}
 
-	return records, nil
+	// 取最近 n 条（升序排列中的最后 n 条）
+	if len(allRecords) <= n {
+		return allRecords, nil
+	}
+	return allRecords[len(allRecords)-n:], nil
 }
 
 // GetRecordByDate 获取指定日期的所有记录

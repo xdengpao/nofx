@@ -312,7 +312,8 @@ func mergeDecisions(positionDecisions, aiDecisions []Decision) []Decision {
 	for _, d := range aiDecisions {
 		if d.Action == "open_long" || d.Action == "open_short" {
 			if existing, exists := decisionMap[d.Symbol]; exists {
-				if existing.Action == "hold" || existing.Action == "wait" {
+				// 持仓评估决策（任何非 wait 的决策）优先于 AI 新开仓决策
+				if existing.Action != "wait" {
 					continue
 				}
 			}

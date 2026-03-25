@@ -483,15 +483,15 @@ func InitConditionParser() {
 		patterns: make(map[InvalidationConditionType]*regexp.Regexp),
 	}
 
-	conditionParser.patterns[ICT_EMA_CROSS_DOWN] = regexp.MustCompile(`(?i)(\d+[HhMm]):?EMA_CROSS_DOWN:?(EMA\d+):?(EMA\d+)?`)
-	conditionParser.patterns[ICT_EMA_CROSS_UP] = regexp.MustCompile(`(?i)(\d+[HhMm]):?EMA_CROSS_UP:?(EMA\d+):?(EMA\d+)?`)
-	conditionParser.patterns[ICT_PRICE_BELOW] = regexp.MustCompile(`(?i)(\d+[HhMm]):?PRICE_BELOW:?(EMA\d+|VWAP|BB_LOWER|\d+\.?\d*)`)
-	conditionParser.patterns[ICT_PRICE_ABOVE] = regexp.MustCompile(`(?i)(\d+[HhMm]):?PRICE_ABOVE:?(EMA\d+|VWAP|BB_UPPER|\d+\.?\d*)`)
-	conditionParser.patterns[ICT_RSI_ABOVE] = regexp.MustCompile(`(?i)(\d+[HhMm]):?RSI_ABOVE:?(\d+)`)
-	conditionParser.patterns[ICT_RSI_BELOW] = regexp.MustCompile(`(?i)(\d+[HhMm]):?RSI_BELOW:?(\d+)`)
-	conditionParser.patterns[ICT_ADX_BELOW] = regexp.MustCompile(`(?i)(\d+[HhMm]):?ADX_BELOW:?(\d+)`)
-	conditionParser.patterns[ICT_MACD_CROSS] = regexp.MustCompile(`(?i)(\d+[HhMm]):?MACD_CROSS:?(UP|DOWN)`)
-	conditionParser.patterns[ICT_TREND_REVERSAL] = regexp.MustCompile(`(?i)(\d+[HhMm]):?TREND_REVERSAL`)
+	conditionParser.patterns[ICT_EMA_CROSS_DOWN] = regexp.MustCompile(`(?i)(\d+[HhMmDd]):?EMA_CROSS_DOWN:?(EMA\d+):?(EMA\d+)?`)
+	conditionParser.patterns[ICT_EMA_CROSS_UP] = regexp.MustCompile(`(?i)(\d+[HhMmDd]):?EMA_CROSS_UP:?(EMA\d+):?(EMA\d+)?`)
+	conditionParser.patterns[ICT_PRICE_BELOW] = regexp.MustCompile(`(?i)(\d+[HhMmDd]):?PRICE_BELOW:?(EMA\d+|VWAP|BB_LOWER|\d+\.?\d*)`)
+	conditionParser.patterns[ICT_PRICE_ABOVE] = regexp.MustCompile(`(?i)(\d+[HhMmDd]):?PRICE_ABOVE:?(EMA\d+|VWAP|BB_UPPER|\d+\.?\d*)`)
+	conditionParser.patterns[ICT_RSI_ABOVE] = regexp.MustCompile(`(?i)(\d+[HhMmDd]):?RSI_ABOVE:?(\d+)`)
+	conditionParser.patterns[ICT_RSI_BELOW] = regexp.MustCompile(`(?i)(\d+[HhMmDd]):?RSI_BELOW:?(\d+)`)
+	conditionParser.patterns[ICT_ADX_BELOW] = regexp.MustCompile(`(?i)(\d+[HhMmDd]):?ADX_BELOW:?(\d+)`)
+	conditionParser.patterns[ICT_MACD_CROSS] = regexp.MustCompile(`(?i)(\d+[HhMmDd]):?MACD_CROSS:?(UP|DOWN)`)
+	conditionParser.patterns[ICT_TREND_REVERSAL] = regexp.MustCompile(`(?i)(\d+[HhMmDd]):?TREND_REVERSAL`)
 }
 
 // ParseInvalidationCondition 解析失效条件

@@ -563,7 +563,10 @@ func loadOITopCache() ([]OIPosition, error) {
 	return cache.Positions, nil
 }
 
-// GetOITopSymbols 获取OI Top的币种符号列表
+// oiMinValueUSD OI价值过滤阈值（15M USD）
+const oiMinValueUSD = 15_000_000.0
+
+// GetOITopSymbols 获取OI Top的币种符号列表（过滤OI价值低于15M USD的币种）
 func GetOITopSymbols() ([]string, error) {
 	positions, err := GetOITopPositions()
 	if err != nil {
@@ -572,6 +575,12 @@ func GetOITopSymbols() ([]string, error) {
 
 	var symbols []string
 	for _, pos := range positions {
+		// 过滤OI价值低于15M USD的非持仓币种，避免低流动性交易
+		if pos.OIDeltaValue < oiMinValueUSD {
+			log.Printf("⚠️  过滤低流动性币种 %s（OI价值: %.2fM USD < 15M USD）",
+				pos.Symbol, pos.OIDeltaValue/1_000_000)
+			continue
+		}
 		symbol := normalizeSymbol(pos.Symbol)
 		symbols = append(symbols, symbol)
 	}
