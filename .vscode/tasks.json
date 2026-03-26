@@ -1,0 +1,54 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Backend: Build",
+            "type": "shell",
+            "command": "make build",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": ["$go"]
+        },
+        {
+            "label": "Backend: Run",
+            "type": "shell",
+            "command": "make run"
+        },
+        {
+            "label": "Backend: Test",
+            "type": "shell",
+            "command": "make test-backend",
+            "group": "test"
+        },
+        {
+            "label": "Frontend: Install",
+            "type": "shell",
+            "command": "cd web && npm ci"
+        },
+        {
+            "label": "Frontend: Build",
+            "type": "shell",
+            "command": "cd web && npm run build",
+            "group": "build"
+        },
+        {
+            "label": "Frontend: Test",
+            "type": "shell",
+            "command": "cd web && npm run test",
+            "group": "test"
+        },
+        {
+            "label": "Docker: Deploy",
+            "type": "shell",
+            "command": "make docker-up"
+        },
+        {
+            "label": "All: Test",
+            "type": "shell",
+            "command": "make test",
+            "group": "test"
+        }
+    ]
+}

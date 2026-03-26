@@ -700,3 +700,64 @@ func TestProperty6_InvalidConfigRejected(t *testing.T) {
 
 	properties.TestingRun(t, gopter.ConsoleReporter(false))
 }
+
+// ============================================================================
+// Feature: build-debug-run-pipeline, Property 2: 配置加载端口保持
+// 通过 LoadConfig（文件读取 + Validate）验证完整链路的 round-trip 正确性
+// Validates: Requirements 2.1, 6.1
+// ============================================================================
+
+func TestProperty2_ConfigLoadRoundTrip(t *testing.T) {
+	// Feature: build-debug-run-pipeline, Property 2: 配置加载端口保持
+	// 与 Property 1 不同：本测试通过 LoadConfig（含文件 I/O + Validate）验证完整链路
+	parameters := gopter.DefaultTestParameters()
+	parameters.MinSuccessfulTests = 100
+	parameters.Rng.Seed(42)
+	properties := gopter.NewProperties(parameters)
+
+	properties.Property("Config经JSON序列化写入文件再通过LoadConfig加载后数值字段应保持一致", prop.ForAll(
+		func(portNorm, btcLevNorm, altLevNorm, dailyLossNorm, drawdownNorm int) bool {
+			// 生成有效范围内的随机值（确保 > 0 以避免 Validate 覆盖默认值）
+			port := 1024 + portNorm%64511       // 1024..65534
+			btcLev := 1 + btcLevNorm%20         // 1..20
+			altLev := 1 + altLevNorm%20          // 1..20
+			dailyLoss := 1.0 + float64(dailyLossNorm%100) // 1.0..100.0
+			drawdown := 1.0 + float64(drawdownNorm%100)   // 1.0..100.0
+
+			original := &Config{
+				Traders:       []TraderConfig{validBinanceTrader("roundtrip-1")},
+				APIServerPort: port,
+				Leverage: LeverageConfig{
+					BTCETHLeverage:  btcLev,
+					AltcoinLeverage: altLev,
+				},
+				MaxDailyLoss: dailyLoss,
+				MaxDrawdown:  drawdown,
+			}
+
+			// 序列化为 JSON 写入临时文件
+			path := writeConfigFile(t, original)
+
+			// 通过 LoadConfig 重新加载（含文件读取 + Validate 完整链路）
+			loaded, err := LoadConfig(path)
+			if err != nil {
+				t.Logf("LoadConfig 失败: %v", err)
+				return false
+			}
+
+			// 验证关键数值字段与原始值一致
+			return loaded.APIServerPort == original.APIServerPort &&
+				loaded.Leverage.BTCETHLeverage == original.Leverage.BTCETHLeverage &&
+				loaded.Leverage.AltcoinLeverage == original.Leverage.AltcoinLeverage &&
+				loaded.MaxDailyLoss == original.MaxDailyLoss &&
+				loaded.MaxDrawdown == original.MaxDrawdown
+		},
+		gen.IntRange(0, 99),
+		gen.IntRange(0, 99),
+		gen.IntRange(0, 99),
+		gen.IntRange(0, 99),
+		gen.IntRange(0, 99),
+	))
+
+	properties.TestingRun(t, gopter.ConsoleReporter(false))
+}
