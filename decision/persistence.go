@@ -651,19 +651,32 @@ func ResetStatistics() {
 func OnPositionClosed(symbol string, exitPrice float64, pnlPercent float64, pnlUSD float64, reason string) {
 	plan := planManager.GetPlan(symbol)
 
+	now := time.Now()
 	var record ClosedTradeRecord
 	record.Symbol = symbol
 	record.ExitPrice = exitPrice
 	record.PnLPercent = pnlPercent
 	record.PnLUSD = pnlUSD
+	record.RealizedPnL = pnlUSD
 	record.ExitReason = reason
-	record.ClosedAt = time.Now()
+	record.CloseReason = reason
+	record.ClosedAt = now
+	record.ExitTime = now
 
 	if plan != nil {
 		record.Direction = plan.Direction
 		record.EntryPrice = plan.EntryPrice
 		record.PeakPnLPercent = plan.PeakPnLPercent
 		record.HoldingMinutes = int64(time.Since(plan.CreatedAt).Minutes())
+		record.EntryTime = plan.CreatedAt
+		record.Quantity = plan.ActualQuantity
+		record.Leverage = plan.Leverage
+		// 从 Direction 映射 Side 字段
+		if plan.Direction == "long" {
+			record.Side = "long"
+		} else if plan.Direction == "short" {
+			record.Side = "short"
+		}
 	}
 
 	closedTradesLock.Lock()

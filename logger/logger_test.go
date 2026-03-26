@@ -847,3 +847,153 @@ func TestProperty43_WinRateCorrectness(t *testing.T) {
 
 	properties.TestingRun(t)
 }
+
+// ============================================================================
+// Feature: quant-trading-system, Property 47: 成交记录字段完整性
+// 验证: 需求 13.11, 13.14
+// ============================================================================
+
+func TestProperty47_TradeOutcomeFieldCompleteness(t *testing.T) {
+	parameters := gopter.DefaultTestParameters()
+	parameters.MinSuccessfulTests = 100
+	properties := gopter.NewProperties(parameters)
+	symbols := []string{"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT"}
+
+	// 属性 47a: N 笔开平仓配对，每个 TradeOutcome 所有核心字段非零，时间有序
+	properties.Property("Property 47: 成交记录字段完整性", prop.ForAll(
+		func(n int) bool {
+			if n == 0 {
+				return true
+			}
+			l, cleanup := newTestLogger(t)
+			defer cleanup()
+			baseTime := time.Now().Add(-time.Hour)
+			for i := 0; i < n; i++ {
+				symbol := symbols[i%len(symbols)]
+				side := "long"
+				if i%2 == 1 {
+					side = "short"
+				}
+				openPrice := 10000.0 + float64(i)*500
+				closePrice := openPrice * 1.03
+				if (i%3 == 0 && side == "long") || (i%3 != 0 && side == "short") {
+					closePrice = openPrice * 0.97
+				}
+				openAction, closeAction := "open_long", "close_long"
+				if side == "short" {
+					openAction, closeAction = "open_short", "close_short"
+				}
+				openTime := baseTime.Add(time.Duration(i*10) * time.Minute)
+				closeTime := openTime.Add(5 * time.Minute)
+				qty := 0.5 + float64(i)*0.1
+				lev := 3 + (i % 8)
+				rOpen := newRecord(true)
+				rOpen.Decisions = []DecisionAction{{Action: openAction, Symbol: symbol, Quantity: qty, Leverage: lev, Price: openPrice, Timestamp: openTime, Success: true}}
+				if err := l.LogDecision(rOpen); err != nil {
+					return false
+				}
+				time.Sleep(2 * time.Millisecond)
+				rClose := newRecord(true)
+				rClose.Decisions = []DecisionAction{{Action: closeAction, Symbol: symbol, Quantity: qty, Leverage: lev, Price: closePrice, Timestamp: closeTime, Success: true}}
+				if err := l.LogDecision(rClose); err != nil {
+					return false
+				}
+				time.Sleep(2 * time.Millisecond)
+			}
+			analysis, err := l.AnalyzePerformance(n * 2)
+			if err != nil {
+				return false
+			}
+			if analysis.TotalTrades != n {
+				return false
+			}
+			for _, trade := range analysis.RecentTrades {
+				if trade.OpenTime.IsZero() || trade.CloseTime.IsZero() {
+					return false
+				}
+				if !trade.CloseTime.After(trade.OpenTime) {
+					return false
+				}
+				if trade.Symbol == "" || trade.Side == "" {
+					return false
+				}
+				if trade.Quantity <= 0 || trade.Leverage <= 0 {
+					return false
+				}
+				if trade.OpenPrice <= 0 || trade.ClosePrice <= 0 {
+					return false
+				}
+				if trade.PositionValue <= 0 || trade.MarginUsed <= 0 {
+					return false
+				}
+			}
+			return true
+		},
+		gen.IntRange(1, 5),
+	))
+
+	// 属性 47b: 单笔随机参数交易，字段完整性和计算正确性
+	properties.Property("Property 47b: 单笔随机交易字段完整性", prop.ForAll(
+		func(sideIdx int, openPrice, closePrice, quantity float64, leverage int) bool {
+			l, cleanup := newTestLogger(t)
+			defer cleanup()
+			side := []string{"long", "short"}[sideIdx]
+			symbol := "BTCUSDT"
+			openAction, closeAction := "open_long", "close_long"
+			if side == "short" {
+				openAction, closeAction = "open_short", "close_short"
+			}
+			baseTime := time.Now().Add(-time.Hour)
+			closeTime := baseTime.Add(30 * time.Minute)
+			rOpen := newRecord(true)
+			rOpen.Decisions = []DecisionAction{{Action: openAction, Symbol: symbol, Quantity: quantity, Leverage: leverage, Price: openPrice, Timestamp: baseTime, Success: true}}
+			if err := l.LogDecision(rOpen); err != nil {
+				return false
+			}
+			time.Sleep(2 * time.Millisecond)
+			rClose := newRecord(true)
+			rClose.Decisions = []DecisionAction{{Action: closeAction, Symbol: symbol, Quantity: quantity, Leverage: leverage, Price: closePrice, Timestamp: closeTime, Success: true}}
+			if err := l.LogDecision(rClose); err != nil {
+				return false
+			}
+			analysis, err := l.AnalyzePerformance(10)
+			if err != nil || analysis.TotalTrades != 1 {
+				return false
+			}
+			trade := analysis.RecentTrades[0]
+			if trade.OpenTime.IsZero() || trade.CloseTime.IsZero() || !trade.CloseTime.After(trade.OpenTime) {
+				return false
+			}
+			if trade.Symbol != symbol || trade.Side != side {
+				return false
+			}
+			if trade.Quantity != quantity || trade.Leverage != leverage {
+				return false
+			}
+			if trade.OpenPrice != openPrice || trade.ClosePrice != closePrice {
+				return false
+			}
+			expectedPV := quantity * openPrice
+			expectedMargin := expectedPV / float64(leverage)
+			if trade.PositionValue <= 0 || trade.MarginUsed <= 0 {
+				return false
+			}
+			pvDiff := trade.PositionValue - expectedPV
+			if pvDiff < 0 {
+				pvDiff = -pvDiff
+			}
+			marginDiff := trade.MarginUsed - expectedMargin
+			if marginDiff < 0 {
+				marginDiff = -marginDiff
+			}
+			return pvDiff < 0.01 && marginDiff < 0.01
+		},
+		gen.IntRange(0, 1),
+		gen.Float64Range(100, 50000),
+		gen.Float64Range(100, 50000),
+		gen.Float64Range(0.01, 10.0),
+		gen.IntRange(1, 20),
+	))
+
+	properties.TestingRun(t)
+}

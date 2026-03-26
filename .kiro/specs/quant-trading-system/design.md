@@ -300,13 +300,89 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 
 每条记录独立 JSON 文件，3 倍窗口预填充开仓记录避免匹配失败。
 
+`AnalyzePerformance` 返回的 `TradeOutcome` 包含完整的成交记录字段：
+
+```go
+type TradeOutcome struct {
+    Symbol        string    `json:"symbol"`         // 交易对
+    Side          string    `json:"side"`           // 方向 (long/short)
+    Quantity      float64   `json:"quantity"`       // 数量
+    Leverage      int       `json:"leverage"`       // 杠杆
+    OpenPrice     float64   `json:"open_price"`     // 开仓价格
+    ClosePrice    float64   `json:"close_price"`    // 平仓价格
+    PositionValue float64   `json:"position_value"` // 持仓价值 (quantity × openPrice)
+    MarginUsed    float64   `json:"margin_used"`    // 已用保证金 (positionValue / leverage)
+    PnL           float64   `json:"pn_l"`           // 盈亏金额 (USDT)
+    PnLPct        float64   `json:"pn_l_pct"`       // 盈亏百分比 (相对保证金)
+    Duration      string    `json:"duration"`       // 持仓时长
+    OpenTime      time.Time `json:"open_time"`      // 开仓时间
+    CloseTime     time.Time `json:"close_time"`     // 平仓时间
+    WasStopLoss   bool      `json:"was_stop_loss"`  // 是否止损
+}
+```
+
+`OpenTime` 和 `CloseTime` 数据来源于决策日志中开仓/平仓动作的时间戳。对于通过 `ClosedTradeRecord` 持久化的记录，对应字段为 `EntryTime` 和 `ClosedAt`。
+
 ### 14. HTTP API (api/server.go)
 
 基于 Gin 框架，CORS 中间件，11 个 RESTful 端点覆盖健康检查、竞赛总览、Trader 列表、系统状态、账户信息、持仓、决策日志、统计、收益率历史、AI 表现分析。
 
+`/api/performance` 端点返回的 `PerformanceAnalysis` 中，`recent_trades` 数组的每个 `TradeOutcome` 对象包含 `open_time` 和 `close_time` 字段（ISO 8601 格式），数据来源于 `ClosedTradeRecord` 的 `EntryTime` 和 `ClosedAt` 字段，或决策日志中开仓/平仓动作的时间戳。
+
 ### 15. 前端仪表盘 (web/)
 
 React 18 + TypeScript + Vite + Tailwind CSS + Recharts + SWR。Binance 风格深色主题，竞赛页面（排行榜 + 对比曲线）和详情页面（净值曲线 + 持仓 + 决策 + AI 学习）。中英文双语，15-30 秒自动刷新，最大 2000 数据点。
+
+#### 成交历史模块 (AILearning 组件)
+
+成交历史表格展示所有已平仓交易的完整记录，字段包括：交易对、方向、开仓价格、平仓价格、数量、杠杆、持仓价值、已用保证金、盈亏金额、盈亏百分比。每笔记录同时显示开仓时间和平仓时间，时间格式统一为 `YYYY-MM-DD HH:mm:ss`。
+
+前端 `TradeOutcome` TypeScript 接口：
+
+```typescript
+interface TradeOutcome {
+  symbol: string;
+  side: string;
+  quantity: number;
+  leverage: number;
+  open_price: number;
+  close_price: number;
+  position_value: number;
+  margin_used: number;
+  pn_l: number;
+  pn_l_pct: number;
+  duration: string;
+  open_time: string;   // ISO 8601，前端格式化为 "YYYY-MM-DD HH:mm:ss"
+  close_time: string;  // ISO 8601，前端格式化为 "YYYY-MM-DD HH:mm:ss"
+  was_stop_loss: boolean;
+}
+```
+
+#### CSV 导出功能
+
+成交历史模块提供 CSV 导出按钮，点击后在浏览器端生成 CSV 文件并触发下载。CSV 包含以下列：交易对、方向、开仓时间、平仓时间、开仓价格、平仓价格、数量、杠杆、持仓价值、已用保证金、盈亏金额、盈亏百分比、持仓时长、平仓原因。
+
+实现方式：
+- 纯前端生成，无需后端新增端点
+- 使用 `Blob` + `URL.createObjectURL` + 临时 `<a>` 标签触发下载
+- 文件名格式：`trade_history_{traderId}_{YYYYMMDD}.csv`
+- CSV 首行为表头，数据行按平仓时间降序排列
+- 数值字段保留合理精度（价格 4 位小数，盈亏 2 位小数）
+
+```typescript
+function exportTradeHistoryCSV(trades: TradeOutcome[], traderId: string): void
+```
+
+#### 分页功能
+
+当成交历史记录数量超过 50 条时，启用分页显示，每页默认展示 20 条记录。
+
+实现方式：
+- 前端分页（数据已全量加载到 `performance.recent_trades`）
+- 分页状态：`currentPage`（从 1 开始）、`pageSize`（默认 20）
+- 总页数：`Math.ceil(totalRecords / pageSize)`
+- 分页控件：上一页/下一页按钮 + 当前页码/总页数显示
+- 记录数 ≤ 50 时不显示分页控件，直接展示全部记录
 
 ## 数据模型
 
@@ -408,11 +484,49 @@ classDiagram
         +time.Time UpdatedAt
     }
 
+    class ClosedTradeRecord {
+        +string Symbol
+        +string Side
+        +string Direction
+        +float64 EntryPrice
+        +float64 ExitPrice
+        +float64 Quantity
+        +int Leverage
+        +float64 RealizedPnL
+        +float64 PnLPercent
+        +int64 HoldingMinutes
+        +time.Time EntryTime
+        +time.Time ExitTime
+        +time.Time ClosedAt
+        +string CloseReason
+        +string ExitReason
+        +float64 PeakPnLPercent
+    }
+
+    class TradeOutcome {
+        +string Symbol
+        +string Side
+        +float64 Quantity
+        +int Leverage
+        +float64 OpenPrice
+        +float64 ClosePrice
+        +float64 PositionValue
+        +float64 MarginUsed
+        +float64 PnL
+        +float64 PnLPct
+        +string Duration
+        +time.Time OpenTime
+        +time.Time CloseTime
+        +bool WasStopLoss
+    }
+
     Config --> TraderConfig
     Context --> Decision
     Decision --> TradePlan
     TradePlan --> PersistentData
     TradeStatistics --> PersistentData
+    ClosedTradeRecord --> PersistentData
+    ClosedTradeRecord ..> TradeOutcome : "API 转换"
 ```
 
 ### 持久化文件结构
@@ -703,6 +817,30 @@ classDiagram
 
 **Validates: Requirements 15.6**
 
+### Property 47: 成交记录字段完整性
+
+*对于任意*包含有效开仓和平仓配对的决策记录集合，`AnalyzePerformance` 返回的每个 `TradeOutcome` 应包含非零的 `open_time` 和 `close_time`，且 `close_time` > `open_time`；同时 `symbol`、`side`、`quantity`、`leverage`、`open_price`、`close_price`、`position_value`、`margin_used` 字段均应为非零值。
+
+**Validates: Requirements 13.11, 13.14**
+
+### Property 48: CSV 导出字段完整性
+
+*对于任意*非空的 `TradeOutcome` 列表，`exportTradeHistoryCSV` 生成的 CSV 字符串应包含 14 列表头（交易对、方向、开仓时间、平仓时间、开仓价格、平仓价格、数量、杠杆、持仓价值、已用保证金、盈亏金额、盈亏百分比、持仓时长、平仓原因），且数据行数应等于输入列表长度。
+
+**Validates: Requirements 13.13**
+
+### Property 49: 分页正确性
+
+*对于任意*长度为 N（N > 50）的成交记录列表和页码 P（1 ≤ P ≤ ceil(N/20)），分页后当前页应包含最多 20 条记录，且所有页的记录总数应等于 N。
+
+**Validates: Requirements 13.15**
+
+### Property 50: 时间格式化一致性
+
+*对于任意*有效的 ISO 8601 时间字符串，前端时间格式化函数应产生符合 `YYYY-MM-DD HH:mm:ss` 格式的字符串（长度 19，包含 `-`、空格和 `:` 分隔符）。
+
+**Validates: Requirements 13.12**
+
 ## 错误处理
 
 ### 分层错误处理策略
@@ -726,6 +864,8 @@ classDiagram
 | 币种池 API 失败 | 3 次重试 → 本地缓存 → 默认币种列表 |
 | 开仓验证失败 | 跳过该决策，记录原因 |
 | 熔断触发 | 暂停交易，等待冷却期结束 |
+| CSV 导出数据为空 | 提示用户暂无成交记录，禁用导出按钮 |
+| CSV 文件生成失败 | 捕获异常，显示错误提示，不影响页面正常使用 |
 
 ## 测试策略
 
@@ -761,7 +901,7 @@ classDiagram
 | mcp | 属性测试 + 单元测试 | URL 处理、空密钥拒绝 |
 | logger | 属性测试 | 日志往返、时间排序、表现分析 |
 | api | 集成测试 | API 端点响应格式 |
-| web | 组件测试 | 前端渲染和交互 |
+| web | 组件测试 + 属性测试 | 前端渲染和交互、CSV 导出字段完整性、分页逻辑、时间格式化 |
 
 ### 属性基测试库选择
 

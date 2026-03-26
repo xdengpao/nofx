@@ -243,6 +243,11 @@ NOFX 是一个基于 AI 驱动的量化交易操作系统，采用 Go 语言后�
 8. THE Web_Dashboard SHALL 提供 AI 学习与反思模块，展示总交易数、胜率、平均盈利/亏损、夏普比率、盈亏因子、最佳/最差币种表现和历史成交记录
 9. THE Web_Dashboard SHALL 在对比图表中使用统一的颜色分配逻辑，确保同一 trader 在不同图表中颜色一致
 10. THE Web_Dashboard SHALL 限制图表最大显示 2000 个数据点，超出时只显示最近的数据
+11. THE Web_Dashboard SHALL 在成交历史模块中展示所有已平仓交易的完整记录，包括交易对、方向、开仓价格、平仓价格、数量、杠杆、持仓价值、已用保证金、盈亏金额和盈亏百分比
+12. THE Web_Dashboard SHALL 在成交历史记录中显示每笔交易的开仓时间和平仓时间，时间格式为 "YYYY-MM-DD HH:mm:ss"
+13. THE Web_Dashboard SHALL 提供成交历史记录的 CSV 导出功能，WHEN 用户点击导出按钮时，生成包含所有成交历史字段（交易对、方向、开仓时间、平仓时间、开仓价格、平仓价格、数量、杠杆、持仓价值、已用保证金、盈亏金额、盈亏百分比、持仓时长、平仓原因）的 CSV 文件并触发浏览器下载
+14. THE Trading_System SHALL 在 /api/performance 端点的响应中为每笔成交记录包含 open_time 和 close_time 字段，数据来源于 ClosedTradeRecord 的 EntryTime 和 ClosedAt 字段
+15. WHEN 成交历史记录数量超过 50 条时，THE Web_Dashboard SHALL 支持分页显示，每页默认展示 20 条记录
 
 ### 需求 14: 多 Trader 管理与竞赛框架
 

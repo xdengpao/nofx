@@ -429,6 +429,9 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 						pnlPct = (pnl / marginUsed) * 100
 					}
 
+					// 判断是否为止损平仓（盈亏为负视为止损）
+					wasStopLoss := pnl < 0
+
 					// 记录交易结果
 					outcome := TradeOutcome{
 						Symbol:        symbol,
@@ -444,6 +447,7 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 						Duration:      action.Timestamp.Sub(openTime).String(),
 						OpenTime:      openTime,
 						CloseTime:     action.Timestamp,
+						WasStopLoss:   wasStopLoss,
 					}
 
 					analysis.RecentTrades = append(analysis.RecentTrades, outcome)

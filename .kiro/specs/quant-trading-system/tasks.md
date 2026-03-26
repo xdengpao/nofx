@@ -2,7 +2,7 @@
 
 ## 概述
 
-本实施计划将设计文档中的架构和 46 条正确性属性转化为可执行的编码任务。任务按模块从底层到上层组织，每个模块包含核心实现和对应的属性基测试（PBT）。使用 Go 语言 `github.com/leanovate/gopter` 库进行属性基测试。
+本实施计划将设计文档中的架构和 50 条正确性属性转化为可执行的编码任务。任务按模块从底层到上层组织，每个模块包含核心实现和对应的属性基测试（PBT）。后端使用 Go 语言 `github.com/leanovate/gopter` 库进行属性基测试，前端使用 TypeScript。
 
 ## 任务
 
@@ -352,27 +352,132 @@
 - [x] 19. 检查点 - 交易接口和日志模块测试通过
   - 确保交易接口和决策日志模块所有测试通过，如有问题请咨询用户。
 
-- [ ] 20. 系统集成与生命周期管理
-  - [ ] 20.1 实现系统入口和生命周期管理的测试覆盖
+- [x] 20. 系统集成与生命周期管理
+  - [x] 20.1 实现系统入口和生命周期管理的测试覆盖
     - 确保 `main.go` 的启动流程正确（加载配置→创建数据目录→初始化决策模块→创建 TraderManager→启动 API→启动 trader）
     - 确保优雅退出流程正确（停止 trader→保存数据→打印统计，超时 10 秒）
     - 确保信号处理（SIGINT、SIGTERM、SIGQUIT）正确
     - _需求: 16.1, 16.2, 16.3, 16.4, 16.5, 16.6_
 
-  - [ ] 20.2 实现 HTTP API 服务的集成测试
+  - [x] 20.2 实现 HTTP API 服务的集成测试
     - 使用 httptest 测试所有 11 个 API 端点的响应格式
     - 确保 CORS 中间件正确配置
     - 确保 trader_id 参数缺失时默认返回第一个 trader 的数据
     - _需求: 12.1, 12.2, 12.3, 12.4, 12.5_
 
-  - [ ] 20.3 实现多 Trader 管理器的测试覆盖
+  - [x] 20.3 实现多 Trader 管理器的测试覆盖
     - 确保 TraderManager 能并发管理多个 AutoTrader 实例
     - 确保竞赛对比数据 API 返回所有 trader 的状态
     - _需求: 14.1, 14.2, 14.3, 14.4, 14.5, 14.6, 14.7_
 
-- [x] 21. 最终检查点 - 全部测试通过
+- [x] 21. 检查点 - 原有模块全部测试通过
+  - 运行 `go test ./...` 确保原有 46 条正确性属性的测试全部通过
+  - 如有问题请咨询用户。
+
+- [x] 22. 后端: 成交记录完整字段与 /api/performance 端点增强
+  - [x] 22.1 确保 ClosedTradeRecord 数据模型包含 EntryTime 字段
+    - 检查 `decision/types.go` 中 `ClosedTradeRecord` 的 `EntryTime` 字段定义
+    - 确保 `decision/persistence.go` 中 `OnPositionClosed` 正确从 TradePlan.CreatedAt 填充 EntryTime
+    - 确保 `OnPositionClosed` 同时填充 `Quantity`、`Leverage`、`Side` 等完整字段
+    - _需求: 13.14_
+
+  - [x] 22.2 确保 AnalyzePerformance 返回的 TradeOutcome 包含完整字段
+    - 检查 `logger/decision_logger.go` 中 `AnalyzePerformance` 方法
+    - 确保每个 TradeOutcome 包含 symbol、side、quantity、leverage、open_price、close_price、position_value、margin_used、pnl、pnl_pct、duration、open_time、close_time、was_stop_loss 所有字段
+    - 确保 open_time 来自开仓动作的时间戳，close_time 来自平仓动作的时间戳
+    - _需求: 13.11, 13.14_
+
+  - [x] 22.3 确保 /api/performance 端点响应中 open_time 和 close_time 正确序列化
+    - 检查 `api/server.go` 中 `handlePerformance` 端点
+    - 确保 TradeOutcome 的 OpenTime 和 CloseTime 以 ISO 8601 格式序列化到 JSON 响应
+    - 验证 JSON 输出中 `open_time` 和 `close_time` 字段非空
+    - _需求: 13.14_
+
+  - [x] 22.4 属性测试: 成交记录字段完整性
+    - **Property 47: 成交记录字段完整性**
+    - 对任意包含有效开仓和平仓配对的决策记录集合，AnalyzePerformance 返回的每个 TradeOutcome 应包含非零的 open_time 和 close_time，且 close_time > open_time；同时 symbol、side、quantity、leverage、open_price、close_price、position_value、margin_used 字段均应为非零值
+    - **验证: 需求 13.11, 13.14**
+
+- [x] 23. 前端: 成交历史表格完整记录展示
+  - [x] 23.1 更新前端 TradeOutcome TypeScript 接口
+    - 确保 `web/src/types/index.ts` 或 `web/src/components/AILearning.tsx` 中的 TradeOutcome 接口包含 open_time、close_time、was_stop_loss 字段
+    - _需求: 13.11_
+
+  - [x] 23.2 更新 AILearning 组件成交历史表格
+    - 修改 `web/src/components/AILearning.tsx` 中的成交历史区域
+    - 将卡片式布局改为表格布局，展示所有字段：交易对、方向、开仓时间、平仓时间、开仓价格、平仓价格、数量、杠杆、持仓价值、已用保证金、盈亏金额、盈亏百分比
+    - 盈亏金额和百分比使用绿色/红色区分盈利/亏损
+    - _需求: 13.11_
+
+  - [x] 23.3 实现时间格式化函数
+    - 在 AILearning 组件或 utils 中添加 `formatDateTime` 函数
+    - 将 ISO 8601 时间字符串格式化为 `YYYY-MM-DD HH:mm:ss` 格式
+    - 开仓时间和平仓时间均使用此格式显示
+    - _需求: 13.12_
+
+  - [x] 23.4 属性测试: 时间格式化一致性
+    - **Property 50: 时间格式化一致性**
+    - 对任意有效的 ISO 8601 时间字符串，formatDateTime 应产生长度为 19 的字符串，包含 `-`、空格和 `:` 分隔符，格式为 `YYYY-MM-DD HH:mm:ss`
+    - **验证: 需求 13.12**
+
+- [x] 24. 前端: CSV 导出功能
+  - [x] 24.1 实现 exportTradeHistoryCSV 函数
+    - 在 `web/src/components/AILearning.tsx` 或 `web/src/utils/` 中实现纯前端 CSV 导出
+    - CSV 包含 14 列：交易对、方向、开仓时间、平仓时间、开仓价格、平仓价格、数量、杠杆、持仓价值、已用保证金、盈亏金额、盈亏百分比、持仓时长、平仓原因
+    - 使用 `Blob` + `URL.createObjectURL` + 临时 `<a>` 标签触发下载
+    - 文件名格式: `trade_history_{traderId}_{YYYYMMDD}.csv`
+    - CSV 首行为表头，数据行按平仓时间降序排列
+    - 数值字段保留合理精度（价格 4 位小数，盈亏 2 位小数）
+    - _需求: 13.13_
+
+  - [x] 24.2 在成交历史区域添加导出按钮
+    - 在成交历史表格标题栏添加 CSV 导出按钮
+    - 无成交记录时禁用导出按钮
+    - 按钮文案支持中英文 i18n
+    - _需求: 13.13_
+
+  - [x] 24.3 属性测试: CSV 导出字段完整性
+    - **Property 48: CSV 导出字段完整性**
+    - 对任意非空的 TradeOutcome 列表，exportTradeHistoryCSV 生成的 CSV 字符串应包含 14 列表头，且数据行数等于输入列表长度
+    - **验证: 需求 13.13**
+
+- [x] 25. 前端: 分页功能
+  - [x] 25.1 实现成交历史分页逻辑
+    - 在 AILearning 组件中添加分页状态: `currentPage`（从 1 开始）、`pageSize`（默认 20）
+    - 总页数: `Math.ceil(totalRecords / pageSize)`
+    - 当记录数 ≤ 50 时不显示分页控件，直接展示全部记录
+    - 当记录数 > 50 时启用分页，表格仅显示当前页的 20 条记录
+    - _需求: 13.15_
+
+  - [x] 25.2 实现分页控件 UI
+    - 添加上一页/下一页按钮 + 当前页码/总页数显示
+    - 第一页时禁用上一页按钮，最后一页时禁用下一页按钮
+    - 分页控件样式与 Binance 深色主题一致
+    - _需求: 13.15_
+
+  - [x] 25.3 属性测试: 分页正确性
+    - **Property 49: 分页正确性**
+    - 对任意长度为 N（N > 50）的成交记录列表和页码 P（1 ≤ P ≤ ceil(N/20)），分页后当前页应包含最多 20 条记录，且所有页的记录总数等于 N
+    - **验证: 需求 13.15**
+
+- [x] 26. 前端: i18n 翻译更新
+  - [x] 26.1 添加成交历史相关的中英文翻译
+    - 在 `web/src/i18n/translations.ts` 中添加新的翻译键值对
+    - 英文: openTime, closeTime, exportCSV, noTradeData, page, of, previousPage, nextPage, positionValue, marginUsed, pnlAmount, pnlPercent, closedReason 等
+    - 中文: 开仓时间, 平仓时间, 导出CSV, 暂无成交数据, 第, 页/共, 上一页, 下一页, 持仓价值, 已用保证金, 盈亏金额, 盈亏百分比, 平仓原因 等
+    - _需求: 13.11, 13.12, 13.13, 13.15_
+
+- [x] 27. 检查点 - 成交历史模块功能验证
+  - 确保后端 /api/performance 端点返回的 TradeOutcome 包含 open_time 和 close_time
+  - 确保前端成交历史表格正确展示所有字段
+  - 确保 CSV 导出功能正常工作
+  - 确保分页功能在记录数 > 50 时正确启用
+  - 确保中英文翻译完整
+  - 如有问题请咨询用户。
+
+- [x] 28. 最终检查点 - 全部测试通过
   - 运行 `go test ./...` 确保所有测试通过
-  - 确保所有 46 条正确性属性均有对应的属性基测试覆盖
+  - 确保所有 50 条正确性属性均有对应的属性基测试覆盖
   - 如有问题请咨询用户。
 
 ## 备注
@@ -383,3 +488,4 @@
 - 属性基测试使用 `github.com/leanovate/gopter` 库，每个属性至少运行 100 次迭代
 - 属性基测试注释格式: `// Feature: quant-trading-system, Property N: [属性标题]`
 - 单元测试和属性基测试互补：属性测试验证通用不变量，单元测试覆盖具体边界情况
+- 前端属性测试（Property 48-50）可使用 Vitest + fast-check 或手动验证逻辑函数
