@@ -281,6 +281,73 @@ func TestPersistence_LoadFromFile_RestoresPlans(t *testing.T) {
 	}
 }
 
+func TestOnStopLossUpdated_UpdatesCurrentStopLoss(t *testing.T) {
+	_, cleanup := setupTestPlanManager(t)
+	defer cleanup()
+
+	plan := newTestTradePlan("ETHUSDT")
+	plan.CurrentStopLoss = 48000
+	planManager.SetPlan(plan)
+
+	OnStopLossUpdated("ETHUSDT", 49500)
+
+	updated := planManager.GetPlan("ETHUSDT")
+	if updated == nil {
+		t.Fatal("应保留 ETHUSDT 交易计划")
+	}
+	if math.Abs(updated.CurrentStopLoss-49500) > 0.0001 {
+		t.Fatalf("CurrentStopLoss 未更新: 期望=49500, 实际=%.4f", updated.CurrentStopLoss)
+	}
+	if !updated.TrailingStopActive {
+		t.Fatal("移动止损成功后应标记 TrailingStopActive")
+	}
+}
+
+func TestOnPartialClose_MarksTrancheAndUpdatesStopLoss(t *testing.T) {
+	_, cleanup := setupTestPlanManager(t)
+	defer cleanup()
+
+	plan := newTestTradePlan("XRPUSDT")
+	plan.ExecutedTranches = make(map[int]bool)
+	planManager.SetPlan(plan)
+
+	OnPartialClose("XRPUSDT", 1, 30, 49000)
+
+	updated := planManager.GetPlan("XRPUSDT")
+	if updated == nil {
+		t.Fatal("应保留 XRPUSDT 交易计划")
+	}
+	if !updated.ExecutedTranches[1] {
+		t.Fatal("partial_close 成功后应标记 tranche 已执行")
+	}
+	if math.Abs(updated.CurrentStopLoss-49000) > 0.0001 {
+		t.Fatalf("partial_close 新止损未持久化: 期望=49000, 实际=%.4f", updated.CurrentStopLoss)
+	}
+}
+
+func TestOnPartialClose_NoNewStopLoss_DoesNotOverwriteCurrentStopLoss(t *testing.T) {
+	_, cleanup := setupTestPlanManager(t)
+	defer cleanup()
+
+	plan := newTestTradePlan("SOLUSDT")
+	plan.CurrentStopLoss = 48500
+	plan.ExecutedTranches = make(map[int]bool)
+	planManager.SetPlan(plan)
+
+	OnPartialClose("SOLUSDT", 0, 20, 0)
+
+	updated := planManager.GetPlan("SOLUSDT")
+	if updated == nil {
+		t.Fatal("应保留 SOLUSDT 交易计划")
+	}
+	if !updated.ExecutedTranches[0] {
+		t.Fatal("即使无新止损，也应标记 tranche 已执行")
+	}
+	if math.Abs(updated.CurrentStopLoss-48500) > 0.0001 {
+		t.Fatalf("无新止损时不应覆盖 CurrentStopLoss: 实际=%.4f", updated.CurrentStopLoss)
+	}
+}
+
 func TestPersistence_LoadFromFile_RestoresStatistics(t *testing.T) {
 	dir, cleanup := setupTestPlanManager(t)
 	defer cleanup()

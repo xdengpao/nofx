@@ -1780,6 +1780,9 @@ func GetPlanStatus() string {
 
 // GetPlanBySymbol 根据symbol获取计划
 func GetPlanBySymbol(symbol string) *TradePlan {
+	if planManager == nil {
+		return nil
+	}
 	return planManager.GetPlan(symbol)
 }
 

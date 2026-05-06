@@ -251,6 +251,20 @@ func TestDeterminePartialClosePlan_SmallPositionTwentyPct_FullClose(t *testing.T
 	}
 }
 
+func TestResolveProtectiveStopLoss_UsesRequestedWhenPresent(t *testing.T) {
+	got := resolveProtectiveStopLoss(101.5, 98.0)
+	if math.Abs(got-101.5) > 0.0001 {
+		t.Fatalf("应优先使用 partial_close 给出的新止损，实际=%.4f", got)
+	}
+}
+
+func TestResolveProtectiveStopLoss_FallsBackToCurrentPlanStop(t *testing.T) {
+	got := resolveProtectiveStopLoss(0, 98.0)
+	if math.Abs(got-98.0) > 0.0001 {
+		t.Fatalf("缺失 new_stop_loss 时应回退到当前有效止损，实际=%.4f", got)
+	}
+}
+
 func TestSortDecisionsByPriority_FullPriorityOrder(t *testing.T) {
 	decisions := []decision.Decision{
 		{Symbol: "A", Action: "wait"},

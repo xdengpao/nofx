@@ -1224,11 +1224,11 @@ func (at *AutoTrader) restoreStopLossOrder(symbol, positionSide string, quantity
 }
 
 // executeUpdateStopLossWithRecord 执行调整止损并记录详细信息
-func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
-	log.Printf("  🎯 调整止损: %s → %.2f", decision.Symbol, decision.NewStopLoss)
+func (at *AutoTrader) executeUpdateStopLossWithRecord(d *decision.Decision, actionRecord *logger.DecisionAction) error {
+	log.Printf("  🎯 调整止损: %s → %.2f", d.Symbol, d.NewStopLoss)
 
 	// 获取当前价格
-	marketData, err := market.Get(decision.Symbol)
+	marketData, err := market.Get(d.Symbol)
 	if err != nil {
 		return err
 	}
@@ -1251,14 +1251,14 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *decision.Decisio
 		if !ok {
 			continue
 		}
-		if symbol == decision.Symbol && posAmt != 0 {
+		if symbol == d.Symbol && posAmt != 0 {
 			targetPosition = pos
 			break
 		}
 	}
 
 	if targetPosition == nil {
-		return fmt.Errorf("持仓不存在: %s", decision.Symbol)
+		return fmt.Errorf("持仓不存在: %s", d.Symbol)
 	}
 
 	// 获取持仓方向和数量
@@ -1274,15 +1274,15 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *decision.Decisio
 	}
 
 	// 验证新止损价格合理性
-	if positionSide == "LONG" && decision.NewStopLoss >= marketData.CurrentPrice {
-		return fmt.Errorf("多单止损必须低于当前价格 (当前: %.2f, 新止损: %.2f)", marketData.CurrentPrice, decision.NewStopLoss)
+	if positionSide == "LONG" && d.NewStopLoss >= marketData.CurrentPrice {
+		return fmt.Errorf("多单止损必须低于当前价格 (当前: %.2f, 新止损: %.2f)", marketData.CurrentPrice, d.NewStopLoss)
 	}
-	if positionSide == "SHORT" && decision.NewStopLoss <= marketData.CurrentPrice {
-		return fmt.Errorf("空单止损必须高于当前价格 (当前: %.2f, 新止损: %.2f)", marketData.CurrentPrice, decision.NewStopLoss)
+	if positionSide == "SHORT" && d.NewStopLoss <= marketData.CurrentPrice {
+		return fmt.Errorf("空单止损必须高于当前价格 (当前: %.2f, 新止损: %.2f)", marketData.CurrentPrice, d.NewStopLoss)
 	}
 
 	// ⚠️ 防御性检查：检测是否存在双向持仓
-	at.checkDualSidePosition(decision.Symbol, positionSide, positions)
+	at.checkDualSidePosition(d.Symbol, positionSide, positions)
 
 	// ============ P1 修复：保本价硬约束（防止过早移动止损） ============
 	entryPrice := targetPosition["entryPrice"].(float64)
@@ -1296,50 +1296,54 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(decision *decision.Decisio
 	}
 
 	// 🔍 Step 2: 判断新止损价是否接近保本价（±0.5%）
-	distanceToEntry := math.Abs(decision.NewStopLoss-entryPrice) / entryPrice
+	distanceToEntry := math.Abs(d.NewStopLoss-entryPrice) / entryPrice
 	isBreakevenStopLoss := distanceToEntry < 0.005 // 0.5% threshold
 
-	// 🔍 Step 3: 如果利润不足 1% 且尝试设置保本价，拒绝执行
-	if profitPercent < 1.0 && isBreakevenStopLoss {
-		log.Printf("  🚫 拒绝调整止损：当前利润仅 %.2f%%，未达到 1%% 最低要求", profitPercent)
+	// 🔍 Step 3: 如果利润不足最低要求且尝试设置保本价，拒绝执行
+	if profitPercent < breakevenMoveMinPriceProfitPct && isBreakevenStopLoss {
+		log.Printf("  🚫 拒绝调整止损：当前利润仅 %.2f%%，未达到 %.1f%% 最低要求",
+			profitPercent, breakevenMoveMinPriceProfitPct)
 		log.Printf("  📊 入场价: %.4f | 当前价: %.4f | 尝试设置止损: %.4f (距离入场价 %.2f%%)",
-			entryPrice, marketData.CurrentPrice, decision.NewStopLoss, distanceToEntry*100)
-		log.Printf("  💡 建议：等待利润达到 1%% 以上后再移动止损至保本价")
-		return fmt.Errorf("利润不足 1%% (当前 %.2f%%)，不允许移动止损至保本价", profitPercent)
+			entryPrice, marketData.CurrentPrice, d.NewStopLoss, distanceToEntry*100)
+		log.Printf("  💡 建议：等待利润达到 %.1f%% 以上后再移动止损至保本价", breakevenMoveMinPriceProfitPct)
+		return fmt.Errorf("利润不足 %.1f%% (当前 %.2f%%)，不允许移动止损至保本价",
+			breakevenMoveMinPriceProfitPct, profitPercent)
 	}
 
 	// 📊 记录当前利润状态（通过检查时）
 	if isBreakevenStopLoss {
-		log.Printf("  ✅ 保本价检查通过：当前利润 %.2f%% ≥ 3%%，允许移动止损至保本价", profitPercent)
+		log.Printf("  ✅ 保本价检查通过：当前利润 %.2f%% ≥ %.1f%%，允许移动止损至保本价",
+			profitPercent, breakevenMoveMinPriceProfitPct)
 	} else {
 		log.Printf("  📊 当前利润: %.2f%% | 入场价: %.4f | 新止损: %.4f (距离入场价 %.2f%%)",
-			profitPercent, entryPrice, decision.NewStopLoss, distanceToEntry*100)
+			profitPercent, entryPrice, d.NewStopLoss, distanceToEntry*100)
 	}
 	// ===================================================
 
 	// ============ P0 修复：记录并恢复止盈单 ============
 	// 🔍 Step 1: 查询现有止盈单价格
-	oldTakeProfitPrice := at.queryHyperliquidTakeProfitOrder(decision.Symbol, positionSide, entryPrice)
+	oldTakeProfitPrice := at.queryHyperliquidTakeProfitOrder(d.Symbol, positionSide, entryPrice)
 	// ===================================================
 
 	// 🔄 Step 2: 取消旧的止损单（Hyperliquid 会连止盈单一起删）
 	// 注意：如果存在双向持仓，这会删除两个方向的止损单
-	if err := at.trader.CancelStopLossOrders(decision.Symbol); err != nil {
+	if err := at.trader.CancelStopLossOrders(d.Symbol); err != nil {
 		log.Printf("  ⚠ 取消旧止损单失败: %v", err)
 		// 不中断执行，继续设置新止损
 	}
 
 	// ✅ Step 3: 调用交易所 API 修改止损
 	quantity := math.Abs(positionAmt)
-	err = at.trader.SetStopLoss(decision.Symbol, positionSide, quantity, decision.NewStopLoss)
+	err = at.trader.SetStopLoss(d.Symbol, positionSide, quantity, d.NewStopLoss)
 	if err != nil {
 		return fmt.Errorf("修改止损失败: %w", err)
 	}
 
 	// ✅ Step 4: 恢复原有止盈单（防止裸奔）
-	at.restoreTakeProfitOrder(decision.Symbol, positionSide, quantity, oldTakeProfitPrice)
+	at.restoreTakeProfitOrder(d.Symbol, positionSide, quantity, oldTakeProfitPrice)
 
-	log.Printf("  ✓ 止损已调整: %.2f (当前价格: %.2f)", decision.NewStopLoss, marketData.CurrentPrice)
+	decision.OnStopLossUpdated(d.Symbol, d.NewStopLoss)
+	log.Printf("  ✓ 止损已调整: %.2f (当前价格: %.2f)", d.NewStopLoss, marketData.CurrentPrice)
 	return nil
 }
 
@@ -1432,9 +1436,10 @@ func (at *AutoTrader) executeUpdateTakeProfitWithRecord(decision *decision.Decis
 }
 
 const (
-	minPartialCloseOrderValueUSDT = 5.0
-	minRemainingPositionValueUSDT = 10.0
-	smallPositionFullCloseUSDT    = 25.0
+	minPartialCloseOrderValueUSDT  = 5.0
+	minRemainingPositionValueUSDT  = 10.0
+	smallPositionFullCloseUSDT     = 25.0
+	breakevenMoveMinPriceProfitPct = 1.0
 )
 
 type partialCloseMode string
@@ -1452,6 +1457,24 @@ type partialClosePlan struct {
 	CloseValue           float64
 	RemainingQuantity    float64
 	RemainingValue       float64
+}
+
+func effectivePlanStopLoss(symbol string) float64 {
+	plan := decision.GetPlanBySymbol(symbol)
+	if plan == nil {
+		return 0
+	}
+	if plan.CurrentStopLoss > 0 {
+		return plan.CurrentStopLoss
+	}
+	return plan.StopLoss
+}
+
+func resolveProtectiveStopLoss(requestedStopLoss, fallbackStopLoss float64) float64 {
+	if requestedStopLoss > 0 {
+		return requestedStopLoss
+	}
+	return fallbackStopLoss
 }
 
 func determinePartialClosePlan(totalQuantity, closePercentage, markPrice float64) partialClosePlan {
@@ -1548,6 +1571,7 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 	if !ok {
 		return fmt.Errorf("failed to parse position amount")
 	}
+	fallbackStopLoss := effectivePlanStopLoss(d.Symbol)
 
 	// 计算平仓数量
 	totalQuantity := math.Abs(positionAmt)
@@ -1593,15 +1617,17 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 		actionRecord.Reasoning = fmt.Sprintf("跳过小额部分平仓: 名义额 %.2f USDT < %.2f USDT",
 			plan.CloseValue, minPartialCloseOrderValueUSDT)
 
+		stopLossForPlan := 0.0
 		if d.NewStopLoss > 0 {
 			if err := at.trader.SetStopLoss(d.Symbol, positionSide, totalQuantity, d.NewStopLoss); err != nil {
 				log.Printf("  ⚠️ 小额部分平仓跳过后设置保护止损失败: %v", err)
 			} else {
+				stopLossForPlan = d.NewStopLoss
 				log.Printf("  ✓ 小额部分平仓跳过后已更新保护止损: %.4f", d.NewStopLoss)
 			}
 		}
 
-		decision.OnPartialClose(d.Symbol, d.TrancheIndex, 0, d.NewStopLoss)
+		decision.OnPartialClose(d.Symbol, d.TrancheIndex, 0, stopLossForPlan)
 		return nil
 	}
 
@@ -1626,18 +1652,19 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 		closeQuantity, d.ClosePercentage, remainingQuantity)
 
 	// 🔧 FIX: 部分平仓后重新设置止盈止损（基于剩余数量）
-	// 币安会自动取消原来的止盈止损订单（因为数量不匹配），所以必须重新设置
-	if d.NewStopLoss > 0 || d.NewTakeProfit > 0 {
+	// 币安会自动取消原来的止盈止损订单（因为数量不匹配），所以必须重新设置。
+	protectiveStopLoss := resolveProtectiveStopLoss(d.NewStopLoss, fallbackStopLoss)
+	if remainingQuantity > 0 {
 		log.Printf("  🎯 更新剩余仓位的止盈止损...")
 
-		// 设置新止损（基于剩余数量）
-		if d.NewStopLoss > 0 {
-			if err := at.trader.SetStopLoss(d.Symbol, positionSide, remainingQuantity, d.NewStopLoss); err != nil {
-				log.Printf("  ⚠️ 设置新止损失败: %v", err)
-			} else {
-				log.Printf("  ✓ 已设置新止损: %.4f (数量: %.4f)", d.NewStopLoss, remainingQuantity)
-			}
+		if protectiveStopLoss <= 0 {
+			return fmt.Errorf("部分平仓后无法确定保护止损，拒绝让剩余仓位失去保护")
 		}
+
+		if err := at.trader.SetStopLoss(d.Symbol, positionSide, remainingQuantity, protectiveStopLoss); err != nil {
+			return fmt.Errorf("部分平仓后设置保护止损失败: %w", err)
+		}
+		log.Printf("  ✓ 已设置保护止损: %.4f (数量: %.4f)", protectiveStopLoss, remainingQuantity)
 
 		// 设置新止盈（基于剩余数量）
 		if d.NewTakeProfit > 0 {
@@ -1647,13 +1674,9 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 				log.Printf("  ✓ 已设置新止盈: %.4f (数量: %.4f)", d.NewTakeProfit, remainingQuantity)
 			}
 		}
-	} else {
-		// ⚠️ AI 没有提供新的止盈止损，剩余仓位将失去保护
-		log.Printf("  ⚠️⚠️⚠️ 警告: 部分平仓后AI未提供新的止盈止损价格")
-		log.Printf("  → 剩余仓位 %.4f (价值 %.2f USDT) 目前没有止盈止损保护", remainingQuantity, plan.RemainingValue)
-		log.Printf("  → 建议: 在 partial_close 决策中包含 new_stop_loss 和 new_take_profit 字段")
 	}
 
+	decision.OnPartialClose(d.Symbol, d.TrancheIndex, d.ClosePercentage, protectiveStopLoss)
 	return nil
 }
 
