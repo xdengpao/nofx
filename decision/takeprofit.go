@@ -432,7 +432,7 @@ func (e *PositionEvaluator) evaluateAdaptiveScaledExit() *EvaluationResult {
 	tranches := GetAdaptiveExitTranches(e.MarketData, e.Plan.Direction)
 
 	for i, tranche := range tranches {
-		if planManager.IsTrancheExecuted(e.Symbol, i) {
+		if e.Plan.ExecutedTranches != nil && e.Plan.ExecutedTranches[i] {
 			continue
 		}
 

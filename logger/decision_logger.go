@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -25,6 +26,22 @@ type DecisionRecord struct {
 	ExecutionLog   []string           `json:"execution_log"`   // 执行日志
 	Success        bool               `json:"success"`         // 是否成功
 	ErrorMessage   string             `json:"error_message"`   // 错误信息（如果有）
+	RiskState      *RiskStateSnapshot `json:"risk_state,omitempty"`
+}
+
+// RiskStateSnapshot 记录本周期可观测风险状态，保持旧日志兼容。
+type RiskStateSnapshot struct {
+	TraderID                 string   `json:"trader_id,omitempty"`
+	Exchange                 string   `json:"exchange,omitempty"`
+	MaxRiskPerTrade          float64  `json:"max_risk_per_trade,omitempty"`
+	EffectiveMaxRiskPerTrade float64  `json:"effective_max_risk_per_trade,omitempty"`
+	TotalRiskBudget          float64  `json:"total_risk_budget,omitempty"`
+	RemainingRiskBudget      float64  `json:"remaining_risk_budget,omitempty"`
+	MaxDailyLossPct          float64  `json:"max_daily_loss_pct,omitempty"`
+	MaxAccountDrawdownPct    float64  `json:"max_account_drawdown_pct,omitempty"`
+	AIBackoffUntil           string   `json:"ai_backoff_until,omitempty"`
+	ConsecutiveAIFails       int      `json:"consecutive_ai_fails,omitempty"`
+	OpenGateReasons          []string `json:"open_gate_reasons,omitempty"`
 }
 
 // AccountSnapshot 账户状态快照
@@ -60,6 +77,17 @@ type DecisionAction struct {
 	Success   bool      `json:"success"`   // 是否成功
 	Error     string    `json:"error"`     // 错误信息
 	Reasoning string    `json:"reasoning,omitempty"`
+
+	RiskUSD              float64  `json:"risk_usd,omitempty"`
+	GateState            string   `json:"gate_state,omitempty"`
+	GateReasons          []string `json:"gate_reasons,omitempty"`
+	ExecutionRisk        string   `json:"execution_risk,omitempty"`
+	StopLossSet          *bool    `json:"stop_loss_set,omitempty"`
+	TakeProfitSet        *bool    `json:"take_profit_set,omitempty"`
+	ProtectionError      string   `json:"protection_error,omitempty"`
+	HighRisk             bool     `json:"high_risk,omitempty"`
+	HighRiskReason       string   `json:"high_risk_reason,omitempty"`
+	RemainingPositionUSD float64  `json:"remaining_position_usd,omitempty"`
 }
 
 // DecisionLogger 决策日志记录器
@@ -366,12 +394,30 @@ type RollingStats struct {
 
 // ExecutionQualityStats 汇总执行失败质量指标。
 type ExecutionQualityStats struct {
-	TotalActions            int     `json:"total_actions"`
-	PartialCloseAttempts    int     `json:"partial_close_attempts"`
-	PartialCloseFailures    int     `json:"partial_close_failures"`
-	PartialCloseFailureRate float64 `json:"partial_close_failure_rate"`
-	AIFailureCount          int     `json:"ai_failure_count"`
-	UnmatchedActionCount    int     `json:"unmatched_action_count"`
+	TotalActions                 int                  `json:"total_actions"`
+	OpenAttempts                 int                  `json:"open_attempts"`
+	OpenFailures                 int                  `json:"open_failures"`
+	OpenRejectedCount            int                  `json:"open_rejected_count"`
+	PartialCloseAttempts         int                  `json:"partial_close_attempts"`
+	PartialCloseFailures         int                  `json:"partial_close_failures"`
+	PartialCloseFailureRate      float64              `json:"partial_close_failure_rate"`
+	ProtectionOrderFailures      int                  `json:"protection_order_failures"`
+	HighRiskExecutionFailures    int                  `json:"high_risk_execution_failures"`
+	AIFailureCount               int                  `json:"ai_failure_count"`
+	UnmatchedActionCount         int                  `json:"unmatched_action_count"`
+	RecentHighRiskErrors         []ExecutionRiskEvent `json:"recent_high_risk_errors,omitempty"`
+	RecentOpenRejectionReasons   []string             `json:"recent_open_rejection_reasons,omitempty"`
+	ProtectionOrderFailureRate   float64              `json:"protection_order_failure_rate"`
+	HighRiskExecutionFailureRate float64              `json:"high_risk_execution_failure_rate"`
+}
+
+// ExecutionRiskEvent 记录最近高危执行失败，供 API/前端快速巡检。
+type ExecutionRiskEvent struct {
+	Timestamp string `json:"timestamp"`
+	Symbol    string `json:"symbol,omitempty"`
+	Action    string `json:"action,omitempty"`
+	RiskType  string `json:"risk_type"`
+	Reason    string `json:"reason"`
 }
 
 type openPositionTrace struct {
@@ -665,24 +711,158 @@ func BuildExecutionQuality(records []*DecisionRecord, unmatchedCount int) Execut
 		if record == nil {
 			continue
 		}
-		if !record.Success && record.ErrorMessage != "" {
+		if !record.Success && isAIFailureText(record.ErrorMessage) {
 			stats.AIFailureCount++
 		}
 		for _, action := range record.Decisions {
 			stats.TotalActions++
+
+			if isOpenAction(action.Action) {
+				stats.OpenAttempts++
+				if !action.Success {
+					stats.OpenFailures++
+				}
+			}
+			if action.Action == "open_rejected" || (isOpenAction(action.Action) && isOpenRejection(action)) {
+				stats.OpenRejectedCount++
+				stats.RecentOpenRejectionReasons = appendLimitedString(stats.RecentOpenRejectionReasons, actionFailureReason(action), 5)
+			}
+
 			if action.Action == "partial_close" {
 				stats.PartialCloseAttempts++
 				if !action.Success {
 					stats.PartialCloseFailures++
 				}
 			}
+
+			if isProtectionFailure(action) {
+				stats.ProtectionOrderFailures++
+				stats.RecentHighRiskErrors = appendLimitedRiskEvent(stats.RecentHighRiskErrors, buildRiskEvent(record, action, "protection_order_failure"), 5)
+			}
+
+			if isHighRiskExecutionFailure(action) {
+				stats.HighRiskExecutionFailures++
+				stats.RecentHighRiskErrors = appendLimitedRiskEvent(stats.RecentHighRiskErrors, buildRiskEvent(record, action, "high_risk_execution_failure"), 5)
+			}
 		}
 	}
 	if stats.PartialCloseAttempts > 0 {
 		stats.PartialCloseFailureRate = float64(stats.PartialCloseFailures) / float64(stats.PartialCloseAttempts) * 100
 	}
+	if stats.OpenAttempts > 0 {
+		stats.ProtectionOrderFailureRate = float64(stats.ProtectionOrderFailures) / float64(stats.OpenAttempts) * 100
+	}
+	if stats.TotalActions > 0 {
+		stats.HighRiskExecutionFailureRate = float64(stats.HighRiskExecutionFailures) / float64(stats.TotalActions) * 100
+	}
 	stats.UnmatchedActionCount = unmatchedCount
 	return stats
+}
+
+func isOpenAction(action string) bool {
+	return action == "open_long" || action == "open_short"
+}
+
+func isAIFailureText(value string) bool {
+	value = strings.ToLower(value)
+	return strings.Contains(value, "ai") ||
+		strings.Contains(value, "获取ai决策") ||
+		strings.Contains(value, "api调用失败") ||
+		strings.Contains(value, "响应解析失败")
+}
+
+func isOpenRejection(action DecisionAction) bool {
+	if action.GateState == "block" || action.GateState == "reject" {
+		return true
+	}
+	text := strings.ToLower(actionFailureReason(action))
+	keywords := []string{"拒绝", "阻止", "gate", "验证失败", "风险预算", "rr", "置信度", "开仓前"}
+	for _, keyword := range keywords {
+		if strings.Contains(text, strings.ToLower(keyword)) {
+			return true
+		}
+	}
+	return false
+}
+
+func isProtectionFailure(action DecisionAction) bool {
+	if action.ProtectionError != "" {
+		return true
+	}
+	if action.StopLossSet != nil && !*action.StopLossSet {
+		return true
+	}
+	if action.TakeProfitSet != nil && !*action.TakeProfitSet {
+		return true
+	}
+	text := strings.ToLower(action.Error + " " + action.HighRiskReason)
+	return strings.Contains(text, "止损") && strings.Contains(text, "失败") ||
+		strings.Contains(text, "止盈") && strings.Contains(text, "失败") ||
+		strings.Contains(text, "protect") ||
+		strings.Contains(text, "unprotected")
+}
+
+func isHighRiskExecutionFailure(action DecisionAction) bool {
+	if action.HighRisk {
+		return true
+	}
+	if action.ExecutionRisk == "high" || action.ExecutionRisk == "critical" {
+		return true
+	}
+	text := strings.ToLower(action.Error + " " + action.ProtectionError + " " + action.HighRiskReason)
+	return strings.Contains(text, "高危") ||
+		strings.Contains(text, "裸仓") ||
+		strings.Contains(text, "unprotected") ||
+		strings.Contains(text, "emergency")
+}
+
+func actionFailureReason(action DecisionAction) string {
+	if action.HighRiskReason != "" {
+		return action.HighRiskReason
+	}
+	if action.ProtectionError != "" {
+		return action.ProtectionError
+	}
+	if action.Error != "" {
+		return action.Error
+	}
+	if len(action.GateReasons) > 0 {
+		return strings.Join(action.GateReasons, "; ")
+	}
+	return action.Reasoning
+}
+
+func buildRiskEvent(record *DecisionRecord, action DecisionAction, riskType string) ExecutionRiskEvent {
+	eventTime := action.Timestamp
+	if eventTime.IsZero() {
+		eventTime = record.Timestamp
+	}
+	return ExecutionRiskEvent{
+		Timestamp: eventTime.Format(time.RFC3339),
+		Symbol:    action.Symbol,
+		Action:    action.Action,
+		RiskType:  riskType,
+		Reason:    actionFailureReason(action),
+	}
+}
+
+func appendLimitedRiskEvent(items []ExecutionRiskEvent, item ExecutionRiskEvent, limit int) []ExecutionRiskEvent {
+	items = append(items, item)
+	if len(items) <= limit {
+		return items
+	}
+	return items[len(items)-limit:]
+}
+
+func appendLimitedString(items []string, item string, limit int) []string {
+	if item == "" {
+		return items
+	}
+	items = append(items, item)
+	if len(items) <= limit {
+		return items
+	}
+	return items[len(items)-limit:]
 }
 
 func buildTradeOutcome(open openPositionTrace, closeAction DecisionAction, closeTime time.Time, closeReason string) TradeOutcome {

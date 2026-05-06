@@ -98,6 +98,14 @@ func (m *TradePlanManager) loadFromFile() error {
 				plan.OriginalTakeProfit = plan.TakeProfit
 			}
 		}
+		if m.migrateLegacyScopedPlanKeys() {
+			backupPath := m.filePath + ".legacy.bak"
+			if err := os.WriteFile(backupPath, data, 0644); err != nil {
+				log.Printf("⚠️ 备份旧交易计划失败: %v", err)
+			} else {
+				log.Printf("📦 已备份旧交易计划: %s", backupPath)
+			}
+		}
 	}
 
 	if persistentData.Statistics != nil {
@@ -133,6 +141,67 @@ func (m *TradePlanManager) loadFromFile() error {
 	}
 
 	return nil
+}
+
+func makePlanKey(traderID, symbol, side string) string {
+	if traderID == "" || symbol == "" || side == "" {
+		return symbol
+	}
+	return traderID + ":" + symbol + ":" + side
+}
+
+func planSide(plan *TradePlan) string {
+	if plan == nil {
+		return ""
+	}
+	if plan.Direction != "" {
+		return plan.Direction
+	}
+	return ""
+}
+
+func (m *TradePlanManager) candidatePlanKeys(traderID, symbol, side string) []string {
+	var keys []string
+	if traderID != "" && symbol != "" && side != "" {
+		keys = append(keys, makePlanKey(traderID, symbol, side))
+	}
+	if traderID != "" && symbol != "" && side == "" {
+		keys = append(keys, makePlanKey(traderID, symbol, "long"), makePlanKey(traderID, symbol, "short"))
+	}
+	if side != "" {
+		keys = append(keys, makePlanKey("", symbol, side))
+	}
+	keys = append(keys, symbol)
+	seen := make(map[string]bool)
+	var result []string
+	for _, key := range keys {
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, key)
+	}
+	return result
+}
+
+func (m *TradePlanManager) migrateLegacyScopedPlanKeys() bool {
+	migrated := false
+	for key, plan := range m.plans {
+		if plan == nil || plan.TraderID == "" || plan.Symbol == "" || plan.Direction == "" {
+			continue
+		}
+		scopedKey := makePlanKey(plan.TraderID, plan.Symbol, plan.Direction)
+		if key == scopedKey {
+			continue
+		}
+		if _, exists := m.plans[scopedKey]; exists {
+			continue
+		}
+		m.plans[scopedKey] = plan
+		delete(m.plans, key)
+		migrated = true
+	}
+	return migrated
 }
 
 func (m *TradePlanManager) saveToFile() error {
@@ -195,22 +264,29 @@ func (m *TradePlanManager) autoSaveIfEnabled() {
 
 // GetPlan 获取交易计划（返回深拷贝）
 func (m *TradePlanManager) GetPlan(symbol string) *TradePlan {
+	return m.GetPlanScoped("", symbol, "")
+}
+
+// GetPlanScoped 获取 trader/symbol/side 作用域计划，兼容旧 symbol key。
+func (m *TradePlanManager) GetPlanScoped(traderID, symbol, side string) *TradePlan {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if plan, ok := m.plans[symbol]; ok {
-		planCopy := *plan
-		if plan.ParsedInvalidationCondition != nil {
-			condCopy := *plan.ParsedInvalidationCondition
-			planCopy.ParsedInvalidationCondition = &condCopy
-		}
-		if plan.ExecutedTranches != nil {
-			planCopy.ExecutedTranches = make(map[int]bool)
-			for k, v := range plan.ExecutedTranches {
-				planCopy.ExecutedTranches[k] = v
+	for _, key := range m.candidatePlanKeys(traderID, symbol, side) {
+		if plan, ok := m.plans[key]; ok {
+			planCopy := *plan
+			if plan.ParsedInvalidationCondition != nil {
+				condCopy := *plan.ParsedInvalidationCondition
+				planCopy.ParsedInvalidationCondition = &condCopy
 			}
+			if plan.ExecutedTranches != nil {
+				planCopy.ExecutedTranches = make(map[int]bool)
+				for k, v := range plan.ExecutedTranches {
+					planCopy.ExecutedTranches[k] = v
+				}
+			}
+			return &planCopy
 		}
-		return &planCopy
 	}
 	return nil
 }
@@ -227,7 +303,7 @@ func (m *TradePlanManager) SetPlan(plan *TradePlan) {
 		plan.OriginalTakeProfit = plan.TakeProfit
 	}
 
-	m.plans[plan.Symbol] = plan
+	m.plans[makePlanKey(plan.TraderID, plan.Symbol, planSide(plan))] = plan
 	m.mu.Unlock()
 
 	invalidationDisplay := "无"
@@ -244,11 +320,19 @@ func (m *TradePlanManager) SetPlan(plan *TradePlan) {
 
 // RemovePlan 移除交易计划
 func (m *TradePlanManager) RemovePlan(symbol string) {
+	m.RemovePlanScoped("", symbol, "")
+}
+
+// RemovePlanScoped 移除 trader/symbol/side 作用域计划，兼容旧 symbol key。
+func (m *TradePlanManager) RemovePlanScoped(traderID, symbol, side string) {
 	m.mu.Lock()
-	if plan, exists := m.plans[symbol]; exists {
-		log.Printf("📋 移除交易计划: %s (状态: %s, 峰值盈利: %.2f%%)",
-			symbol, plan.Status, plan.PeakPnLPercent)
-		delete(m.plans, symbol)
+	for _, key := range m.candidatePlanKeys(traderID, symbol, side) {
+		if plan, exists := m.plans[key]; exists {
+			log.Printf("📋 移除交易计划: %s (状态: %s, 峰值盈利: %.2f%%)",
+				symbol, plan.Status, plan.PeakPnLPercent)
+			delete(m.plans, key)
+			break
+		}
 	}
 	m.mu.Unlock()
 
@@ -257,25 +341,40 @@ func (m *TradePlanManager) RemovePlan(symbol string) {
 
 // UpdatePlan 更新计划（线程安全）
 func (m *TradePlanManager) UpdatePlan(symbol string, updateFn func(*TradePlan)) {
+	m.UpdatePlanScoped("", symbol, "", updateFn)
+}
+
+// UpdatePlanScoped 更新 trader/symbol/side 作用域计划，兼容旧 symbol key。
+func (m *TradePlanManager) UpdatePlanScoped(traderID, symbol, side string, updateFn func(*TradePlan)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if plan, ok := m.plans[symbol]; ok {
-		updateFn(plan)
+	for _, key := range m.candidatePlanKeys(traderID, symbol, side) {
+		if plan, ok := m.plans[key]; ok {
+			updateFn(plan)
+			return
+		}
 	}
 }
 
 // UpdatePlanStopLoss 更新计划止损
 func (m *TradePlanManager) UpdatePlanStopLoss(symbol string, newSL float64) {
+	m.UpdatePlanStopLossScoped("", symbol, "", newSL)
+}
+
+func (m *TradePlanManager) UpdatePlanStopLossScoped(traderID, symbol, side string, newSL float64) {
 	m.mu.Lock()
-	if plan, exists := m.plans[symbol]; exists {
-		oldSL := plan.CurrentStopLoss
-		if oldSL == 0 {
-			oldSL = plan.StopLoss
+	for _, key := range m.candidatePlanKeys(traderID, symbol, side) {
+		if plan, exists := m.plans[key]; exists {
+			oldSL := plan.CurrentStopLoss
+			if oldSL == 0 {
+				oldSL = plan.StopLoss
+			}
+			plan.CurrentStopLoss = newSL
+			plan.TrailingStopActive = true
+			log.Printf("📋 更新 %s 止损: %.4f → %.4f", symbol, oldSL, newSL)
+			break
 		}
-		plan.CurrentStopLoss = newSL
-		plan.TrailingStopActive = true
-		log.Printf("📋 更新 %s 止损: %.4f → %.4f", symbol, oldSL, newSL)
 	}
 	m.mu.Unlock()
 
@@ -284,11 +383,21 @@ func (m *TradePlanManager) UpdatePlanStopLoss(symbol string, newSL float64) {
 
 // UpdatePlanPeakData 更新峰值数据
 func (m *TradePlanManager) UpdatePlanPeakData(symbol string, currentPrice float64, currentPnLPct float64) {
+	m.UpdatePlanPeakDataScoped("", symbol, "", currentPrice, currentPnLPct)
+}
+
+func (m *TradePlanManager) UpdatePlanPeakDataScoped(traderID, symbol, side string, currentPrice float64, currentPnLPct float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	plan, ok := m.plans[symbol]
-	if !ok {
+	var plan *TradePlan
+	for _, key := range m.candidatePlanKeys(traderID, symbol, side) {
+		if p, ok := m.plans[key]; ok {
+			plan = p
+			break
+		}
+	}
+	if plan == nil {
 		return
 	}
 
@@ -319,11 +428,21 @@ func (m *TradePlanManager) UpdatePlanPeakData(symbol string, currentPrice float6
 
 // UpdatePlanTakeProfit 更新动态止盈价格
 func (m *TradePlanManager) UpdatePlanTakeProfit(symbol string, newTP float64) {
+	m.UpdatePlanTakeProfitScoped("", symbol, "", newTP)
+}
+
+func (m *TradePlanManager) UpdatePlanTakeProfitScoped(traderID, symbol, side string, newTP float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	plan, ok := m.plans[symbol]
-	if !ok {
+	var plan *TradePlan
+	for _, key := range m.candidatePlanKeys(traderID, symbol, side) {
+		if p, ok := m.plans[key]; ok {
+			plan = p
+			break
+		}
+	}
+	if plan == nil {
 		return
 	}
 
@@ -340,11 +459,21 @@ func (m *TradePlanManager) UpdatePlanTakeProfit(symbol string, newTP float64) {
 
 // MarkTrancheExecuted 标记分批止盈档位已执行
 func (m *TradePlanManager) MarkTrancheExecuted(symbol string, trancheIndex int, closePercent float64) {
+	m.MarkTrancheExecutedScoped("", symbol, "", trancheIndex, closePercent)
+}
+
+func (m *TradePlanManager) MarkTrancheExecutedScoped(traderID, symbol, side string, trancheIndex int, closePercent float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	plan, ok := m.plans[symbol]
-	if !ok {
+	var plan *TradePlan
+	for _, key := range m.candidatePlanKeys(traderID, symbol, side) {
+		if p, ok := m.plans[key]; ok {
+			plan = p
+			break
+		}
+	}
+	if plan == nil {
 		return
 	}
 
@@ -362,27 +491,40 @@ func (m *TradePlanManager) MarkTrancheExecuted(symbol string, trancheIndex int, 
 
 // UpdatePlanEntryATR 更新入场时ATR
 func (m *TradePlanManager) UpdatePlanEntryATR(symbol string, atr float64) {
+	m.UpdatePlanEntryATRScoped("", symbol, "", atr)
+}
+
+func (m *TradePlanManager) UpdatePlanEntryATRScoped(traderID, symbol, side string, atr float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if plan, ok := m.plans[symbol]; ok {
-		if plan.EntryATR == 0 {
-			plan.EntryATR = atr
-			log.Printf("📊 %s 记录入场ATR: %.4f", symbol, atr)
+	for _, key := range m.candidatePlanKeys(traderID, symbol, side) {
+		if plan, ok := m.plans[key]; ok {
+			if plan.EntryATR == 0 {
+				plan.EntryATR = atr
+				log.Printf("📊 %s 记录入场ATR: %.4f", symbol, atr)
+			}
+			return
 		}
 	}
 }
 
 // IsTrancheExecuted 检查档位是否已执行
 func (m *TradePlanManager) IsTrancheExecuted(symbol string, trancheIndex int) bool {
+	return m.IsTrancheExecutedScoped("", symbol, "", trancheIndex)
+}
+
+func (m *TradePlanManager) IsTrancheExecutedScoped(traderID, symbol, side string, trancheIndex int) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if plan, ok := m.plans[symbol]; ok {
-		if plan.ExecutedTranches == nil {
-			return false
+	for _, key := range m.candidatePlanKeys(traderID, symbol, side) {
+		if plan, ok := m.plans[key]; ok {
+			if plan.ExecutedTranches == nil {
+				return false
+			}
+			return plan.ExecutedTranches[trancheIndex]
 		}
-		return plan.ExecutedTranches[trancheIndex]
 	}
 	return false
 }
@@ -649,7 +791,12 @@ func ResetStatistics() {
 
 // OnPositionClosed 平仓成功后调用
 func OnPositionClosed(symbol string, exitPrice float64, pnlPercent float64, pnlUSD float64, reason string) {
-	plan := planManager.GetPlan(symbol)
+	OnPositionClosedScoped("", symbol, "", exitPrice, pnlPercent, pnlUSD, reason)
+}
+
+// OnPositionClosedScoped 平仓成功后调用，带 trader/side 作用域。
+func OnPositionClosedScoped(traderID, symbol, side string, exitPrice float64, pnlPercent float64, pnlUSD float64, reason string) {
+	plan := planManager.GetPlanScoped(traderID, symbol, side)
 
 	now := time.Now()
 	var record ClosedTradeRecord
@@ -689,7 +836,7 @@ func OnPositionClosed(symbol string, exitPrice float64, pnlPercent float64, pnlU
 	UpdateStatistics(pnlPercent, float64(record.HoldingMinutes))
 	AddReturn(pnlPercent)
 
-	planManager.RemovePlan(symbol)
+	planManager.RemovePlanScoped(traderID, symbol, side)
 
 	log.Printf("✅ 平仓成功: %s 盈亏%.2f%% (峰值%.2f%%), 原因: %s",
 		symbol, pnlPercent, record.PeakPnLPercent, reason)
@@ -697,25 +844,35 @@ func OnPositionClosed(symbol string, exitPrice float64, pnlPercent float64, pnlU
 
 // OnPositionClosedSimple 简化版平仓回调
 func OnPositionClosedSimple(symbol string, reason string) {
-	plan := planManager.GetPlan(symbol)
+	OnPositionClosedSimpleScoped("", symbol, "", reason)
+}
+
+// OnPositionClosedSimpleScoped 简化版平仓回调，带 trader/side 作用域。
+func OnPositionClosedSimpleScoped(traderID, symbol, side string, reason string) {
+	plan := planManager.GetPlanScoped(traderID, symbol, side)
 	peakPnL := 0.0
 	if plan != nil {
 		peakPnL = plan.PeakPnLPercent
 	}
 
-	planManager.RemovePlan(symbol)
+	planManager.RemovePlanScoped(traderID, symbol, side)
 	log.Printf("✅ 平仓成功，交易计划已移除: %s (峰值盈利: %.2f%%, 原因: %s)",
 		symbol, peakPnL, reason)
 }
 
 // OnPartialClose 部分平仓成功后调用
 func OnPartialClose(symbol string, trancheIndex int, percentage float64, newStopLoss float64) {
+	OnPartialCloseScoped("", symbol, "", trancheIndex, percentage, newStopLoss)
+}
+
+// OnPartialCloseScoped 部分平仓成功后调用，带 trader/side 作用域。
+func OnPartialCloseScoped(traderID, symbol, side string, trancheIndex int, percentage float64, newStopLoss float64) {
 	if trancheIndex >= 0 {
-		planManager.MarkTrancheExecuted(symbol, trancheIndex, percentage)
+		planManager.MarkTrancheExecutedScoped(traderID, symbol, side, trancheIndex, percentage)
 	}
 
 	if newStopLoss > 0 {
-		planManager.UpdatePlanStopLoss(symbol, newStopLoss)
+		planManager.UpdatePlanStopLossScoped(traderID, symbol, side, newStopLoss)
 	}
 
 	log.Printf("✅ %s 部分平仓%.0f%% (档位%d), 新止损: %.4f",
@@ -724,20 +881,32 @@ func OnPartialClose(symbol string, trancheIndex int, percentage float64, newStop
 
 // OnStopLossUpdated 止损更新成功后调用
 func OnStopLossUpdated(symbol string, newStopLoss float64) {
-	planManager.UpdatePlanStopLoss(symbol, newStopLoss)
+	OnStopLossUpdatedScoped("", symbol, "", newStopLoss)
+}
+
+// OnStopLossUpdatedScoped 止损更新成功后调用，带 trader/side 作用域。
+func OnStopLossUpdatedScoped(traderID, symbol, side string, newStopLoss float64) {
+	planManager.UpdatePlanStopLossScoped(traderID, symbol, side, newStopLoss)
 	log.Printf("✅ %s 止损已更新至 %.4f", symbol, newStopLoss)
 }
 
 // OnPositionOpened 开仓成功后调用
 func OnPositionOpened(decision *Decision, actualEntryPrice float64, actualQuantity float64) error {
+	return OnPositionOpenedScoped("", decision, actualEntryPrice, actualQuantity)
+}
+
+// OnPositionOpenedScoped 开仓成功后调用，带 trader 作用域。
+func OnPositionOpenedScoped(traderID string, decision *Decision, actualEntryPrice float64, actualQuantity float64) error {
 	if actualEntryPrice <= 0 {
 		return fmt.Errorf("无效的入场价格: %.4f", actualEntryPrice)
 	}
 
 	plan := CreateTradePlanFromDecision(decision, actualEntryPrice)
+	plan.TraderID = traderID
+	planManager.SetPlan(plan)
 
 	if actualQuantity > 0 {
-		planManager.UpdatePlan(decision.Symbol, func(p *TradePlan) {
+		planManager.UpdatePlanScoped(traderID, decision.Symbol, plan.Direction, func(p *TradePlan) {
 			p.ActualQuantity = actualQuantity
 			p.PositionSizeUSD = actualQuantity * actualEntryPrice
 		})

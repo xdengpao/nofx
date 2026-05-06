@@ -1,0 +1,129 @@
+{
+  "generated_at": "2026-05-06T23:48:50.733921+08:00",
+  "record_count": 0,
+  "open_attempts": 0,
+  "rejected_open_count": 0,
+  "rejection_reasons": {},
+  "total_risk_usd": 0,
+  "max_cycle_risk_usd": 0,
+  "theoretical_pn_l": 0,
+  "execution_failure_rate": 0,
+  "unmatched_count": 0,
+  "trade_count": 0,
+  "rolling": {
+    "symbol_gates": {
+      "ASTERUSDT": {
+        "key": "ASTERUSDT",
+        "scope": "symbol",
+        "state": "penalize",
+        "trade_count": 0,
+        "total_pn_l": 0,
+        "win_rate": 0,
+        "profit_factor": 0,
+        "min_confidence": 85,
+        "risk_multiplier": 0.5,
+        "cooldown_until": "0001-01-01T00:00:00Z",
+        "reason": "历史滚动表现偏弱，开仓需降权"
+      },
+      "BCHUSDT": {
+        "key": "BCHUSDT",
+        "scope": "symbol",
+        "state": "penalize",
+        "trade_count": 0,
+        "total_pn_l": 0,
+        "win_rate": 0,
+        "profit_factor": 0,
+        "min_confidence": 85,
+        "risk_multiplier": 0.5,
+        "cooldown_until": "0001-01-01T00:00:00Z",
+        "reason": "历史滚动表现偏弱，开仓需降权"
+      },
+      "LTCUSDT": {
+        "key": "LTCUSDT",
+        "scope": "symbol",
+        "state": "penalize",
+        "trade_count": 0,
+        "total_pn_l": 0,
+        "win_rate": 0,
+        "profit_factor": 0,
+        "min_confidence": 85,
+        "risk_multiplier": 0.5,
+        "cooldown_until": "0001-01-01T00:00:00Z",
+        "reason": "历史滚动表现偏弱，开仓需降权"
+      },
+      "XRPUSDT": {
+        "key": "XRPUSDT",
+        "scope": "symbol",
+        "state": "penalize",
+        "trade_count": 0,
+        "total_pn_l": 0,
+        "win_rate": 0,
+        "profit_factor": 0,
+        "min_confidence": 85,
+        "risk_multiplier": 0.5,
+        "cooldown_until": "0001-01-01T00:00:00Z",
+        "reason": "历史滚动表现偏弱，开仓需降权"
+      }
+    },
+    "side_gates": {
+      "long": {
+        "key": "long",
+        "scope": "side",
+        "state": "allow",
+        "trade_count": 0,
+        "total_pn_l": 0,
+        "win_rate": 0,
+        "profit_factor": 0,
+        "min_confidence": 0,
+        "risk_multiplier": 1,
+        "cooldown_until": "0001-01-01T00:00:00Z"
+      },
+      "short": {
+        "key": "short",
+        "scope": "side",
+        "state": "penalize",
+        "trade_count": 0,
+        "total_pn_l": 0,
+        "win_rate": 0,
+        "profit_factor": 0,
+        "min_confidence": 90,
+        "risk_multiplier": 0.5,
+        "cooldown_until": "0001-01-01T00:00:00Z",
+        "reason": "历史空单侧亏损贡献较大，默认降权"
+      }
+    },
+    "recent_10": {
+      "trade_count": 0,
+      "total_pn_l": 0,
+      "win_rate": 0,
+      "profit_factor": 0
+    },
+    "recent_20": {
+      "trade_count": 0,
+      "total_pn_l": 0,
+      "win_rate": 0,
+      "profit_factor": 0
+    },
+    "effective_max_risk_per_trade": 0.02
+  },
+  "execution_quality": {
+    "total_actions": 0,
+    "open_attempts": 0,
+    "open_failures": 0,
+    "open_rejected_count": 0,
+    "partial_close_attempts": 0,
+    "partial_close_failures": 0,
+    "partial_close_failure_rate": 0,
+    "protection_order_failures": 0,
+    "high_risk_execution_failures": 0,
+    "ai_failure_count": 0,
+    "unmatched_action_count": 0,
+    "protection_order_failure_rate": 0,
+    "high_risk_execution_failure_rate": 0
+  },
+  "report_only": true,
+  "dry_run": true,
+  "notes": [
+    "未发现决策日志，报告仅包含空基线"
+  ]
+}

@@ -8,8 +8,12 @@ import (
 	"fmt"
 	"math"
 	"nofx/decision"
+	"nofx/logger"
+	"nofx/market"
+	"nofx/pool"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/leanovate/gopter"
 	"github.com/leanovate/gopter/gen"
@@ -438,6 +442,10 @@ type mockTrader struct {
 	lastQuantity     float64
 	lastLeverage     int
 	shouldError      bool
+	stopLossError    bool
+	takeProfitError  bool
+	stopLossCalls    int
+	takeProfitCalls  int
 }
 
 func (m *mockTrader) GetBalance() (map[string]interface{}, error) {
@@ -495,9 +503,17 @@ func (m *mockTrader) CloseShort(symbol string, quantity float64) (map[string]int
 func (m *mockTrader) SetLeverage(symbol string, leverage int) error { return nil }
 func (m *mockTrader) GetMarketPrice(symbol string) (float64, error) { return 50000.0, nil }
 func (m *mockTrader) SetStopLoss(symbol, positionSide string, qty, price float64) error {
+	m.stopLossCalls++
+	if m.stopLossError {
+		return fmt.Errorf("mock 设置止损失败")
+	}
 	return nil
 }
 func (m *mockTrader) SetTakeProfit(symbol, positionSide string, qty, price float64) error {
+	m.takeProfitCalls++
+	if m.takeProfitError {
+		return fmt.Errorf("mock 设置止盈失败")
+	}
 	return nil
 }
 func (m *mockTrader) CancelStopOrders(symbol string) error       { return nil }
@@ -574,6 +590,295 @@ func TestMockTrader_FormatQuantity_ThreeDecimals(t *testing.T) {
 	}
 	if result != "1.235" {
 		t.Errorf("FormatQuantity(1.23456): 期望1.235, 实际=%s", result)
+	}
+}
+
+func TestEvaluateExecutionPreflight_MinNotionalBlocked(t *testing.T) {
+	result := EvaluateExecutionPreflight(ExecutionPreflightInput{
+		Symbol:        "BTCUSDT",
+		Side:          "long",
+		Quantity:      0.01,
+		Price:         100,
+		Leverage:      5,
+		MinOrderValue: 10,
+	})
+	if result.Allowed {
+		t.Fatalf("小额订单应被preflight拦截: %+v", result)
+	}
+}
+
+func TestExecuteOpenLong_StopLossFailure_MarksHighRisk(t *testing.T) {
+	originalGetter := getMarketData
+	getMarketData = func(symbol string) (*market.Data, error) {
+		return &market.Data{Symbol: symbol, CurrentPrice: 100}, nil
+	}
+	t.Cleanup(func() { getMarketData = originalGetter })
+	if err := decision.InitPlanManager(t.TempDir()); err != nil {
+		t.Fatalf("初始化计划管理器失败: %v", err)
+	}
+
+	m := &mockTrader{stopLossError: true}
+	at := &AutoTrader{
+		id:                    "test-trader",
+		config:                AutoTraderConfig{},
+		trader:                m,
+		orderTracker:          NewOrderTracker(m),
+		positionFirstSeenTime: make(map[string]int64),
+	}
+	record := &logger.DecisionAction{}
+	d := &decision.Decision{
+		Symbol:          "BTCUSDT",
+		Action:          "open_long",
+		Leverage:        5,
+		PositionSizeUSD: 1000,
+		StopLoss:        95,
+		TakeProfit:      120,
+		RiskUSD:         50,
+		Reasoning:       "test",
+	}
+
+	err := at.executeOpenLongWithRecord(d, record)
+	if err == nil {
+		t.Fatal("止损失败时应返回高危错误")
+	}
+	if record.StopLossSet == nil || *record.StopLossSet {
+		t.Fatalf("应记录止损未设置: %+v", record)
+	}
+	if !record.HighRisk || record.ExecutionRisk != "high" {
+		t.Fatalf("应标记高危执行: %+v", record)
+	}
+	if m.stopLossCalls != protectiveOrderMaxAttempts {
+		t.Fatalf("止损应重试%d次，实际=%d", protectiveOrderMaxAttempts, m.stopLossCalls)
+	}
+	if !m.openLongCalled {
+		t.Fatal("应先开仓后发现保护单失败")
+	}
+}
+
+func TestExecuteOpenLong_StopLossFailure_EmergencyClose(t *testing.T) {
+	originalGetter := getMarketData
+	getMarketData = func(symbol string) (*market.Data, error) {
+		return &market.Data{Symbol: symbol, CurrentPrice: 100}, nil
+	}
+	t.Cleanup(func() { getMarketData = originalGetter })
+	if err := decision.InitPlanManager(t.TempDir()); err != nil {
+		t.Fatalf("初始化计划管理器失败: %v", err)
+	}
+
+	m := &mockTrader{stopLossError: true}
+	at := &AutoTrader{
+		id:                    "test-trader",
+		config:                AutoTraderConfig{EnableEmergencyClose: true},
+		trader:                m,
+		orderTracker:          NewOrderTracker(m),
+		positionFirstSeenTime: make(map[string]int64),
+	}
+	record := &logger.DecisionAction{}
+	d := &decision.Decision{
+		Symbol:          "BTCUSDT",
+		Action:          "open_long",
+		Leverage:        5,
+		PositionSizeUSD: 1000,
+		StopLoss:        95,
+		TakeProfit:      120,
+		RiskUSD:         50,
+		Reasoning:       "test",
+	}
+
+	err := at.executeOpenLongWithRecord(d, record)
+	if err == nil {
+		t.Fatal("紧急平仓后仍应返回错误供日志记录")
+	}
+	if !m.closeLongCalled {
+		t.Fatal("启用紧急平仓后应调用 CloseLong")
+	}
+	if !record.HighRisk {
+		t.Fatalf("应保留高危标记: %+v", record)
+	}
+}
+
+func TestAutoCloseDedupe_ClaimFallbackAndOrderID(t *testing.T) {
+	at := &AutoTrader{id: "trader-a"}
+	now := time.Now()
+
+	if !at.claimAutoCloseEvent("BTCUSDT", "long", 123, now) {
+		t.Fatal("首次自动平仓事件应被接收")
+	}
+	if at.claimAutoCloseEvent("BTCUSDT", "long", 0, now.Add(time.Minute)) {
+		t.Fatal("同一symbol/side的降级事件应被去重")
+	}
+	if at.claimAutoCloseEvent("ETHUSDT", "long", 123, now.Add(time.Minute)) {
+		t.Fatal("同一order id应被去重")
+	}
+}
+
+func TestDetectAutoClosedPositions_DedupesPreviouslyClaimedEvent(t *testing.T) {
+	originalGetter := getMarketData
+	getMarketData = func(symbol string) (*market.Data, error) {
+		return &market.Data{Symbol: symbol, CurrentPrice: 110}, nil
+	}
+	t.Cleanup(func() { getMarketData = originalGetter })
+
+	at := &AutoTrader{
+		id: "trader-a",
+		lastPositions: map[string]*PositionSnapshot{
+			"BTCUSDT_long": {
+				Symbol:     "BTCUSDT",
+				Side:       "long",
+				Quantity:   1,
+				EntryPrice: 100,
+				Leverage:   5,
+			},
+		},
+	}
+	at.claimAutoCloseEvent("BTCUSDT", "long", 456, time.Now())
+
+	actions := at.detectAutoClosedPositions(nil)
+	if len(actions) != 0 {
+		t.Fatalf("已由订单追踪路径处理的事件不应再由快照路径生成: %+v", actions)
+	}
+}
+
+func TestAutoTraderApplyAICallState_SuccessUpdatesLastAnalysis(t *testing.T) {
+	at := &AutoTrader{
+		config:             AutoTraderConfig{ScanInterval: 2 * time.Minute},
+		aiBackoffUntil:     time.Now().Add(time.Hour),
+		lastAIError:        "old error",
+		consecutiveAIFails: 2,
+	}
+	attemptTime := time.Now().Add(-time.Minute)
+
+	at.applyAICallState(&decision.FullDecision{
+		Timestamp:       attemptTime,
+		AICallAttempted: true,
+		AICallSucceeded: true,
+	})
+
+	if !at.lastAIAttemptTime.Equal(attemptTime) {
+		t.Fatalf("lastAIAttemptTime 未更新: got=%v want=%v", at.lastAIAttemptTime, attemptTime)
+	}
+	if !at.lastAISuccessTime.Equal(attemptTime) {
+		t.Fatalf("lastAISuccessTime 未更新: got=%v want=%v", at.lastAISuccessTime, attemptTime)
+	}
+	if !at.lastAnalysisTime.Equal(attemptTime) {
+		t.Fatalf("lastAnalysisTime 未更新: got=%v want=%v", at.lastAnalysisTime, attemptTime)
+	}
+	if !at.aiBackoffUntil.IsZero() {
+		t.Fatalf("AI成功后应清除退避时间: got=%v", at.aiBackoffUntil)
+	}
+	if at.consecutiveAIFails != 0 {
+		t.Fatalf("AI成功后连续失败次数应清零: got=%d", at.consecutiveAIFails)
+	}
+	if at.lastAIError != "" {
+		t.Fatalf("AI成功后应清除错误原因: got=%q", at.lastAIError)
+	}
+}
+
+func TestAutoTraderApplyAICallState_FailureSetsBackoff(t *testing.T) {
+	at := &AutoTrader{
+		config: AutoTraderConfig{ScanInterval: 2 * time.Minute},
+	}
+	attemptTime := time.Now().Add(-time.Minute)
+
+	at.applyAICallState(&decision.FullDecision{
+		Timestamp:       attemptTime,
+		AICallAttempted: true,
+		AICallSucceeded: false,
+		AIFailureReason: "timeout",
+	})
+
+	if !at.lastAIAttemptTime.Equal(attemptTime) {
+		t.Fatalf("lastAIAttemptTime 未更新: got=%v want=%v", at.lastAIAttemptTime, attemptTime)
+	}
+	if !at.lastAnalysisTime.IsZero() {
+		t.Fatalf("AI失败不应刷新lastAnalysisTime: got=%v", at.lastAnalysisTime)
+	}
+	if !at.aiBackoffUntil.Equal(attemptTime.Add(2 * time.Minute)) {
+		t.Fatalf("退避时间错误: got=%v want=%v", at.aiBackoffUntil, attemptTime.Add(2*time.Minute))
+	}
+	if at.consecutiveAIFails != 1 {
+		t.Fatalf("连续失败次数应加1: got=%d", at.consecutiveAIFails)
+	}
+	if at.lastAIError != "timeout" {
+		t.Fatalf("最近AI错误未记录: got=%q", at.lastAIError)
+	}
+}
+
+func TestBuildTradingContext_InjectsAIStateRiskAndExecutionQuality(t *testing.T) {
+	pool.SetCoinPoolAPI("")
+	pool.SetOITopAPI("")
+	pool.SetDefaultCoins([]string{"BTCUSDT", "ETHUSDT"})
+	pool.SetUseDefaultCoins(true)
+	t.Cleanup(func() {
+		pool.SetUseDefaultCoins(false)
+		pool.SetDefaultCoins([]string{"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "HYPEUSDT"})
+	})
+
+	lastAnalysis := time.Now().Add(-30 * time.Minute)
+	lastAttempt := time.Now().Add(-20 * time.Minute)
+	lastSuccess := time.Now().Add(-45 * time.Minute)
+	backoffUntil := time.Now().Add(5 * time.Minute)
+
+	at := &AutoTrader{
+		id:       "trader-alpha",
+		name:     "Alpha",
+		exchange: "binance",
+		config: AutoTraderConfig{
+			MaxRiskPerTrade:     0.015,
+			TotalRiskBudget:     0.07,
+			MaxDailyLoss:        0.06,
+			MaxDrawdown:         0.25,
+			AnalysisIntervalMin: 9,
+			BTCETHLeverage:      5,
+			AltcoinLeverage:     4,
+		},
+		trader:                &mockTrader{},
+		decisionLogger:        logger.NewDecisionLogger(t.TempDir()),
+		initialBalance:        10000,
+		startTime:             time.Now().Add(-2 * time.Hour),
+		positionFirstSeenTime: make(map[string]int64),
+		lastAnalysisTime:      lastAnalysis,
+		lastAIAttemptTime:     lastAttempt,
+		lastAISuccessTime:     lastSuccess,
+		aiBackoffUntil:        backoffUntil,
+		lastAIError:           "timeout",
+		consecutiveAIFails:    3,
+	}
+
+	ctx, err := at.buildTradingContext()
+	if err != nil {
+		t.Fatalf("buildTradingContext 不应失败: %v", err)
+	}
+
+	if ctx.TraderID != "trader-alpha" || ctx.Exchange != "binance" {
+		t.Fatalf("trader作用域字段错误: trader_id=%q exchange=%q", ctx.TraderID, ctx.Exchange)
+	}
+	if math.Abs(ctx.MaxRiskPerTrade-0.015) > 0.000001 {
+		t.Fatalf("MaxRiskPerTrade 未注入: got=%.4f", ctx.MaxRiskPerTrade)
+	}
+	if math.Abs(ctx.TotalRiskBudget-0.07) > 0.000001 {
+		t.Fatalf("TotalRiskBudget 未注入: got=%.4f", ctx.TotalRiskBudget)
+	}
+	if math.Abs(ctx.MaxDailyLossPct-0.06) > 0.000001 {
+		t.Fatalf("MaxDailyLossPct 未注入: got=%.4f", ctx.MaxDailyLossPct)
+	}
+	if math.Abs(ctx.MaxAccountDrawdownPct-25.0) > 0.000001 {
+		t.Fatalf("MaxAccountDrawdownPct 未归一化注入: got=%.4f", ctx.MaxAccountDrawdownPct)
+	}
+	if ctx.AnalysisIntervalMin != 9 {
+		t.Fatalf("AnalysisIntervalMin 未注入: got=%d", ctx.AnalysisIntervalMin)
+	}
+	if !ctx.LastAnalysisTime.Equal(lastAnalysis) || !ctx.LastAIAttemptTime.Equal(lastAttempt) || !ctx.LastAISuccessTime.Equal(lastSuccess) {
+		t.Fatalf("AI时间状态未正确注入")
+	}
+	if !ctx.AIBackoffUntil.Equal(backoffUntil) || ctx.LastAIError != "timeout" || ctx.ConsecutiveAIFails != 3 {
+		t.Fatalf("AI失败状态未正确注入")
+	}
+	if ctx.ExecutionQuality == nil {
+		t.Fatal("ExecutionQuality 应从历史表现分析注入")
+	}
+	if len(ctx.CandidateCoins) == 0 {
+		t.Fatal("默认币种池应生成候选币")
 	}
 }
 

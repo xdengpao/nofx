@@ -148,6 +148,68 @@ func TestBuildRollingPerformance_SymbolAndSideGates(t *testing.T) {
 	}
 }
 
+func TestBuildExecutionQuality_DetectsRiskAndRejections(t *testing.T) {
+	falseValue := false
+	now := time.Date(2026, 5, 6, 13, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{
+		{
+			Timestamp:    now,
+			Success:      false,
+			ErrorMessage: "获取AI决策失败: AI API调用失败",
+			Decisions: []DecisionAction{
+				{
+					Action:          "open_long",
+					Symbol:          "BTCUSDT",
+					Success:         true,
+					Timestamp:       now,
+					StopLossSet:     &falseValue,
+					ProtectionError: "止损设置失败，仓位未保护",
+					HighRisk:        true,
+					HighRiskReason:  "高危裸仓",
+				},
+				{
+					Action:      "open_short",
+					Symbol:      "ETHUSDT",
+					Success:     false,
+					Error:       "rolling gate阻止开仓: 最近亏损",
+					GateState:   "block",
+					GateReasons: []string{"最近亏损"},
+				},
+				{
+					Action:    "partial_close",
+					Symbol:    "SOLUSDT",
+					Success:   false,
+					Error:     "交易所拒绝",
+					Timestamp: now.Add(time.Minute),
+				},
+			},
+		},
+	}
+
+	stats := BuildExecutionQuality(records, 2)
+	if stats.AIFailureCount != 1 {
+		t.Fatalf("AI失败计数错误: got=%d", stats.AIFailureCount)
+	}
+	if stats.OpenAttempts != 2 || stats.OpenFailures != 1 || stats.OpenRejectedCount != 1 {
+		t.Fatalf("开仓统计错误: attempts=%d failures=%d rejected=%d", stats.OpenAttempts, stats.OpenFailures, stats.OpenRejectedCount)
+	}
+	if stats.PartialCloseAttempts != 1 || stats.PartialCloseFailures != 1 || stats.PartialCloseFailureRate != 100 {
+		t.Fatalf("partial close统计错误: %+v", stats)
+	}
+	if stats.ProtectionOrderFailures != 1 || stats.HighRiskExecutionFailures != 1 {
+		t.Fatalf("高危/保护单统计错误: protection=%d highRisk=%d", stats.ProtectionOrderFailures, stats.HighRiskExecutionFailures)
+	}
+	if stats.UnmatchedActionCount != 2 {
+		t.Fatalf("unmatched计数错误: got=%d", stats.UnmatchedActionCount)
+	}
+	if len(stats.RecentHighRiskErrors) == 0 || stats.RecentHighRiskErrors[0].Symbol != "BTCUSDT" {
+		t.Fatalf("应记录最近高危错误: %+v", stats.RecentHighRiskErrors)
+	}
+	if len(stats.RecentOpenRejectionReasons) == 0 {
+		t.Fatalf("应记录最近开仓拒绝原因")
+	}
+}
+
 // ============================================================================
 // 需求 11.1: LogDecision 和 GetLatestRecords 往返
 // ============================================================================

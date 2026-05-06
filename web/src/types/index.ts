@@ -50,6 +50,43 @@ export interface DecisionAction {
   timestamp: string;
   success: boolean;
   error: string;
+  reasoning?: string;
+  risk_usd?: number;
+  gate_state?: string;
+  gate_reasons?: string[];
+  execution_risk?: string;
+  stop_loss_set?: boolean;
+  take_profit_set?: boolean;
+  protection_error?: string;
+  high_risk?: boolean;
+  high_risk_reason?: string;
+  remaining_position_usd?: number;
+}
+
+export interface ExecutionRiskEvent {
+  timestamp: string;
+  symbol?: string;
+  action?: string;
+  risk_type: string;
+  reason: string;
+}
+
+export interface ExecutionQuality {
+  total_actions: number;
+  open_attempts?: number;
+  open_failures?: number;
+  open_rejected_count?: number;
+  partial_close_attempts: number;
+  partial_close_failures: number;
+  partial_close_failure_rate: number;
+  protection_order_failures?: number;
+  high_risk_execution_failures?: number;
+  ai_failure_count: number;
+  unmatched_action_count: number;
+  recent_high_risk_errors?: ExecutionRiskEvent[];
+  recent_open_rejection_reasons?: string[];
+  protection_order_failure_rate?: number;
+  high_risk_execution_failure_rate?: number;
 }
 
 // 决策记录
@@ -81,6 +118,19 @@ export interface DecisionRecord {
   execution_log: string[];
   success: boolean;
   error_message: string;
+  risk_state?: {
+    trader_id?: string;
+    exchange?: string;
+    max_risk_per_trade?: number;
+    effective_max_risk_per_trade?: number;
+    total_risk_budget?: number;
+    remaining_risk_budget?: number;
+    max_daily_loss_pct?: number;
+    max_account_drawdown_pct?: number;
+    ai_backoff_until?: string;
+    consecutive_ai_fails?: number;
+    open_gate_reasons?: string[];
+  };
 }
 
 // 统计信息

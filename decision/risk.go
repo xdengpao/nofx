@@ -152,7 +152,7 @@ func CalculateTotalRisk(ctx *Context) (totalRisk float64, riskDetails []*Positio
 	var inaccurateCount int
 
 	for _, pos := range ctx.Positions {
-		plan := planManager.GetPlan(pos.Symbol)
+		plan := planManager.GetPlanScoped(ctx.TraderID, pos.Symbol, pos.Side)
 		marketData := ctx.MarketDataMap[pos.Symbol]
 
 		btcCorr := 0.0
@@ -327,6 +327,16 @@ var defaultCircuitConfig = &CircuitBreakerConfig{
 	SevereCooldownMin:    120,
 }
 
+func normalizePercentLimit(value, fallback float64) float64 {
+	if value <= 0 {
+		return fallback
+	}
+	if value <= 1 {
+		return value * 100
+	}
+	return value
+}
+
 // CheckCircuitBreaker 检查是否触发熔断
 func CheckCircuitBreaker(ctx *Context, stats *TradeStatistics) *CircuitBreakerState {
 	if ctx.CircuitBreaker == nil {
@@ -334,7 +344,8 @@ func CheckCircuitBreaker(ctx *Context, stats *TradeStatistics) *CircuitBreakerSt
 	}
 
 	cb := ctx.CircuitBreaker
-	config := defaultCircuitConfig
+	config := *defaultCircuitConfig
+	config.MaxDailyLoss = normalizePercentLimit(ctx.MaxDailyLossPct, config.MaxDailyLoss)
 
 	// 记录冷却结束时的回撤水平，用于判断是否进一步恶化
 	var cooldownJustEnded bool

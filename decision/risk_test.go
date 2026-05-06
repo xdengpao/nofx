@@ -402,6 +402,23 @@ func TestCircuitBreaker_AccountDrawdown_BelowThreshold_NoTrigger(t *testing.T) {
 	}
 }
 
+func TestCircuitBreaker_ConfiguredMaxDailyLoss_OverridesDefault(t *testing.T) {
+	setupCleanCircuitBreaker()
+	defer setupCleanCircuitBreaker()
+	ctx := newRiskTestContext(10000)
+	ctx.MaxDailyLossPct = 0.05
+	ctx.Account.TotalPnLPct = -6.0
+	ctx.MarketDataMap["BTCUSDT"] = &market.Data{PriceChange1h: -1.0}
+
+	result := CheckCircuitBreaker(ctx, &TradeStatistics{})
+	if !result.IsTriggered {
+		t.Fatal("配置 max_daily_loss=5% 时，账户回撤 -6% 应触发熔断")
+	}
+	if result.DailyLoss != -6.0 {
+		t.Fatalf("熔断应记录当前回撤: got=%.2f", result.DailyLoss)
+	}
+}
+
 func TestCircuitBreaker_ConsecutiveLosses_Triggers(t *testing.T) {
 	setupCleanCircuitBreaker()
 	defer setupCleanCircuitBreaker()

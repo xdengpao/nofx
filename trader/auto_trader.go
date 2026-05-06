@@ -61,10 +61,23 @@ type AutoTraderConfig struct {
 	AltcoinLeverage int // 山寨币的杠杆倍数
 
 	// 风险控制（仅作为提示，AI可自主决定）
-	MaxDailyLoss    float64       // 最大日亏损百分比（提示）
-	MaxDrawdown     float64       // 最大回撤百分比（提示）
-	StopTradingTime time.Duration // 触发风控后暂停时长
+	MaxDailyLoss         float64       // 最大日亏损百分比（提示）
+	MaxDrawdown          float64       // 最大回撤百分比（提示）
+	StopTradingTime      time.Duration // 触发风控后暂停时长
+	MaxRiskPerTrade      float64       // 单笔风险预算
+	TotalRiskBudget      float64       // 总风险预算
+	AnalysisIntervalMin  int           // AI新机会分析间隔
+	EnableEmergencyClose bool          // 止损保护无法建立时是否紧急平仓
 }
+
+const (
+	DefaultMaxRiskPerTrade   = 0.02
+	DefaultTotalRiskBudget   = 0.08
+	DefaultAnalysisInterval  = 15
+	defaultAIBackoffInterval = time.Minute
+)
+
+var getMarketData = market.Get
 
 // PositionSnapshot 持仓快照（用于检测自动平仓）
 type PositionSnapshot struct {
@@ -96,7 +109,13 @@ type AutoTrader struct {
 	lastPositions         map[string]*PositionSnapshot // 上一个周期的持仓快照 (symbol_side -> snapshot)
 	orderTracker          *OrderTracker                // 🆕 新增：订单追踪器
 	lastOrderSyncTime     time.Time                    // 🆕 新增：上次订单同步时间
-
+	lastAnalysisTime      time.Time                    // 上次 AI 新机会分析时间
+	lastAIAttemptTime     time.Time                    // 上次 AI 调用尝试时间
+	lastAISuccessTime     time.Time                    // 上次 AI 调用成功时间
+	aiBackoffUntil        time.Time                    // AI 调用失败后的退避结束时间
+	lastAIError           string                       // 最近一次 AI 失败原因
+	consecutiveAIFails    int                          // 连续 AI 失败次数
+	autoCloseDedupe       map[string]time.Time         // 自动平仓事件去重
 }
 
 func (at *AutoTrader) GetTrader() Trader {
@@ -118,6 +137,15 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		} else {
 			config.AIModel = "deepseek"
 		}
+	}
+	if config.MaxRiskPerTrade <= 0 {
+		config.MaxRiskPerTrade = DefaultMaxRiskPerTrade
+	}
+	if config.TotalRiskBudget <= 0 {
+		config.TotalRiskBudget = DefaultTotalRiskBudget
+	}
+	if config.AnalysisIntervalMin <= 0 {
+		config.AnalysisIntervalMin = DefaultAnalysisInterval
 	}
 
 	mcpClient := mcp.New()
@@ -195,6 +223,7 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		callCount:             0,
 		isRunning:             false,
 		positionFirstSeenTime: make(map[string]int64),
+		autoCloseDedupe:       make(map[string]time.Time),
 	}
 	// 🆕 初始化订单追踪器
 	at.orderTracker = NewOrderTracker(at.trader)
@@ -283,7 +312,7 @@ func (at *AutoTrader) syncExistingPositions() error {
 	// 获取市场数据
 	marketDataMap := make(map[string]*market.Data)
 	for _, pos := range positionInfos {
-		data, err := market.Get(pos.Symbol)
+		data, err := getMarketData(pos.Symbol)
 		if err != nil {
 			log.Printf("  ⚠️ 获取 %s 市场数据失败: %v", pos.Symbol, err)
 			continue
@@ -292,7 +321,7 @@ func (at *AutoTrader) syncExistingPositions() error {
 	}
 
 	// 调用决策模块同步计划
-	decision.SyncPlansFromPositions(positionInfos, marketDataMap)
+	decision.SyncPlansFromPositionsScoped(at.id, positionInfos, marketDataMap)
 
 	log.Printf("  ✅ 已同步 %d 个持仓的交易计划", len(positionInfos))
 	return nil
@@ -399,6 +428,7 @@ func (at *AutoTrader) runCycle() error {
 			decisionJSON, _ := json.MarshalIndent(decision.Decisions, "", "  ")
 			record.DecisionJSON = string(decisionJSON)
 		}
+		at.applyAICallState(decision)
 	}
 
 	if err != nil {
@@ -480,6 +510,36 @@ func (at *AutoTrader) runCycle() error {
 	return nil
 }
 
+func (at *AutoTrader) applyAICallState(fullDecision *decision.FullDecision) {
+	if fullDecision == nil || !fullDecision.AICallAttempted {
+		return
+	}
+
+	attemptTime := fullDecision.Timestamp
+	if attemptTime.IsZero() {
+		attemptTime = time.Now()
+	}
+
+	at.lastAIAttemptTime = attemptTime
+
+	if fullDecision.AICallSucceeded {
+		at.lastAnalysisTime = attemptTime
+		at.lastAISuccessTime = attemptTime
+		at.consecutiveAIFails = 0
+		at.aiBackoffUntil = time.Time{}
+		at.lastAIError = ""
+		return
+	}
+
+	at.consecutiveAIFails++
+	at.lastAIError = fullDecision.AIFailureReason
+	backoff := at.config.ScanInterval
+	if backoff <= 0 {
+		backoff = defaultAIBackoffInterval
+	}
+	at.aiBackoffUntil = attemptTime.Add(backoff)
+}
+
 // 🆕 syncAutoClosedOrders 同步自动成交的订单
 func (at *AutoTrader) syncAutoClosedOrders() {
 	log.Println("🔄 检查自动成交订单...")
@@ -492,6 +552,10 @@ func (at *AutoTrader) syncAutoClosedOrders() {
 	}
 
 	for _, order := range autoClosedOrders {
+		if !at.claimAutoCloseEvent(order.Symbol, order.Side, order.OrderID, order.CloseTime) {
+			log.Printf("📋 [AUTO-CLOSE] 跳过重复事件: %s %s order=%d", order.Symbol, order.Side, order.OrderID)
+			continue
+		}
 		log.Printf("📋 [AUTO-CLOSE] 检测到自动平仓:")
 		log.Printf("  • 币种: %s %s", order.Symbol, order.Side)
 		log.Printf("  • 原因: %s", order.CloseReason)
@@ -500,20 +564,21 @@ func (at *AutoTrader) syncAutoClosedOrders() {
 		log.Printf("  • 持仓时间: %.1f 分钟", order.HoldTimeMinutes)
 		log.Printf("  • 手续费: %.4f USDT", order.Commission)
 
-		// 🆕 更新统计数据
-		decision.OnPositionClosed(
-			order.Symbol,
-			order.ExitPrice,
-			order.PnLPercent,
-			order.RealizedPnL,
-			order.CloseReason,
-		)
-
-		// 🆕 移除交易计划
-		decision.GetPlanBySymbol(order.Symbol) // 先检查是否存在
-
-		// 🆕 记录到决策日志
-		at.logAutoClosedOrder(order)
+		at.handleAutoCloseEvent(autoCloseEvent{
+			Symbol:          order.Symbol,
+			Side:            order.Side,
+			OrderID:         order.OrderID,
+			EntryPrice:      order.EntryPrice,
+			ExitPrice:       order.ExitPrice,
+			Quantity:        order.Quantity,
+			Leverage:        order.Leverage,
+			RealizedPnL:     order.RealizedPnL,
+			PnLPercent:      order.PnLPercent,
+			HoldTimeMinutes: order.HoldTimeMinutes,
+			Commission:      order.Commission,
+			CloseReason:     order.CloseReason,
+			CloseTime:       order.CloseTime,
+		}, true)
 	}
 
 	at.lastOrderSyncTime = time.Now()
@@ -709,7 +774,11 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		// 不影响主流程，继续执行（但设置performance为nil以避免传递错误数据）
 		performance = nil
 	}
-	effectiveMaxRiskPerTrade := 0.02
+	baseMaxRiskPerTrade := at.config.MaxRiskPerTrade
+	if baseMaxRiskPerTrade <= 0 {
+		baseMaxRiskPerTrade = DefaultMaxRiskPerTrade
+	}
+	effectiveMaxRiskPerTrade := baseMaxRiskPerTrade
 	var performanceGates *logger.RollingPerformanceSnapshot
 	if performance != nil && performance.Rolling != nil {
 		performanceGates = performance.Rolling
@@ -717,16 +786,32 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 			effectiveMaxRiskPerTrade = performance.Rolling.EffectiveMaxRiskPerTrade
 		}
 	}
+	var executionQuality *logger.ExecutionQualityStats
+	if performance != nil {
+		executionQuality = &performance.Execution
+	}
 
 	// 6. 构建上下文
 	ctx := &decision.Context{
 		CurrentTime:              time.Now().Format("2006-01-02 15:04:05"),
+		TraderID:                 at.id,
+		Exchange:                 at.exchange,
 		RuntimeMinutes:           int(time.Since(at.startTime).Minutes()),
 		CallCount:                at.callCount,
 		BTCETHLeverage:           at.config.BTCETHLeverage,  // 使用配置的杠杆倍数
 		AltcoinLeverage:          at.config.AltcoinLeverage, // 使用配置的杠杆倍数
-		MaxRiskPerTrade:          effectiveMaxRiskPerTrade,
+		MaxRiskPerTrade:          baseMaxRiskPerTrade,
 		EffectiveMaxRiskPerTrade: effectiveMaxRiskPerTrade,
+		TotalRiskBudget:          at.config.TotalRiskBudget,
+		MaxDailyLossPct:          at.config.MaxDailyLoss,
+		MaxAccountDrawdownPct:    decision.NormalizeAccountDrawdownPct(at.config.MaxDrawdown),
+		LastAnalysisTime:         at.lastAnalysisTime,
+		LastAIAttemptTime:        at.lastAIAttemptTime,
+		LastAISuccessTime:        at.lastAISuccessTime,
+		AIBackoffUntil:           at.aiBackoffUntil,
+		LastAIError:              at.lastAIError,
+		ConsecutiveAIFails:       at.consecutiveAIFails,
+		AnalysisIntervalMin:      at.config.AnalysisIntervalMin,
 		Account: decision.AccountInfo{
 			TotalEquity:      totalEquity,
 			AvailableBalance: availableBalance,
@@ -740,6 +825,7 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		CandidateCoins:   candidateCoins,
 		Performance:      performance, // 添加历史表现分析
 		PerformanceGates: performanceGates,
+		ExecutionQuality: executionQuality,
 	}
 	// 🆕 在返回前更新持仓快照（用于下一周期检测自动平仓）
 	at.updatePositionSnapshots(positionInfos)
@@ -808,7 +894,7 @@ func (at *AutoTrader) executeOpenLongWithRecord(d *decision.Decision, actionReco
 	}
 
 	// 获取当前价格
-	marketData, err := market.Get(d.Symbol)
+	marketData, err := getMarketData(d.Symbol)
 	if err != nil {
 		return err
 	}
@@ -817,6 +903,21 @@ func (at *AutoTrader) executeOpenLongWithRecord(d *decision.Decision, actionReco
 	quantity := d.PositionSizeUSD / marketData.CurrentPrice
 	actionRecord.Quantity = quantity
 	actionRecord.Price = marketData.CurrentPrice
+	actionRecord.RiskUSD = d.RiskUSD
+
+	preflight := EvaluateExecutionPreflight(ExecutionPreflightInput{
+		Symbol:        d.Symbol,
+		Side:          "long",
+		Quantity:      quantity,
+		Price:         marketData.CurrentPrice,
+		Leverage:      d.Leverage,
+		MinOrderValue: minPreflightOrderValueUSDT,
+		Positions:     positions,
+	})
+	if !preflight.Allowed {
+		applyPreflightToActionRecord(preflight, actionRecord)
+		return fmt.Errorf("开仓preflight失败: %s", strings.Join(preflight.Reasons, "; "))
+	}
 
 	// 开仓
 	order, err := at.trader.OpenLong(d.Symbol, quantity, d.Leverage)
@@ -840,21 +941,26 @@ func (at *AutoTrader) executeOpenLongWithRecord(d *decision.Decision, actionReco
 
 	// 🆕 追踪新仓位
 	at.orderTracker.TrackNewPosition(d.Symbol, "long", orderID, marketData.CurrentPrice, quantity, d.Leverage)
-	// 设置止损
-	if err := at.trader.SetStopLoss(d.Symbol, "LONG", quantity, d.StopLoss); err != nil {
-		log.Printf("  ⚠ 设置止损失败: %v", err)
-	}
-	// 设置止盈
-	if err := at.trader.SetTakeProfit(d.Symbol, "LONG", quantity, d.TakeProfit); err != nil {
-		log.Printf("  ⚠ 设置止盈失败: %v", err)
-	}
 
 	// 记录开仓时间
 	posKey := d.Symbol + "_long"
 	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
 
+	protective := at.setProtectiveOrdersWithRecord(d, "long", quantity, actionRecord)
+	if protective.stopLossErr != nil {
+		if !at.config.EnableEmergencyClose {
+			if err := decision.OnPositionOpenedScoped(at.id, d, marketData.CurrentPrice, quantity); err != nil {
+				return err
+			}
+		}
+		return at.handleUnprotectedOpen(d, "long", actionRecord)
+	}
+	if protective.takeProfitErr != nil {
+		log.Printf("  ⚠ 设置止盈失败: %v", protective.takeProfitErr)
+	}
+
 	// ✅ 新增：创建交易计划
-	err = decision.OnPositionOpened(d, marketData.CurrentPrice, quantity)
+	err = decision.OnPositionOpenedScoped(at.id, d, marketData.CurrentPrice, quantity)
 	if err != nil {
 		return err
 	}
@@ -877,7 +983,7 @@ func (at *AutoTrader) executeOpenShortWithRecord(d *decision.Decision, actionRec
 	}
 
 	// 获取当前价格
-	marketData, err := market.Get(d.Symbol)
+	marketData, err := getMarketData(d.Symbol)
 	if err != nil {
 		return err
 	}
@@ -886,6 +992,21 @@ func (at *AutoTrader) executeOpenShortWithRecord(d *decision.Decision, actionRec
 	quantity := d.PositionSizeUSD / marketData.CurrentPrice
 	actionRecord.Quantity = quantity
 	actionRecord.Price = marketData.CurrentPrice
+	actionRecord.RiskUSD = d.RiskUSD
+
+	preflight := EvaluateExecutionPreflight(ExecutionPreflightInput{
+		Symbol:        d.Symbol,
+		Side:          "short",
+		Quantity:      quantity,
+		Price:         marketData.CurrentPrice,
+		Leverage:      d.Leverage,
+		MinOrderValue: minPreflightOrderValueUSDT,
+		Positions:     positions,
+	})
+	if !preflight.Allowed {
+		applyPreflightToActionRecord(preflight, actionRecord)
+		return fmt.Errorf("开仓preflight失败: %s", strings.Join(preflight.Reasons, "; "))
+	}
 
 	// 开仓
 	order, err := at.trader.OpenShort(d.Symbol, quantity, d.Leverage)
@@ -912,15 +1033,21 @@ func (at *AutoTrader) executeOpenShortWithRecord(d *decision.Decision, actionRec
 	posKey := d.Symbol + "_short"
 	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
 
-	// 设置止损止盈
-	if err := at.trader.SetStopLoss(d.Symbol, "SHORT", quantity, d.StopLoss); err != nil {
-		log.Printf("  ⚠ 设置止损失败: %v", err)
+	protective := at.setProtectiveOrdersWithRecord(d, "short", quantity, actionRecord)
+	if protective.stopLossErr != nil {
+		if !at.config.EnableEmergencyClose {
+			if err := decision.OnPositionOpenedScoped(at.id, d, marketData.CurrentPrice, quantity); err != nil {
+				return err
+			}
+		}
+		return at.handleUnprotectedOpen(d, "short", actionRecord)
 	}
-	if err := at.trader.SetTakeProfit(d.Symbol, "SHORT", quantity, d.TakeProfit); err != nil {
-		log.Printf("  ⚠ 设置止盈失败: %v", err)
+	if protective.takeProfitErr != nil {
+		log.Printf("  ⚠ 设置止盈失败: %v", protective.takeProfitErr)
 	}
+
 	// ✅ 新增：创建交易计划
-	err = decision.OnPositionOpened(d, marketData.CurrentPrice, quantity)
+	err = decision.OnPositionOpenedScoped(at.id, d, marketData.CurrentPrice, quantity)
 	if err != nil {
 		return err
 	}
@@ -962,7 +1089,7 @@ func (at *AutoTrader) executeCloseLongWithRecord(d *decision.Decision, actionRec
 	}
 
 	// 获取当前价格
-	marketData, err := market.Get(d.Symbol)
+	marketData, err := getMarketData(d.Symbol)
 	if err != nil {
 		return err
 	}
@@ -982,7 +1109,7 @@ func (at *AutoTrader) executeCloseLongWithRecord(d *decision.Decision, actionRec
 
 	// ✅ 新增：调用平仓回调（更新统计和夏普比率）
 
-	decision.OnPositionClosed(d.Symbol, marketData.CurrentPrice, pnlPercent, pnlUSD, d.Reasoning)
+	decision.OnPositionClosedScoped(at.id, d.Symbol, "long", marketData.CurrentPrice, pnlPercent, pnlUSD, d.Reasoning)
 
 	log.Printf("  ✓ 平仓成功 (盈亏: %.2f%%, 持仓: %.0f分钟)", pnlPercent, holdTimeMinutes)
 	return nil
@@ -1019,7 +1146,7 @@ func (at *AutoTrader) executeCloseShortWithRecord(d *decision.Decision, actionRe
 		}
 	}
 
-	marketData, err := market.Get(d.Symbol)
+	marketData, err := getMarketData(d.Symbol)
 	if err != nil {
 		return err
 	}
@@ -1037,7 +1164,7 @@ func (at *AutoTrader) executeCloseShortWithRecord(d *decision.Decision, actionRe
 	}
 
 	// ✅ 新增：调用平仓回调
-	decision.OnPositionClosed(d.Symbol, marketData.CurrentPrice, pnlPercent, pnlUSD, d.Reasoning)
+	decision.OnPositionClosedScoped(at.id, d.Symbol, "short", marketData.CurrentPrice, pnlPercent, pnlUSD, d.Reasoning)
 
 	log.Printf("  ✓ 平仓成功 (盈亏: %.2f%%, 持仓: %.0f分钟)", pnlPercent, holdTimeMinutes)
 	return nil
@@ -1048,7 +1175,7 @@ func (at *AutoTrader) executeCloseShortWithRecord(d *decision.Decision, actionRe
 //	log.Printf("  🔄 平多仓: %s", decision.Symbol)
 //
 //	// 获取当前价格
-//	marketData, err := market.Get(decision.Symbol)
+//	marketData, err := getMarketData(decision.Symbol)
 //	if err != nil {
 //		return err
 //	}
@@ -1074,7 +1201,7 @@ func (at *AutoTrader) executeCloseShortWithRecord(d *decision.Decision, actionRe
 //	log.Printf("  🔄 平空仓: %s", decision.Symbol)
 //
 //	// 获取当前价格
-//	marketData, err := market.Get(decision.Symbol)
+//	marketData, err := getMarketData(decision.Symbol)
 //	if err != nil {
 //		return err
 //	}
@@ -1228,7 +1355,7 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(d *decision.Decision, acti
 	log.Printf("  🎯 调整止损: %s → %.2f", d.Symbol, d.NewStopLoss)
 
 	// 获取当前价格
-	marketData, err := market.Get(d.Symbol)
+	marketData, err := getMarketData(d.Symbol)
 	if err != nil {
 		return err
 	}
@@ -1342,7 +1469,7 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(d *decision.Decision, acti
 	// ✅ Step 4: 恢复原有止盈单（防止裸奔）
 	at.restoreTakeProfitOrder(d.Symbol, positionSide, quantity, oldTakeProfitPrice)
 
-	decision.OnStopLossUpdated(d.Symbol, d.NewStopLoss)
+	decision.OnStopLossUpdatedScoped(at.id, d.Symbol, "", d.NewStopLoss)
 	log.Printf("  ✓ 止损已调整: %.2f (当前价格: %.2f)", d.NewStopLoss, marketData.CurrentPrice)
 	return nil
 }
@@ -1352,7 +1479,7 @@ func (at *AutoTrader) executeUpdateTakeProfitWithRecord(decision *decision.Decis
 	log.Printf("  🎯 调整止盈: %s → %.2f", decision.Symbol, decision.NewTakeProfit)
 
 	// 获取当前价格
-	marketData, err := market.Get(decision.Symbol)
+	marketData, err := getMarketData(decision.Symbol)
 	if err != nil {
 		return err
 	}
@@ -1459,8 +1586,8 @@ type partialClosePlan struct {
 	RemainingValue       float64
 }
 
-func effectivePlanStopLoss(symbol string) float64 {
-	plan := decision.GetPlanBySymbol(symbol)
+func effectivePlanStopLoss(traderID, symbol, side string) float64 {
+	plan := decision.GetPlanByScope(traderID, symbol, side)
 	if plan == nil {
 		return 0
 	}
@@ -1527,7 +1654,7 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 	}
 
 	// 获取当前价格
-	marketData, err := market.Get(d.Symbol)
+	marketData, err := getMarketData(d.Symbol)
 	if err != nil {
 		return err
 	}
@@ -1571,7 +1698,7 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 	if !ok {
 		return fmt.Errorf("failed to parse position amount")
 	}
-	fallbackStopLoss := effectivePlanStopLoss(d.Symbol)
+	fallbackStopLoss := effectivePlanStopLoss(at.id, d.Symbol, side)
 
 	// 计算平仓数量
 	totalQuantity := math.Abs(positionAmt)
@@ -1627,7 +1754,7 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 			}
 		}
 
-		decision.OnPartialClose(d.Symbol, d.TrancheIndex, 0, stopLossForPlan)
+		decision.OnPartialCloseScoped(at.id, d.Symbol, side, d.TrancheIndex, 0, stopLossForPlan)
 		return nil
 	}
 
@@ -1676,7 +1803,7 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 		}
 	}
 
-	decision.OnPartialClose(d.Symbol, d.TrancheIndex, d.ClosePercentage, protectiveStopLoss)
+	decision.OnPartialCloseScoped(at.id, d.Symbol, side, d.TrancheIndex, d.ClosePercentage, protectiveStopLoss)
 	return nil
 }
 
@@ -1912,7 +2039,7 @@ func (at *AutoTrader) detectAutoClosedPositions(currentPositions []decision.Posi
 		if !currentPosMap[posKey] {
 			// 这个持仓消失了，说明被自动平仓了（止损/止盈触发）
 			// 获取当前价格作为平仓价格的近似值
-			marketData, err := market.Get(lastPos.Symbol)
+			marketData, err := getMarketData(lastPos.Symbol)
 			closePrice := 0.0
 			if err == nil {
 				closePrice = marketData.CurrentPrice
@@ -1927,18 +2054,23 @@ func (at *AutoTrader) detectAutoClosedPositions(currentPositions []decision.Posi
 				action = "auto_close_short"
 			}
 
-			// 创建自动平仓记录
-			autoClosedAction := logger.DecisionAction{
-				Action:    action,
-				Symbol:    lastPos.Symbol,
-				Quantity:  lastPos.Quantity,
-				Leverage:  lastPos.Leverage,
-				Price:     closePrice,
-				OrderID:   0, // 自动平仓没有特定的订单ID
-				Timestamp: time.Now(),
-				Success:   true,
-				Error:     "",
+			if !at.claimAutoCloseEvent(lastPos.Symbol, lastPos.Side, 0, time.Now()) {
+				log.Printf("[AUTO-CLOSE] 跳过重复快照事件: %s %s", lastPos.Symbol, lastPos.Side)
+				continue
 			}
+
+			// 创建自动平仓记录
+			autoClosedAction := at.handleAutoCloseEvent(autoCloseEvent{
+				Symbol:      lastPos.Symbol,
+				Side:        lastPos.Side,
+				ExitPrice:   closePrice,
+				EntryPrice:  lastPos.EntryPrice,
+				Quantity:    lastPos.Quantity,
+				Leverage:    lastPos.Leverage,
+				CloseReason: "AUTO_CLOSE_DETECTED",
+				CloseTime:   time.Now(),
+			}, false)
+			autoClosedAction.Action = action
 
 			autoClosedActions = append(autoClosedActions, autoClosedAction)
 			log.Printf("[AUTO-CLOSE] 检测到自动平仓: %s %s @ %.4f (可能由止损/止盈触发)",

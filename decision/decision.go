@@ -18,6 +18,8 @@ import (
 // Context 交易上下文
 type Context struct {
 	CurrentTime              string                             `json:"current_time"`
+	TraderID                 string                             `json:"trader_id,omitempty"`
+	Exchange                 string                             `json:"exchange,omitempty"`
 	RuntimeMinutes           int                                `json:"runtime_minutes"`
 	CallCount                int                                `json:"call_count"`
 	Account                  AccountInfo                        `json:"account"`
@@ -33,9 +35,16 @@ type Context struct {
 	MaxRiskPerTrade          float64                            `json:"-"`
 	EffectiveMaxRiskPerTrade float64                            `json:"-"`
 	PerformanceGates         *logger.RollingPerformanceSnapshot `json:"-"`
+	ExecutionQuality         *logger.ExecutionQualityStats      `json:"-"`
 	TotalRiskBudget          float64                            `json:"-"`
+	MaxDailyLossPct          float64                            `json:"-"`
 	MaxAccountDrawdownPct    float64                            `json:"-"`
 	LastAnalysisTime         time.Time                          `json:"-"`
+	LastAIAttemptTime        time.Time                          `json:"-"`
+	LastAISuccessTime        time.Time                          `json:"-"`
+	AIBackoffUntil           time.Time                          `json:"-"`
+	LastAIError              string                             `json:"-"`
+	ConsecutiveAIFails       int                                `json:"-"`
 	AnalysisIntervalMin      int                                `json:"-"`
 }
 
@@ -121,8 +130,11 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 			if err != nil {
 				trace := fmt.Sprintf("AI API调用失败，已跳过本周期新开仓: %v", err)
 				return &FullDecision{
-					UserPrompt: userPrompt,
-					CoTTrace:   trace,
+					UserPrompt:      userPrompt,
+					CoTTrace:        trace,
+					AICallAttempted: true,
+					AICallSucceeded: false,
+					AIFailureReason: trace,
 					Decisions: []Decision{{
 						Symbol:    "ALL",
 						Action:    "wait",
@@ -136,8 +148,11 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 					trace := fmt.Sprintf("AI响应解析失败，已跳过本周期新开仓: %v\n响应摘要: %s",
 						parseErr, truncateForDecisionLog(aiResponse, 500))
 					return &FullDecision{
-						UserPrompt: userPrompt,
-						CoTTrace:   trace,
+						UserPrompt:      userPrompt,
+						CoTTrace:        trace,
+						AICallAttempted: true,
+						AICallSucceeded: false,
+						AIFailureReason: trace,
 						Decisions: []Decision{{
 							Symbol:    "ALL",
 							Action:    "wait",
@@ -183,10 +198,12 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 	finalCoTTrace := buildFinalCoTTrace(cotTrace, positionDecisions, aiDecisions, allDecisions)
 
 	return &FullDecision{
-		UserPrompt: userPrompt,
-		CoTTrace:   finalCoTTrace,
-		Decisions:  allDecisions,
-		Timestamp:  time.Now(),
+		UserPrompt:      userPrompt,
+		CoTTrace:        finalCoTTrace,
+		Decisions:       allDecisions,
+		Timestamp:       time.Now(),
+		AICallAttempted: shouldCallAI && userPrompt != "",
+		AICallSucceeded: shouldCallAI && userPrompt != "",
 	}, nil
 }
 
@@ -217,6 +234,11 @@ func normalizeAccountDrawdownPct(value float64) float64 {
 		return value * 100
 	}
 	return value
+}
+
+// NormalizeAccountDrawdownPct 将 0.2 和 20.0 统一解释为 20%。
+func NormalizeAccountDrawdownPct(value float64) float64 {
+	return normalizeAccountDrawdownPct(value)
 }
 
 func isAccountDrawdownHardStopped(ctx *Context) bool {
@@ -267,7 +289,7 @@ func evaluateExistingPositions(ctx *Context) []Decision {
 	var decisions []Decision
 
 	for _, pos := range ctx.Positions {
-		plan := planManager.GetPlan(pos.Symbol)
+		plan := planManager.GetPlanScoped(ctx.TraderID, pos.Symbol, pos.Side)
 		marketData := ctx.MarketDataMap[pos.Symbol]
 
 		evaluator := &PositionEvaluator{
@@ -281,7 +303,7 @@ func evaluateExistingPositions(ctx *Context) []Decision {
 
 		// 更新峰值数据
 		if result.ShouldUpdatePeak && marketData != nil {
-			planManager.UpdatePlanPeakData(pos.Symbol, marketData.CurrentPrice, pos.UnrealizedPnLPct)
+			planManager.UpdatePlanPeakDataScoped(ctx.TraderID, pos.Symbol, pos.Side, marketData.CurrentPrice, pos.UnrealizedPnLPct)
 		}
 
 		// 更新入场ATR
@@ -291,13 +313,13 @@ func evaluateExistingPositions(ctx *Context) []Decision {
 				atr = marketData.LongerTermContext.ATR14
 			}
 			if atr > 0 {
-				planManager.UpdatePlanEntryATR(pos.Symbol, atr)
+				planManager.UpdatePlanEntryATRScoped(ctx.TraderID, pos.Symbol, pos.Side, atr)
 			}
 		}
 
 		// 更新动态止盈
 		if result.NewTakeProfit > 0 {
-			planManager.UpdatePlanTakeProfit(pos.Symbol, result.NewTakeProfit)
+			planManager.UpdatePlanTakeProfitScoped(ctx.TraderID, pos.Symbol, pos.Side, result.NewTakeProfit)
 		}
 
 		switch result.Action {
@@ -312,7 +334,7 @@ func evaluateExistingPositions(ctx *Context) []Decision {
 				Reasoning: result.Reason,
 			})
 			if result.IsPlanInvalidated && plan != nil {
-				planManager.UpdatePlan(pos.Symbol, func(p *TradePlan) {
+				planManager.UpdatePlanScoped(ctx.TraderID, pos.Symbol, pos.Side, func(p *TradePlan) {
 					p.Status = "INVALIDATED"
 				})
 			}
@@ -352,6 +374,12 @@ func evaluateExistingPositions(ctx *Context) []Decision {
 // ============================================================================
 
 func shouldCallAIForNewOpportunities(ctx *Context) bool {
+	if !ctx.AIBackoffUntil.IsZero() && time.Now().Before(ctx.AIBackoffUntil) {
+		remaining := time.Until(ctx.AIBackoffUntil).Minutes()
+		log.Printf("📊 AI调用退避中，剩余%.1f分钟，跳过新机会搜索", remaining)
+		return false
+	}
+
 	if !ctx.LastAnalysisTime.IsZero() {
 		elapsed := time.Since(ctx.LastAnalysisTime).Minutes()
 		if elapsed < float64(ctx.AnalysisIntervalMin) {
@@ -419,12 +447,17 @@ func validateOpenDecision(d *Decision, ctx *Context) error {
 		return fmt.Errorf("缺少 %s 市场数据", d.Symbol)
 	}
 
-	gate := effectiveOpenGate(d, ctx)
-	if gate.blocked {
-		return fmt.Errorf("rolling gate阻止开仓: %s", gate.reason)
+	gate := EvaluateOpenGate(OpenGateInput{
+		Decision:         d,
+		Context:          ctx,
+		MarketData:       marketData,
+		ExecutionQuality: ctx.ExecutionQuality,
+	})
+	if !gate.Allowed {
+		return fmt.Errorf("open gate阻止开仓: %s", strings.Join(gate.Reasons, "; "))
 	}
-	if gate.minConfidence > 0 && d.Confidence < gate.minConfidence {
-		return fmt.Errorf("rolling gate要求更高置信度: %d < %d (%s)", d.Confidence, gate.minConfidence, gate.reason)
+	if gate.MinConfidence > 0 && d.Confidence > 0 && d.Confidence < gate.MinConfidence {
+		return fmt.Errorf("open gate要求更高置信度: %d < %d (%s)", d.Confidence, gate.MinConfidence, strings.Join(gate.Reasons, "; "))
 	}
 
 	// 开仓前失效条件检查
@@ -504,13 +537,25 @@ func validateOpenDecision(d *Decision, ctx *Context) error {
 	}
 
 	// 检查单笔风险
-	positionRiskUSD := d.PositionSizeUSD * (riskPct / 100)
-	maxRiskUSD := ctx.Account.TotalEquity * gate.maxRiskPerTrade
-	if positionRiskUSD > maxRiskUSD*1.01 {
-		return fmt.Errorf("单笔风险(%.2f USD)超过上限(%.2f USD)", positionRiskUSD, maxRiskUSD)
+	sizing := CalculatePositionSizing(PositionSizingInput{
+		AccountEquity:            ctx.Account.TotalEquity,
+		AvailableBalance:         ctx.Account.AvailableBalance,
+		CurrentPrice:             currentPrice,
+		StopLoss:                 d.StopLoss,
+		Leverage:                 d.Leverage,
+		EffectiveRiskPct:         gate.EffectiveRisk,
+		RemainingRiskBudgetPct:   remainingBudget,
+		RequestedPositionSizeUSD: d.PositionSizeUSD,
+		MinOrderValueUSDT:        defaultMinOrderValueUSDT,
+	})
+	if d.PositionSizeUSD > sizing.MaxPositionSizeUSD*1.01 && sizing.MaxPositionSizeUSD > 0 {
+		return fmt.Errorf("单笔风险(%.2f USD)超过上限(%.2f USD)", d.PositionSizeUSD*(riskPct/100), ctx.Account.TotalEquity*gate.EffectiveRisk)
+	}
+	if !sizing.Executable && sizing.PositionSizeUSD < defaultMinOrderValueUSDT {
+		return fmt.Errorf("仓位sizing不可执行: %s", strings.Join(sizing.Reasons, "; "))
 	}
 
-	d.RiskUSD = positionRiskUSD
+	d.RiskUSD = sizing.RiskUSD
 	return nil
 }
 
@@ -1160,7 +1205,6 @@ func CreateTradePlanFromDecision(d *Decision, actualEntryPrice float64) *TradePl
 		plan.MinHoldMinutes = 30
 	}
 
-	planManager.SetPlan(plan)
 	return plan
 }
 
@@ -1674,8 +1718,13 @@ func Shutdown() error {
 
 // SyncPlansFromPositions 从现有持仓同步计划
 func SyncPlansFromPositions(positions []PositionInfo, marketDataMap map[string]*market.Data) {
+	SyncPlansFromPositionsScoped("", positions, marketDataMap)
+}
+
+// SyncPlansFromPositionsScoped 从现有持仓同步 trader 作用域计划。
+func SyncPlansFromPositionsScoped(traderID string, positions []PositionInfo, marketDataMap map[string]*market.Data) {
 	for _, pos := range positions {
-		if planManager.GetPlan(pos.Symbol) != nil {
+		if planManager.GetPlanScoped(traderID, pos.Symbol, pos.Side) != nil {
 			continue
 		}
 
@@ -1715,6 +1764,7 @@ func SyncPlansFromPositions(positions []PositionInfo, marketDataMap map[string]*
 
 		plan := &TradePlan{
 			ID:               fmt.Sprintf("recovered_%s_%d", pos.Symbol, time.Now().UnixNano()),
+			TraderID:         traderID,
 			Symbol:           pos.Symbol,
 			Direction:        pos.Side,
 			EntryPrice:       pos.EntryPrice,
@@ -1784,6 +1834,14 @@ func GetPlanBySymbol(symbol string) *TradePlan {
 		return nil
 	}
 	return planManager.GetPlan(symbol)
+}
+
+// GetPlanByScope 根据 trader/symbol/side 获取计划，兼容旧 symbol 计划。
+func GetPlanByScope(traderID, symbol, side string) *TradePlan {
+	if planManager == nil {
+		return nil
+	}
+	return planManager.GetPlanScoped(traderID, symbol, side)
 }
 
 // GetPerformanceReport 获取完整绩效报告
@@ -1899,7 +1957,7 @@ func QuickAnalyze(ctx *Context) string {
 	if len(ctx.Positions) > 0 {
 		sb.WriteString("**持仓状态**:\n")
 		for _, pos := range ctx.Positions {
-			plan := planManager.GetPlan(pos.Symbol)
+			plan := planManager.GetPlanScoped(ctx.TraderID, pos.Symbol, pos.Side)
 			planInfo := "无计划"
 			if plan != nil {
 				holdMin := time.Since(plan.CreatedAt).Minutes()

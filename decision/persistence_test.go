@@ -348,6 +348,36 @@ func TestOnPartialClose_NoNewStopLoss_DoesNotOverwriteCurrentStopLoss(t *testing
 	}
 }
 
+func TestTradePlanManager_ScopedPlanKeys(t *testing.T) {
+	_, cleanup := setupTestPlanManager(t)
+	defer cleanup()
+
+	longPlan := newTestTradePlan("BTCUSDT")
+	longPlan.TraderID = "trader-a"
+	longPlan.Direction = "long"
+	shortPlan := newTestTradePlan("BTCUSDT")
+	shortPlan.TraderID = "trader-b"
+	shortPlan.Direction = "short"
+
+	planManager.SetPlan(longPlan)
+	planManager.SetPlan(shortPlan)
+
+	if got := planManager.GetPlanScoped("trader-a", "BTCUSDT", "long"); got == nil || got.TraderID != "trader-a" || got.Direction != "long" {
+		t.Fatalf("应按 trader/symbol/side 获取 long plan: %+v", got)
+	}
+	if got := planManager.GetPlanScoped("trader-b", "BTCUSDT", "short"); got == nil || got.TraderID != "trader-b" || got.Direction != "short" {
+		t.Fatalf("应按 trader/symbol/side 获取 short plan: %+v", got)
+	}
+
+	planManager.RemovePlanScoped("trader-a", "BTCUSDT", "long")
+	if got := planManager.GetPlanScoped("trader-a", "BTCUSDT", "long"); got != nil {
+		t.Fatalf("移除 trader-a long 后不应还能获取: %+v", got)
+	}
+	if got := planManager.GetPlanScoped("trader-b", "BTCUSDT", "short"); got == nil {
+		t.Fatal("移除 trader-a long 不应影响 trader-b short")
+	}
+}
+
 func TestPersistence_LoadFromFile_RestoresStatistics(t *testing.T) {
 	dir, cleanup := setupTestPlanManager(t)
 	defer cleanup()

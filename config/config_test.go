@@ -167,6 +167,28 @@ func TestValidate_NegativeLeverage_SetsDefault5(t *testing.T) {
 	}
 }
 
+func TestValidate_EmptyExchange_WritesBackDefaultBinance(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].Exchange = ""
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("验证失败: %v", err)
+	}
+	if cfg.Traders[0].Exchange != "binance" {
+		t.Fatalf("Exchange 默认值未写回: 期望=binance, 实际=%q", cfg.Traders[0].Exchange)
+	}
+}
+
+func TestValidate_ZeroScanInterval_WritesBackDefault3(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].ScanIntervalMinutes = 0
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("验证失败: %v", err)
+	}
+	if cfg.Traders[0].ScanIntervalMinutes != 3 {
+		t.Fatalf("ScanIntervalMinutes 默认值未写回: 期望=3, 实际=%d", cfg.Traders[0].ScanIntervalMinutes)
+	}
+}
+
 // ============================================================================
 // 需求 1.2: 启用交易者计数
 // ============================================================================
@@ -639,8 +661,8 @@ func TestProperty5_LeverageDefaultValue(t *testing.T) {
 
 	properties.Property("杠杆<=0时验证后应被设置为默认值5", prop.ForAll(
 		func(btcLevNorm, altLevNorm int) bool {
-			btcLev := -(btcLevNorm % 100)  // 0 或负数
-			altLev := -(altLevNorm % 100)  // 0 或负数
+			btcLev := -(btcLevNorm % 100) // 0 或负数
+			altLev := -(altLevNorm % 100) // 0 或负数
 			cfg := validConfig()
 			cfg.Leverage = LeverageConfig{BTCETHLeverage: btcLev, AltcoinLeverage: altLev}
 			if err := cfg.Validate(); err != nil {
@@ -718,9 +740,9 @@ func TestProperty2_ConfigLoadRoundTrip(t *testing.T) {
 	properties.Property("Config经JSON序列化写入文件再通过LoadConfig加载后数值字段应保持一致", prop.ForAll(
 		func(portNorm, btcLevNorm, altLevNorm, dailyLossNorm, drawdownNorm int) bool {
 			// 生成有效范围内的随机值（确保 > 0 以避免 Validate 覆盖默认值）
-			port := 1024 + portNorm%64511       // 1024..65534
-			btcLev := 1 + btcLevNorm%20         // 1..20
-			altLev := 1 + altLevNorm%20          // 1..20
+			port := 1024 + portNorm%64511                 // 1024..65534
+			btcLev := 1 + btcLevNorm%20                   // 1..20
+			altLev := 1 + altLevNorm%20                   // 1..20
 			dailyLoss := 1.0 + float64(dailyLossNorm%100) // 1.0..100.0
 			drawdown := 1.0 + float64(drawdownNorm%100)   // 1.0..100.0
 

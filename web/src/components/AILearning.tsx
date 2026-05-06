@@ -54,11 +54,21 @@ interface PerformanceAnalysis {
     reasons?: string[];
   };
   execution_quality?: {
+    total_actions?: number;
+    open_attempts?: number;
+    open_failures?: number;
+    open_rejected_count?: number;
     partial_close_attempts: number;
     partial_close_failures: number;
     partial_close_failure_rate: number;
+    protection_order_failures?: number;
+    high_risk_execution_failures?: number;
     ai_failure_count: number;
     unmatched_action_count: number;
+    recent_high_risk_errors?: Array<{ timestamp: string; symbol?: string; action?: string; risk_type: string; reason: string }>;
+    recent_open_rejection_reasons?: string[];
+    protection_order_failure_rate?: number;
+    high_risk_execution_failure_rate?: number;
   };
   symbol_stats: { [key: string]: SymbolPerformance };
   best_symbol: string;
@@ -196,12 +206,39 @@ export default function AILearning({ traderId }: AILearningProps) {
         </div>
         <div className="rounded-lg p-4" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
           <div className="text-xs uppercase mb-2" style={{ color: '#848E9C' }}>Execution Quality</div>
-          <div className="text-2xl font-bold mono" style={{ color: (execution?.partial_close_failures || 0) > 0 ? '#F87171' : '#10B981' }}>
-            {(execution?.partial_close_failure_rate || 0).toFixed(1)}%
+          <div className="text-2xl font-bold mono" style={{ color: (execution?.high_risk_execution_failures || execution?.protection_order_failures || 0) > 0 ? '#F87171' : '#10B981' }}>
+            {execution?.high_risk_execution_failures || 0}
           </div>
-          <div className="text-xs mt-1" style={{ color: '#94A3B8' }}>partial close failure rate</div>
+          <div className="text-xs mt-1" style={{ color: '#94A3B8' }}>high risk execution failures</div>
         </div>
       </div>
+
+      {execution && (
+        <div className="rounded-lg p-4" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+            <div>
+              <div className="text-xs uppercase" style={{ color: '#848E9C' }}>Open Rejected</div>
+              <div className="text-xl font-bold mono" style={{ color: (execution.open_rejected_count || 0) > 0 ? '#F0B90B' : '#10B981' }}>{execution.open_rejected_count || 0}</div>
+            </div>
+            <div>
+              <div className="text-xs uppercase" style={{ color: '#848E9C' }}>Protection Fail</div>
+              <div className="text-xl font-bold mono" style={{ color: (execution.protection_order_failures || 0) > 0 ? '#F87171' : '#10B981' }}>{execution.protection_order_failures || 0}</div>
+            </div>
+            <div>
+              <div className="text-xs uppercase" style={{ color: '#848E9C' }}>AI Fail</div>
+              <div className="text-xl font-bold mono" style={{ color: (execution.ai_failure_count || 0) > 0 ? '#F0B90B' : '#10B981' }}>{execution.ai_failure_count || 0}</div>
+            </div>
+            <div>
+              <div className="text-xs uppercase" style={{ color: '#848E9C' }}>Unmatched</div>
+              <div className="text-xl font-bold mono" style={{ color: (execution.unmatched_action_count || 0) > 0 ? '#F0B90B' : '#10B981' }}>{execution.unmatched_action_count || 0}</div>
+            </div>
+            <div>
+              <div className="text-xs uppercase" style={{ color: '#848E9C' }}>Partial Fail</div>
+              <div className="text-xl font-bold mono" style={{ color: (execution.partial_close_failures || 0) > 0 ? '#F87171' : '#10B981' }}>{(execution.partial_close_failure_rate || 0).toFixed(1)}%</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 核心指标卡片 - 4列网格 */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">

@@ -76,7 +76,6 @@ func parseJSONArray(t *testing.T, w *httptest.ResponseRecorder) []interface{} {
 	return result
 }
 
-
 // ============================================================================
 // 需求 12.1: CORS 中间件测试
 // ============================================================================
@@ -452,6 +451,15 @@ func TestPerformance_WithTrader(t *testing.T) {
 	}
 	if _, ok := result["win_rate"]; !ok {
 		t.Error("performance 应包含 win_rate 字段")
+	}
+	if execution, ok := result["execution_quality"].(map[string]interface{}); !ok {
+		t.Error("performance 应包含 execution_quality 字段")
+	} else {
+		for _, field := range []string{"protection_order_failures", "high_risk_execution_failures", "open_rejected_count"} {
+			if _, ok := execution[field]; !ok {
+				t.Errorf("execution_quality 应包含 %s 字段", field)
+			}
+		}
 	}
 }
 

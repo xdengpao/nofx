@@ -346,6 +346,14 @@ func TestShouldCallAI_InsufficientBudget_ReturnsFalse(t *testing.T) {
 	}
 }
 
+func TestShouldCallAI_AIBackoffActive_ReturnsFalse(t *testing.T) {
+	ctx := newTestContext()
+	ctx.AIBackoffUntil = time.Now().Add(time.Minute)
+	if shouldCallAIForNewOpportunities(ctx) {
+		t.Error("AI退避未结束时应返回 false")
+	}
+}
+
 // ============================================================================
 // 需求 3.7: mergeDecisions — 优先级合并逻辑
 // ============================================================================

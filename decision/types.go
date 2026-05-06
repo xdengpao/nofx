@@ -117,6 +117,7 @@ type InvalidationConditionParser struct {
 // TradePlan 交易计划
 type TradePlan struct {
 	ID                          string                       `json:"id"`
+	TraderID                    string                       `json:"trader_id,omitempty"`
 	Symbol                      string                       `json:"symbol"`
 	Direction                   string                       `json:"direction"`
 	EntryPrice                  float64                      `json:"entry_price"`
@@ -195,10 +196,13 @@ type Decision struct {
 
 // FullDecision AI的完整决策
 type FullDecision struct {
-	UserPrompt string     `json:"user_prompt"`
-	CoTTrace   string     `json:"cot_trace"`
-	Decisions  []Decision `json:"decisions"`
-	Timestamp  time.Time  `json:"timestamp"`
+	UserPrompt      string     `json:"user_prompt"`
+	CoTTrace        string     `json:"cot_trace"`
+	Decisions       []Decision `json:"decisions"`
+	Timestamp       time.Time  `json:"timestamp"`
+	AICallAttempted bool       `json:"ai_call_attempted,omitempty"`
+	AICallSucceeded bool       `json:"ai_call_succeeded,omitempty"`
+	AIFailureReason string     `json:"ai_failure_reason,omitempty"`
 }
 
 // EvaluationResult 评估结果
