@@ -240,7 +240,7 @@ func TestDockerCompose_FrontendHealthcheck(t *testing.T) {
 	}
 	s := string(content)
 
-	if !strings.Contains(s, `"wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health"`) {
+	if !strings.Contains(s, `"wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1/health"`) {
 		t.Error("前端服务健康检查应使用 wget 命令检查 /health 端点")
 	}
 }
