@@ -3,6 +3,7 @@ package decision
 import (
 	"fmt"
 	"log"
+	"nofx/logger"
 	"nofx/market"
 	"nofx/mcp"
 	"nofx/pool"
@@ -16,24 +17,31 @@ import (
 
 // Context 交易上下文
 type Context struct {
-	CurrentTime         string                      `json:"current_time"`
-	RuntimeMinutes      int                         `json:"runtime_minutes"`
-	CallCount           int                         `json:"call_count"`
-	Account             AccountInfo                 `json:"account"`
-	Positions           []PositionInfo              `json:"positions"`
-	CandidateCoins      []CandidateCoin             `json:"candidate_coins"`
-	MarketDataMap       map[string]*market.Data     `json:"-"`
-	OITopDataMap        map[string]*OITopData       `json:"-"`
-	CorrelationMap      map[string]*CorrelationData `json:"-"`
-	CircuitBreaker      *CircuitBreakerState        `json:"-"`
-	Performance         interface{}                 `json:"-"`
-	BTCETHLeverage      int                         `json:"-"`
-	AltcoinLeverage     int                         `json:"-"`
-	MaxRiskPerTrade     float64                     `json:"-"`
-	TotalRiskBudget     float64                     `json:"-"`
-	LastAnalysisTime    time.Time                   `json:"-"`
-	AnalysisIntervalMin int                         `json:"-"`
+	CurrentTime              string                             `json:"current_time"`
+	RuntimeMinutes           int                                `json:"runtime_minutes"`
+	CallCount                int                                `json:"call_count"`
+	Account                  AccountInfo                        `json:"account"`
+	Positions                []PositionInfo                     `json:"positions"`
+	CandidateCoins           []CandidateCoin                    `json:"candidate_coins"`
+	MarketDataMap            map[string]*market.Data            `json:"-"`
+	OITopDataMap             map[string]*OITopData              `json:"-"`
+	CorrelationMap           map[string]*CorrelationData        `json:"-"`
+	CircuitBreaker           *CircuitBreakerState               `json:"-"`
+	Performance              interface{}                        `json:"-"`
+	BTCETHLeverage           int                                `json:"-"`
+	AltcoinLeverage          int                                `json:"-"`
+	MaxRiskPerTrade          float64                            `json:"-"`
+	EffectiveMaxRiskPerTrade float64                            `json:"-"`
+	PerformanceGates         *logger.RollingPerformanceSnapshot `json:"-"`
+	TotalRiskBudget          float64                            `json:"-"`
+	MaxAccountDrawdownPct    float64                            `json:"-"`
+	LastAnalysisTime         time.Time                          `json:"-"`
+	AnalysisIntervalMin      int                                `json:"-"`
 }
+
+const defaultMaxAccountDrawdownPct = 20.0
+
+var configuredMaxAccountDrawdownPct = defaultMaxAccountDrawdownPct
 
 // ============================================================================
 // 核心决策函数
@@ -77,11 +85,29 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 	// 评估现有持仓
 	positionDecisions := evaluateExistingPositions(ctx)
 
+	if isAccountDrawdownHardStopped(ctx) {
+		reason := fmt.Sprintf("账户总回撤 %.2f%% 已达到最大回撤阈值 %.2f%%，停止搜索新开仓机会",
+			ctx.Account.TotalPnLPct, ctx.MaxAccountDrawdownPct)
+		waitDecision := Decision{
+			Symbol:    "ALL",
+			Action:    "wait",
+			Reasoning: reason,
+		}
+		aiDecisions := []Decision{waitDecision}
+		allDecisions := mergeDecisions(positionDecisions, aiDecisions)
+		return &FullDecision{
+			CoTTrace:  buildFinalCoTTrace(reason, positionDecisions, aiDecisions, allDecisions),
+			Decisions: allDecisions,
+			Timestamp: time.Now(),
+		}, nil
+	}
+
 	// 判断是否需要调用AI
 	shouldCallAI := shouldCallAIForNewOpportunities(ctx)
 
 	var aiDecisions []Decision
 	var cotTrace string
+	var userPrompt string
 
 	if shouldCallAI {
 		remainingBudget := calculateRemainingRiskBudget(ctx)
@@ -89,13 +115,39 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 			log.Printf("⚠️ 风险预算已用尽(剩余%.2f%%)，跳过新机会搜索", remainingBudget*100)
 		} else {
 			systemPrompt := buildSystemPrompt(ctx)
-			userPrompt := buildUserPrompt(ctx, remainingBudget)
+			userPrompt = buildUserPrompt(ctx, remainingBudget)
 
 			aiResponse, err := mcpClient.CallWithMessages(systemPrompt, userPrompt)
 			if err != nil {
-				log.Printf("⚠️ 调用AI API失败: %v", err)
+				trace := fmt.Sprintf("AI API调用失败，已跳过本周期新开仓: %v", err)
+				return &FullDecision{
+					UserPrompt: userPrompt,
+					CoTTrace:   trace,
+					Decisions: []Decision{{
+						Symbol:    "ALL",
+						Action:    "wait",
+						Reasoning: trace,
+					}},
+					Timestamp: time.Now(),
+				}, fmt.Errorf("AI API调用失败: %w", err)
 			} else {
-				aiDecisions, cotTrace, _ = ExtractDecisionsRobust(aiResponse)
+				parsedDecisions, parsedTrace, parseErr := ExtractDecisionsRobust(aiResponse)
+				if parseErr != nil {
+					trace := fmt.Sprintf("AI响应解析失败，已跳过本周期新开仓: %v\n响应摘要: %s",
+						parseErr, truncateForDecisionLog(aiResponse, 500))
+					return &FullDecision{
+						UserPrompt: userPrompt,
+						CoTTrace:   trace,
+						Decisions: []Decision{{
+							Symbol:    "ALL",
+							Action:    "wait",
+							Reasoning: trace,
+						}},
+						Timestamp: time.Now(),
+					}, fmt.Errorf("AI响应解析失败: %w", parseErr)
+				}
+				aiDecisions = parsedDecisions
+				cotTrace = parsedTrace
 
 				var validDecisions []Decision
 				for _, d := range aiDecisions {
@@ -131,9 +183,10 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 	finalCoTTrace := buildFinalCoTTrace(cotTrace, positionDecisions, aiDecisions, allDecisions)
 
 	return &FullDecision{
-		CoTTrace:  finalCoTTrace,
-		Decisions: allDecisions,
-		Timestamp: time.Now(),
+		UserPrompt: userPrompt,
+		CoTTrace:   finalCoTTrace,
+		Decisions:  allDecisions,
+		Timestamp:  time.Now(),
 	}, nil
 }
 
@@ -151,6 +204,34 @@ func initializeDefaults(ctx *Context) {
 	if ctx.AnalysisIntervalMin == 0 {
 		ctx.AnalysisIntervalMin = 15
 	}
+	if ctx.MaxAccountDrawdownPct == 0 {
+		ctx.MaxAccountDrawdownPct = configuredMaxAccountDrawdownPct
+	}
+}
+
+func normalizeAccountDrawdownPct(value float64) float64 {
+	if value <= 0 {
+		return defaultMaxAccountDrawdownPct
+	}
+	if value <= 1 {
+		return value * 100
+	}
+	return value
+}
+
+func isAccountDrawdownHardStopped(ctx *Context) bool {
+	if ctx == nil || ctx.MaxAccountDrawdownPct <= 0 {
+		return false
+	}
+	return ctx.Account.TotalPnLPct <= -ctx.MaxAccountDrawdownPct
+}
+
+func truncateForDecisionLog(value string, maxLen int) string {
+	value = strings.TrimSpace(value)
+	if maxLen <= 0 || len(value) <= maxLen {
+		return value
+	}
+	return value[:maxLen] + "...(truncated)"
 }
 
 func checkCircuitBreakerState(ctx *Context) *FullDecision {
@@ -338,6 +419,14 @@ func validateOpenDecision(d *Decision, ctx *Context) error {
 		return fmt.Errorf("缺少 %s 市场数据", d.Symbol)
 	}
 
+	gate := effectiveOpenGate(d, ctx)
+	if gate.blocked {
+		return fmt.Errorf("rolling gate阻止开仓: %s", gate.reason)
+	}
+	if gate.minConfidence > 0 && d.Confidence < gate.minConfidence {
+		return fmt.Errorf("rolling gate要求更高置信度: %d < %d (%s)", d.Confidence, gate.minConfidence, gate.reason)
+	}
+
 	// 开仓前失效条件检查
 	if invalidated, reason := CheckPreOpenInvalidation(d, marketData); invalidated {
 		return fmt.Errorf("开仓前失效条件检查失败: %s", reason)
@@ -416,13 +505,72 @@ func validateOpenDecision(d *Decision, ctx *Context) error {
 
 	// 检查单笔风险
 	positionRiskUSD := d.PositionSizeUSD * (riskPct / 100)
-	maxRiskUSD := ctx.Account.TotalEquity * ctx.MaxRiskPerTrade
+	maxRiskUSD := ctx.Account.TotalEquity * gate.maxRiskPerTrade
 	if positionRiskUSD > maxRiskUSD*1.01 {
 		return fmt.Errorf("单笔风险(%.2f USD)超过上限(%.2f USD)", positionRiskUSD, maxRiskUSD)
 	}
 
 	d.RiskUSD = positionRiskUSD
 	return nil
+}
+
+type openGateLimit struct {
+	maxRiskPerTrade float64
+	minConfidence   int
+	blocked         bool
+	reason          string
+}
+
+func effectiveOpenGate(d *Decision, ctx *Context) openGateLimit {
+	maxRisk := ctx.MaxRiskPerTrade
+	if ctx.EffectiveMaxRiskPerTrade > 0 && (maxRisk == 0 || ctx.EffectiveMaxRiskPerTrade < maxRisk) {
+		maxRisk = ctx.EffectiveMaxRiskPerTrade
+	}
+	if maxRisk <= 0 {
+		maxRisk = 0.02
+	}
+
+	limit := openGateLimit{
+		maxRiskPerTrade: maxRisk,
+	}
+	if ctx == nil || ctx.PerformanceGates == nil {
+		return limit
+	}
+
+	side := "long"
+	if d.Action == "open_short" {
+		side = "short"
+	}
+	applyGate := func(g logger.PerformanceGate) {
+		if g.State == "" || g.State == "allow" {
+			return
+		}
+		if g.State == "block" {
+			if g.CooldownUntil.IsZero() || time.Now().Before(g.CooldownUntil) {
+				limit.blocked = true
+			}
+		}
+		if g.MinConfidence > limit.minConfidence {
+			limit.minConfidence = g.MinConfidence
+		}
+		if g.RiskMultiplier > 0 && g.RiskMultiplier < 1 {
+			limit.maxRiskPerTrade *= g.RiskMultiplier
+		}
+		if limit.reason == "" {
+			limit.reason = g.Reason
+		}
+	}
+
+	if g, ok := ctx.PerformanceGates.SymbolGates[d.Symbol]; ok {
+		applyGate(g)
+	}
+	if g, ok := ctx.PerformanceGates.SideGates[side]; ok {
+		applyGate(g)
+	}
+	if limit.reason == "" {
+		limit.reason = "rolling performance gate"
+	}
+	return limit
 }
 
 func validateFinalDecisions(decisions []Decision, ctx *Context) error {
@@ -471,7 +619,7 @@ func ValidateAndEnrichDecision(d *Decision, ctx *Context) error {
 			ctx.Account.TotalEquity,
 			atr,
 			currentPrice,
-			ctx.MaxRiskPerTrade,
+			effectiveOpenGate(d, ctx).maxRiskPerTrade,
 			isAltcoin,
 		)
 		d.PositionSizeUSD = suggestedSize
@@ -1471,15 +1619,18 @@ func ProcessDecisions(decisions []Decision, executor DecisionExecutor, marketDat
 func Initialize(config *Config) error {
 	if config == nil {
 		config = &Config{
-			MaxRiskPerTrade:     0.02,
-			TotalRiskBudget:     0.08,
-			AnalysisIntervalMin: 15,
-			BTCETHLeverage:      10,
-			AltcoinLeverage:     5,
-			DataDir:             defaultDataDir,
-			RiskFreeRate:        0.0,
+			MaxRiskPerTrade:       0.02,
+			TotalRiskBudget:       0.08,
+			MaxAccountDrawdownPct: defaultMaxAccountDrawdownPct,
+			AnalysisIntervalMin:   15,
+			BTCETHLeverage:        10,
+			AltcoinLeverage:       5,
+			DataDir:               defaultDataDir,
+			RiskFreeRate:          0.0,
 		}
 	}
+
+	configuredMaxAccountDrawdownPct = normalizeAccountDrawdownPct(config.MaxAccountDrawdownPct)
 
 	// 初始化计划管理器（带持久化）
 	if err := InitPlanManager(config.DataDir); err != nil {
@@ -1493,8 +1644,8 @@ func Initialize(config *Config) error {
 		MinTradesForCalc: 10,
 	})
 
-	log.Printf("📊 决策模块初始化: 单笔风险=%.1f%%, 总预算=%.1f%%, 分析间隔=%d分钟",
-		config.MaxRiskPerTrade*100, config.TotalRiskBudget*100, config.AnalysisIntervalMin)
+	log.Printf("📊 决策模块初始化: 单笔风险=%.1f%%, 总预算=%.1f%%, 最大账户回撤=%.1f%%, 分析间隔=%d分钟",
+		config.MaxRiskPerTrade*100, config.TotalRiskBudget*100, configuredMaxAccountDrawdownPct, config.AnalysisIntervalMin)
 
 	// 输出当前统计
 	stats := GetStatistics()

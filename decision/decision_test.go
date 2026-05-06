@@ -5,6 +5,7 @@ package decision
 // 覆盖需求: 3.1, 3.2, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10
 
 import (
+	"nofx/logger"
 	"nofx/market"
 	"strings"
 	"testing"
@@ -68,6 +69,111 @@ func newOpenLongDecision(symbol string, price float64) *Decision {
 		TakeProfit:      price * 1.20,
 		Confidence:      80,
 		MinHoldMinutes:  30,
+	}
+}
+
+func TestValidateOpenDecision_RollingGateRequiresHigherConfidence(t *testing.T) {
+	ctx := newTestContext()
+	ctx.MarketDataMap["BCHUSDT"] = newTestMarketData(100)
+	ctx.PerformanceGates = &logger.RollingPerformanceSnapshot{
+		SymbolGates: map[string]logger.PerformanceGate{
+			"BCHUSDT": {
+				Key:            "BCHUSDT",
+				Scope:          "symbol",
+				State:          "penalize",
+				MinConfidence:  85,
+				RiskMultiplier: 0.5,
+				Reason:         "测试降权",
+			},
+		},
+		SideGates: map[string]logger.PerformanceGate{},
+	}
+
+	d := newOpenLongDecision("BCHUSDT", 100)
+	d.Confidence = 80
+	if err := validateOpenDecision(d, ctx); err == nil {
+		t.Fatal("rolling gate 降权后低置信度开仓应失败")
+	}
+
+	d.Confidence = 90
+	if err := validateOpenDecision(d, ctx); err != nil {
+		t.Fatalf("达到门槛的开仓不应被 gate 阻止: %v", err)
+	}
+}
+
+func TestValidateOpenDecision_RollingGateBlocksSymbol(t *testing.T) {
+	ctx := newTestContext()
+	ctx.MarketDataMap["BCHUSDT"] = newTestMarketData(100)
+	ctx.PerformanceGates = &logger.RollingPerformanceSnapshot{
+		SymbolGates: map[string]logger.PerformanceGate{
+			"BCHUSDT": {
+				Key:            "BCHUSDT",
+				Scope:          "symbol",
+				State:          "block",
+				RiskMultiplier: 0,
+				CooldownUntil:  time.Now().Add(time.Hour),
+				Reason:         "测试禁交易",
+			},
+		},
+		SideGates: map[string]logger.PerformanceGate{},
+	}
+
+	d := newOpenLongDecision("BCHUSDT", 100)
+	d.Confidence = 95
+	if err := validateOpenDecision(d, ctx); err == nil {
+		t.Fatal("rolling gate block 状态应阻止开仓")
+	}
+}
+
+// ============================================================================
+// 需求: 策略亏损缓解 — 最大账户回撤硬停
+// ============================================================================
+
+func TestNormalizeAccountDrawdownPct(t *testing.T) {
+	tests := []struct {
+		name string
+		in   float64
+		want float64
+	}{
+		{name: "百分比形式", in: 20.0, want: 20.0},
+		{name: "比例形式", in: 0.2, want: 20.0},
+		{name: "空值使用默认值", in: 0, want: defaultMaxAccountDrawdownPct},
+		{name: "负值使用默认值", in: -1, want: defaultMaxAccountDrawdownPct},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeAccountDrawdownPct(tt.in)
+			if got != tt.want {
+				t.Fatalf("normalizeAccountDrawdownPct(%v)=%v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsAccountDrawdownHardStopped(t *testing.T) {
+	ctx := newTestContext()
+	ctx.MaxAccountDrawdownPct = 20.0
+
+	ctx.Account.TotalPnLPct = -25.0
+	if !isAccountDrawdownHardStopped(ctx) {
+		t.Fatal("回撤超过阈值时应触发最大账户回撤硬停")
+	}
+
+	ctx.Account.TotalPnLPct = -20.0
+	if !isAccountDrawdownHardStopped(ctx) {
+		t.Fatal("回撤等于阈值时应触发最大账户回撤硬停")
+	}
+
+	ctx.Account.TotalPnLPct = -19.9
+	if isAccountDrawdownHardStopped(ctx) {
+		t.Fatal("回撤未达到阈值时不应触发最大账户回撤硬停")
+	}
+
+	ctx.MaxAccountDrawdownPct = 0
+	ctx.Account.TotalPnLPct = -99.0
+	if isAccountDrawdownHardStopped(ctx) {
+		t.Fatal("阈值为0时不应触发硬停判断")
 	}
 }
 

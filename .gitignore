@@ -12,6 +12,8 @@ nofx_test
 # Go 相关
 *.test
 *.out
+.cache/
+.tools/
 
 # 操作系统
 .DS_Store

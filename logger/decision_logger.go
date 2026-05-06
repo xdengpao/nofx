@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 )
 
@@ -58,6 +59,7 @@ type DecisionAction struct {
 	Timestamp time.Time `json:"timestamp"` // 执行时间
 	Success   bool      `json:"success"`   // 是否成功
 	Error     string    `json:"error"`     // 错误信息
+	Reasoning string    `json:"reasoning,omitempty"`
 }
 
 // DecisionLogger 决策日志记录器
@@ -286,6 +288,17 @@ type TradeOutcome struct {
 	OpenTime      time.Time `json:"open_time"`      // 开仓时间
 	CloseTime     time.Time `json:"close_time"`     // 平仓时间
 	WasStopLoss   bool      `json:"was_stop_loss"`  // 是否止损
+	OpenReason    string    `json:"open_reason,omitempty"`
+	CloseReason   string    `json:"close_reason,omitempty"`
+}
+
+// UnmatchedAction 表示无法配对为完整交易的执行动作。
+type UnmatchedAction struct {
+	Timestamp time.Time `json:"timestamp"`
+	Symbol    string    `json:"symbol"`
+	Side      string    `json:"side"`
+	Action    string    `json:"action"`
+	Reason    string    `json:"reason"`
 }
 
 // PerformanceAnalysis 交易表现分析
@@ -299,9 +312,12 @@ type PerformanceAnalysis struct {
 	ProfitFactor  float64                       `json:"profit_factor"`  // 盈亏比
 	SharpeRatio   float64                       `json:"sharpe_ratio"`   // 夏普比率（风险调整后收益）
 	RecentTrades  []TradeOutcome                `json:"recent_trades"`  // 最近N笔交易
-	SymbolStats   map[string]*SymbolPerformance `json:"symbol_stats"`   // 各币种表现
-	BestSymbol    string                        `json:"best_symbol"`    // 表现最好的币种
-	WorstSymbol   string                        `json:"worst_symbol"`   // 表现最差的币种
+	Unmatched     []UnmatchedAction             `json:"unmatched,omitempty"`
+	Rolling       *RollingPerformanceSnapshot   `json:"rolling,omitempty"`
+	Execution     ExecutionQualityStats         `json:"execution_quality"`
+	SymbolStats   map[string]*SymbolPerformance `json:"symbol_stats"` // 各币种表现
+	BestSymbol    string                        `json:"best_symbol"`  // 表现最好的币种
+	WorstSymbol   string                        `json:"worst_symbol"` // 表现最差的币种
 }
 
 // SymbolPerformance 币种表现统计
@@ -313,6 +329,461 @@ type SymbolPerformance struct {
 	WinRate       float64 `json:"win_rate"`       // 胜率
 	TotalPnL      float64 `json:"total_pn_l"`     // 总盈亏
 	AvgPnL        float64 `json:"avg_pn_l"`       // 平均盈亏
+}
+
+// RollingPerformanceSnapshot 表示策略门控所需的滚动绩效视图。
+type RollingPerformanceSnapshot struct {
+	SymbolGates              map[string]PerformanceGate `json:"symbol_gates"`
+	SideGates                map[string]PerformanceGate `json:"side_gates"`
+	Recent10                 RollingStats               `json:"recent_10"`
+	Recent20                 RollingStats               `json:"recent_20"`
+	EffectiveMaxRiskPerTrade float64                    `json:"effective_max_risk_per_trade"`
+	Reasons                  []string                   `json:"reasons,omitempty"`
+}
+
+// PerformanceGate 是开仓验证层消费的 symbol/side 门控结果。
+type PerformanceGate struct {
+	Key            string    `json:"key"`
+	Scope          string    `json:"scope"`
+	State          string    `json:"state"` // allow, penalize, block
+	TradeCount     int       `json:"trade_count"`
+	TotalPnL       float64   `json:"total_pn_l"`
+	WinRate        float64   `json:"win_rate"`
+	ProfitFactor   float64   `json:"profit_factor"`
+	MinConfidence  int       `json:"min_confidence"`
+	RiskMultiplier float64   `json:"risk_multiplier"`
+	CooldownUntil  time.Time `json:"cooldown_until,omitempty"`
+	Reason         string    `json:"reason,omitempty"`
+}
+
+// RollingStats 是一组交易窗口的基础统计。
+type RollingStats struct {
+	TradeCount   int     `json:"trade_count"`
+	TotalPnL     float64 `json:"total_pn_l"`
+	WinRate      float64 `json:"win_rate"`
+	ProfitFactor float64 `json:"profit_factor"`
+}
+
+// ExecutionQualityStats 汇总执行失败质量指标。
+type ExecutionQualityStats struct {
+	TotalActions            int     `json:"total_actions"`
+	PartialCloseAttempts    int     `json:"partial_close_attempts"`
+	PartialCloseFailures    int     `json:"partial_close_failures"`
+	PartialCloseFailureRate float64 `json:"partial_close_failure_rate"`
+	AIFailureCount          int     `json:"ai_failure_count"`
+	UnmatchedActionCount    int     `json:"unmatched_action_count"`
+}
+
+type openPositionTrace struct {
+	symbol    string
+	side      string
+	price     float64
+	time      time.Time
+	quantity  float64
+	leverage  int
+	reasoning string
+}
+
+// BuildTradeOutcomes 将决策日志中的开平仓动作配对为可复盘的闭合交易。
+func BuildTradeOutcomes(records []*DecisionRecord) ([]TradeOutcome, []UnmatchedAction) {
+	if len(records) == 0 {
+		return []TradeOutcome{}, []UnmatchedAction{}
+	}
+
+	sortedRecords := append([]*DecisionRecord(nil), records...)
+	sort.SliceStable(sortedRecords, func(i, j int) bool {
+		return sortedRecords[i].Timestamp.Before(sortedRecords[j].Timestamp)
+	})
+
+	openPositions := make(map[string][]openPositionTrace)
+	var outcomes []TradeOutcome
+	var unmatched []UnmatchedAction
+
+	for _, record := range sortedRecords {
+		reasoningByAction := extractDecisionReasoning(record.DecisionJSON)
+		for _, action := range record.Decisions {
+			if !action.Success {
+				continue
+			}
+
+			side, ok := actionSide(action.Action)
+			if !ok || action.Symbol == "" {
+				continue
+			}
+
+			actionTime := action.Timestamp
+			if actionTime.IsZero() {
+				actionTime = record.Timestamp
+			}
+			reasoning := action.Reasoning
+			if reasoning == "" {
+				reasoning = reasoningByAction[actionReasonKey(action.Symbol, action.Action)]
+			}
+
+			key := action.Symbol + "_" + side
+			switch action.Action {
+			case "open_long", "open_short":
+				openPositions[key] = append(openPositions[key], openPositionTrace{
+					symbol:    action.Symbol,
+					side:      side,
+					price:     action.Price,
+					time:      actionTime,
+					quantity:  action.Quantity,
+					leverage:  action.Leverage,
+					reasoning: reasoning,
+				})
+			case "close_long", "close_short", "auto_close_long", "auto_close_short":
+				opens := openPositions[key]
+				if len(opens) == 0 {
+					unmatched = append(unmatched, UnmatchedAction{
+						Timestamp: actionTime,
+						Symbol:    action.Symbol,
+						Side:      side,
+						Action:    action.Action,
+						Reason:    "missing_open",
+					})
+					continue
+				}
+
+				for _, open := range opens {
+					outcomes = append(outcomes, buildTradeOutcome(open, action, actionTime, reasoning))
+				}
+				delete(openPositions, key)
+			}
+		}
+	}
+
+	for _, opens := range openPositions {
+		for _, open := range opens {
+			unmatched = append(unmatched, UnmatchedAction{
+				Timestamp: open.time,
+				Symbol:    open.symbol,
+				Side:      open.side,
+				Action:    "open_" + open.side,
+				Reason:    "missing_close",
+			})
+		}
+	}
+
+	return outcomes, unmatched
+}
+
+var historicallyWeakSymbols = map[string]string{
+	"BCHUSDT":   "历史滚动表现偏弱，开仓需降权",
+	"ASTERUSDT": "历史滚动表现偏弱，开仓需降权",
+	"LTCUSDT":   "历史滚动表现偏弱，开仓需降权",
+	"XRPUSDT":   "历史滚动表现偏弱，开仓需降权",
+}
+
+// BuildRollingPerformance 基于闭合交易生成 symbol/side 门控和动态风险建议。
+func BuildRollingPerformance(outcomes []TradeOutcome, now time.Time) *RollingPerformanceSnapshot {
+	snapshot := &RollingPerformanceSnapshot{
+		SymbolGates:              make(map[string]PerformanceGate),
+		SideGates:                make(map[string]PerformanceGate),
+		Recent10:                 rollingStats(lastTrades(outcomes, 10)),
+		Recent20:                 rollingStats(lastTrades(outcomes, 20)),
+		EffectiveMaxRiskPerTrade: 0.02,
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	if snapshot.Recent20.TradeCount >= 20 && snapshot.Recent20.ProfitFactor < 0.8 {
+		snapshot.EffectiveMaxRiskPerTrade = 0.005
+		snapshot.Reasons = append(snapshot.Reasons, "最近20笔PF低于0.8，单笔风险降至0.5%")
+	} else if snapshot.Recent10.TradeCount >= 10 && snapshot.Recent10.ProfitFactor < 1.0 {
+		snapshot.EffectiveMaxRiskPerTrade = 0.01
+		snapshot.Reasons = append(snapshot.Reasons, "最近10笔PF低于1.0，单笔风险降至1%")
+	}
+
+	symbols := make(map[string]struct{})
+	for _, outcome := range outcomes {
+		if outcome.Symbol != "" {
+			symbols[outcome.Symbol] = struct{}{}
+		}
+	}
+	for symbol := range historicallyWeakSymbols {
+		symbols[symbol] = struct{}{}
+	}
+	for symbol := range symbols {
+		trades := filterTrades(outcomes, func(outcome TradeOutcome) bool {
+			return outcome.Symbol == symbol
+		})
+		snapshot.SymbolGates[symbol] = buildSymbolGate(symbol, trades, now)
+	}
+
+	for _, side := range []string{"long", "short"} {
+		trades := filterTrades(outcomes, func(outcome TradeOutcome) bool {
+			return outcome.Side == side
+		})
+		snapshot.SideGates[side] = buildSideGate(side, trades)
+	}
+
+	return snapshot
+}
+
+func buildSymbolGate(symbol string, trades []TradeOutcome, now time.Time) PerformanceGate {
+	gate := PerformanceGate{
+		Key:            symbol,
+		Scope:          "symbol",
+		State:          "allow",
+		RiskMultiplier: 1,
+	}
+
+	recent8 := rollingStats(lastTrades(trades, 8))
+	recent5 := rollingStats(lastTrades(trades, 5))
+	stats := recent8
+	if stats.TradeCount == 0 {
+		stats = recent5
+	}
+	gate.TradeCount = stats.TradeCount
+	gate.TotalPnL = stats.TotalPnL
+	gate.WinRate = stats.WinRate
+	gate.ProfitFactor = stats.ProfitFactor
+
+	if recent8.TradeCount >= 8 && recent8.ProfitFactor < 0.5 {
+		cooldownUntil := latestTradeCloseTime(trades)
+		if cooldownUntil.IsZero() {
+			cooldownUntil = now
+		}
+		cooldownUntil = cooldownUntil.Add(24 * time.Hour)
+		if now.Before(cooldownUntil) {
+			gate.State = "block"
+			gate.MinConfidence = 95
+			gate.RiskMultiplier = 0
+			gate.CooldownUntil = cooldownUntil
+			gate.Reason = "最近8笔PF低于0.5，进入24小时禁交易冷却"
+			return gate
+		}
+		gate.State = "penalize"
+		gate.MinConfidence = 90
+		gate.RiskMultiplier = 0.5
+		gate.Reason = "最近8笔PF低于0.5，禁交易冷却已过但仍需降权"
+		return gate
+	}
+	if recent5.TradeCount >= 5 && recent5.ProfitFactor < 0.8 && recent5.TotalPnL < 0 {
+		gate.State = "penalize"
+		gate.MinConfidence = 85
+		gate.RiskMultiplier = 0.5
+		gate.Reason = "最近5笔PF低于0.8且总PnL为负"
+		return gate
+	}
+	if reason, ok := historicallyWeakSymbols[symbol]; ok {
+		gate.State = "penalize"
+		gate.MinConfidence = 85
+		gate.RiskMultiplier = 0.5
+		gate.Reason = reason
+	}
+	return gate
+}
+
+func buildSideGate(side string, trades []TradeOutcome) PerformanceGate {
+	stats := rollingStats(lastTrades(trades, 20))
+	gate := PerformanceGate{
+		Key:            side,
+		Scope:          "side",
+		State:          "allow",
+		TradeCount:     stats.TradeCount,
+		TotalPnL:       stats.TotalPnL,
+		WinRate:        stats.WinRate,
+		ProfitFactor:   stats.ProfitFactor,
+		RiskMultiplier: 1,
+	}
+
+	if stats.TradeCount >= 20 && stats.ProfitFactor < 0.8 {
+		gate.State = "penalize"
+		gate.MinConfidence = 90
+		gate.RiskMultiplier = 0.5
+		gate.Reason = "最近20笔同方向PF低于0.8"
+		return gate
+	}
+	if side == "short" {
+		gate.State = "penalize"
+		gate.MinConfidence = 90
+		gate.RiskMultiplier = 0.5
+		gate.Reason = "历史空单侧亏损贡献较大，默认降权"
+	}
+	return gate
+}
+
+func rollingStats(trades []TradeOutcome) RollingStats {
+	stats := RollingStats{TradeCount: len(trades)}
+	var wins, losses int
+	var grossWin, grossLoss float64
+	for _, trade := range trades {
+		stats.TotalPnL += trade.PnL
+		if trade.PnL > 0 {
+			wins++
+			grossWin += trade.PnL
+		} else if trade.PnL < 0 {
+			losses++
+			grossLoss += -trade.PnL
+		}
+	}
+	if stats.TradeCount > 0 {
+		stats.WinRate = float64(wins) / float64(stats.TradeCount) * 100
+	}
+	if grossLoss > 0 {
+		stats.ProfitFactor = grossWin / grossLoss
+	} else if grossWin > 0 {
+		stats.ProfitFactor = 999
+	}
+	_ = losses
+	return stats
+}
+
+func lastTrades(trades []TradeOutcome, n int) []TradeOutcome {
+	if n <= 0 || len(trades) <= n {
+		return append([]TradeOutcome(nil), trades...)
+	}
+	return append([]TradeOutcome(nil), trades[len(trades)-n:]...)
+}
+
+func filterTrades(trades []TradeOutcome, keep func(TradeOutcome) bool) []TradeOutcome {
+	var filtered []TradeOutcome
+	for _, trade := range trades {
+		if keep(trade) {
+			filtered = append(filtered, trade)
+		}
+	}
+	return filtered
+}
+
+func latestTradeCloseTime(trades []TradeOutcome) time.Time {
+	var latest time.Time
+	for _, trade := range trades {
+		if latest.IsZero() || trade.CloseTime.After(latest) {
+			latest = trade.CloseTime
+		}
+	}
+	return latest
+}
+
+func BuildExecutionQuality(records []*DecisionRecord, unmatchedCount int) ExecutionQualityStats {
+	var stats ExecutionQualityStats
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		if !record.Success && record.ErrorMessage != "" {
+			stats.AIFailureCount++
+		}
+		for _, action := range record.Decisions {
+			stats.TotalActions++
+			if action.Action == "partial_close" {
+				stats.PartialCloseAttempts++
+				if !action.Success {
+					stats.PartialCloseFailures++
+				}
+			}
+		}
+	}
+	if stats.PartialCloseAttempts > 0 {
+		stats.PartialCloseFailureRate = float64(stats.PartialCloseFailures) / float64(stats.PartialCloseAttempts) * 100
+	}
+	stats.UnmatchedActionCount = unmatchedCount
+	return stats
+}
+
+func buildTradeOutcome(open openPositionTrace, closeAction DecisionAction, closeTime time.Time, closeReason string) TradeOutcome {
+	leverage := open.leverage
+	if leverage <= 0 {
+		leverage = 1
+	}
+
+	var pnl float64
+	if open.side == "long" {
+		pnl = open.quantity * (closeAction.Price - open.price)
+	} else {
+		pnl = open.quantity * (open.price - closeAction.Price)
+	}
+
+	positionValue := open.quantity * open.price
+	marginUsed := positionValue / float64(leverage)
+	pnlPct := 0.0
+	if marginUsed > 0 {
+		pnlPct = (pnl / marginUsed) * 100
+	}
+
+	return TradeOutcome{
+		Symbol:        open.symbol,
+		Side:          open.side,
+		Quantity:      open.quantity,
+		Leverage:      leverage,
+		OpenPrice:     open.price,
+		ClosePrice:    closeAction.Price,
+		PositionValue: positionValue,
+		MarginUsed:    marginUsed,
+		PnL:           pnl,
+		PnLPct:        pnlPct,
+		Duration:      closeTime.Sub(open.time).String(),
+		OpenTime:      open.time,
+		CloseTime:     closeTime,
+		WasStopLoss:   pnl < 0,
+		OpenReason:    open.reasoning,
+		CloseReason:   closeReason,
+	}
+}
+
+func actionSide(action string) (string, bool) {
+	switch action {
+	case "open_long", "close_long", "auto_close_long":
+		return "long", true
+	case "open_short", "close_short", "auto_close_short":
+		return "short", true
+	default:
+		return "", false
+	}
+}
+
+func extractDecisionReasoning(decisionJSON string) map[string]string {
+	result := make(map[string]string)
+	if decisionJSON == "" {
+		return result
+	}
+
+	var decisions []struct {
+		Symbol    string `json:"symbol"`
+		Action    string `json:"action"`
+		Reasoning string `json:"reasoning"`
+	}
+	if err := json.Unmarshal([]byte(decisionJSON), &decisions); err != nil {
+		return result
+	}
+
+	for _, d := range decisions {
+		if d.Symbol == "" || d.Action == "" || d.Reasoning == "" {
+			continue
+		}
+		result[actionReasonKey(d.Symbol, d.Action)] = d.Reasoning
+	}
+	return result
+}
+
+func actionReasonKey(symbol, action string) string {
+	return symbol + "\x00" + action
+}
+
+func earliestRecordEventTime(records []*DecisionRecord) time.Time {
+	var earliest time.Time
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		if earliest.IsZero() || record.Timestamp.Before(earliest) {
+			earliest = record.Timestamp
+		}
+		for _, action := range record.Decisions {
+			actionTime := action.Timestamp
+			if actionTime.IsZero() {
+				actionTime = record.Timestamp
+			}
+			if !actionTime.IsZero() && (earliest.IsZero() || actionTime.Before(earliest)) {
+				earliest = actionTime
+			}
+		}
+	}
+	return earliest
 }
 
 // AnalyzePerformance 分析最近N个周期的交易表现
@@ -334,154 +805,51 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 		SymbolStats:  make(map[string]*SymbolPerformance),
 	}
 
-	// 追踪持仓状态：symbol_side -> {side, openPrice, openTime, quantity, leverage}
-	openPositions := make(map[string]map[string]interface{})
-
 	// 为了避免开仓记录在窗口外导致匹配失败，需要先从所有历史记录中找出未平仓的持仓
 	// 获取更多历史记录来构建完整的持仓状态（使用更大的窗口）
 	allRecords, err := l.GetLatestRecords(lookbackCycles * 3) // 扩大3倍窗口
-	if err == nil && len(allRecords) > len(records) {
-		// 先从扩大的窗口中收集所有开仓记录
-		for _, record := range allRecords {
-			for _, action := range record.Decisions {
-				if !action.Success {
-					continue
-				}
-
-				symbol := action.Symbol
-				side := ""
-				if action.Action == "open_long" || action.Action == "close_long" {
-					side = "long"
-				} else if action.Action == "open_short" || action.Action == "close_short" {
-					side = "short"
-				}
-				posKey := symbol + "_" + side
-
-				switch action.Action {
-				case "open_long", "open_short":
-					// 记录开仓
-					openPositions[posKey] = map[string]interface{}{
-						"side":      side,
-						"openPrice": action.Price,
-						"openTime":  action.Timestamp,
-						"quantity":  action.Quantity,
-						"leverage":  action.Leverage,
-					}
-				case "close_long", "close_short":
-					// 移除已平仓记录
-					delete(openPositions, posKey)
-				}
-			}
-		}
+	if err != nil || len(allRecords) == 0 {
+		allRecords = records
 	}
 
-	// 遍历分析窗口内的记录，生成交易结果
-	for _, record := range records {
-		for _, action := range record.Decisions {
-			if !action.Success {
-				continue
+	outcomes, unmatched := BuildTradeOutcomes(allRecords)
+	analysis.Rolling = BuildRollingPerformance(outcomes, time.Now())
+	analysis.Execution = BuildExecutionQuality(allRecords, len(unmatched))
+	windowStart := earliestRecordEventTime(records)
+	for _, outcome := range outcomes {
+		if !windowStart.IsZero() && outcome.CloseTime.Before(windowStart) {
+			continue
+		}
+		analysis.RecentTrades = append(analysis.RecentTrades, outcome)
+		analysis.TotalTrades++
+
+		// 分类交易：盈利、亏损、持平（避免将pnl=0算入亏损）
+		if outcome.PnL > 0 {
+			analysis.WinningTrades++
+			analysis.AvgWin += outcome.PnL
+		} else if outcome.PnL < 0 {
+			analysis.LosingTrades++
+			analysis.AvgLoss += outcome.PnL
+		}
+
+		// 更新币种统计
+		if _, exists := analysis.SymbolStats[outcome.Symbol]; !exists {
+			analysis.SymbolStats[outcome.Symbol] = &SymbolPerformance{
+				Symbol: outcome.Symbol,
 			}
-
-			symbol := action.Symbol
-			side := ""
-			if action.Action == "open_long" || action.Action == "close_long" {
-				side = "long"
-			} else if action.Action == "open_short" || action.Action == "close_short" {
-				side = "short"
-			}
-			posKey := symbol + "_" + side // 使用symbol_side作为key，区分多空持仓
-
-			switch action.Action {
-			case "open_long", "open_short":
-				// 更新开仓记录（可能已经在预填充时记录过了）
-				openPositions[posKey] = map[string]interface{}{
-					"side":      side,
-					"openPrice": action.Price,
-					"openTime":  action.Timestamp,
-					"quantity":  action.Quantity,
-					"leverage":  action.Leverage,
-				}
-
-			case "close_long", "close_short":
-				// 查找对应的开仓记录（可能来自预填充或当前窗口）
-				if openPos, exists := openPositions[posKey]; exists {
-					openPrice := openPos["openPrice"].(float64)
-					openTime := openPos["openTime"].(time.Time)
-					side := openPos["side"].(string)
-					quantity := openPos["quantity"].(float64)
-					leverage := openPos["leverage"].(int)
-
-					// 计算实际盈亏（USDT）
-					// 合约交易 PnL 计算：quantity × 价格差
-					// 注意：杠杆不影响绝对盈亏，只影响保证金需求
-					var pnl float64
-					if side == "long" {
-						pnl = quantity * (action.Price - openPrice)
-					} else {
-						pnl = quantity * (openPrice - action.Price)
-					}
-
-					// 计算盈亏百分比（相对保证金）
-					positionValue := quantity * openPrice
-					marginUsed := positionValue / float64(leverage)
-					pnlPct := 0.0
-					if marginUsed > 0 {
-						pnlPct = (pnl / marginUsed) * 100
-					}
-
-					// 判断是否为止损平仓（盈亏为负视为止损）
-					wasStopLoss := pnl < 0
-
-					// 记录交易结果
-					outcome := TradeOutcome{
-						Symbol:        symbol,
-						Side:          side,
-						Quantity:      quantity,
-						Leverage:      leverage,
-						OpenPrice:     openPrice,
-						ClosePrice:    action.Price,
-						PositionValue: positionValue,
-						MarginUsed:    marginUsed,
-						PnL:           pnl,
-						PnLPct:        pnlPct,
-						Duration:      action.Timestamp.Sub(openTime).String(),
-						OpenTime:      openTime,
-						CloseTime:     action.Timestamp,
-						WasStopLoss:   wasStopLoss,
-					}
-
-					analysis.RecentTrades = append(analysis.RecentTrades, outcome)
-					analysis.TotalTrades++
-
-					// 分类交易：盈利、亏损、持平（避免将pnl=0算入亏损）
-					if pnl > 0 {
-						analysis.WinningTrades++
-						analysis.AvgWin += pnl
-					} else if pnl < 0 {
-						analysis.LosingTrades++
-						analysis.AvgLoss += pnl
-					}
-					// pnl == 0 的交易不计入盈利也不计入亏损，但计入总交易数
-
-					// 更新币种统计
-					if _, exists := analysis.SymbolStats[symbol]; !exists {
-						analysis.SymbolStats[symbol] = &SymbolPerformance{
-							Symbol: symbol,
-						}
-					}
-					stats := analysis.SymbolStats[symbol]
-					stats.TotalTrades++
-					stats.TotalPnL += pnl
-					if pnl > 0 {
-						stats.WinningTrades++
-					} else if pnl < 0 {
-						stats.LosingTrades++
-					}
-
-					// 移除已平仓记录
-					delete(openPositions, posKey)
-				}
-			}
+		}
+		stats := analysis.SymbolStats[outcome.Symbol]
+		stats.TotalTrades++
+		stats.TotalPnL += outcome.PnL
+		if outcome.PnL > 0 {
+			stats.WinningTrades++
+		} else if outcome.PnL < 0 {
+			stats.LosingTrades++
+		}
+	}
+	for _, item := range unmatched {
+		if windowStart.IsZero() || !item.Timestamp.Before(windowStart) {
+			analysis.Unmatched = append(analysis.Unmatched, item)
 		}
 	}
 

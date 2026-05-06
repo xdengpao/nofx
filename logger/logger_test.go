@@ -43,6 +43,111 @@ func newRecord(success bool) *DecisionRecord {
 	}
 }
 
+func TestBuildTradeOutcomes_AutoCloseAndReasoningBackfill(t *testing.T) {
+	baseTime := time.Date(2026, 5, 6, 10, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{
+		{
+			Timestamp:    baseTime,
+			DecisionJSON: `[{"symbol":"BTCUSDT","action":"open_long","reasoning":"4H breakout"}]`,
+			Decisions: []DecisionAction{{
+				Action:    "open_long",
+				Symbol:    "BTCUSDT",
+				Quantity:  0.1,
+				Leverage:  5,
+				Price:     100,
+				Timestamp: baseTime,
+				Success:   true,
+			}},
+		},
+		{
+			Timestamp:    baseTime.Add(time.Hour),
+			DecisionJSON: `[{"symbol":"BTCUSDT","action":"auto_close_long","reasoning":"take profit filled"}]`,
+			Decisions: []DecisionAction{{
+				Action:    "auto_close_long",
+				Symbol:    "BTCUSDT",
+				Price:     110,
+				Timestamp: baseTime.Add(time.Hour),
+				Success:   true,
+			}},
+		},
+	}
+
+	outcomes, unmatched := BuildTradeOutcomes(records)
+	if len(unmatched) != 0 {
+		t.Fatalf("不应有 unmatched，实际=%v", unmatched)
+	}
+	if len(outcomes) != 1 {
+		t.Fatalf("期望1笔闭合交易，实际=%d", len(outcomes))
+	}
+	trade := outcomes[0]
+	if trade.Symbol != "BTCUSDT" || trade.Side != "long" {
+		t.Fatalf("交易标识错误: %+v", trade)
+	}
+	if trade.PnL != 1 {
+		t.Fatalf("PnL 期望 1，实际 %.4f", trade.PnL)
+	}
+	if trade.OpenReason != "4H breakout" || trade.CloseReason != "take profit filled" {
+		t.Fatalf("reasoning 回填失败: open=%q close=%q", trade.OpenReason, trade.CloseReason)
+	}
+}
+
+func TestBuildTradeOutcomes_UnmatchedCloseIsReported(t *testing.T) {
+	baseTime := time.Date(2026, 5, 6, 11, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{{
+		Timestamp: baseTime,
+		Decisions: []DecisionAction{{
+			Action:    "close_short",
+			Symbol:    "ETHUSDT",
+			Price:     2000,
+			Timestamp: baseTime,
+			Success:   true,
+		}},
+	}}
+
+	outcomes, unmatched := BuildTradeOutcomes(records)
+	if len(outcomes) != 0 {
+		t.Fatalf("不应生成闭合交易，实际=%d", len(outcomes))
+	}
+	if len(unmatched) != 1 {
+		t.Fatalf("期望1条 unmatched，实际=%d", len(unmatched))
+	}
+	if unmatched[0].Reason != "missing_open" || unmatched[0].Action != "close_short" {
+		t.Fatalf("unmatched 内容错误: %+v", unmatched[0])
+	}
+}
+
+func TestBuildRollingPerformance_SymbolAndSideGates(t *testing.T) {
+	now := time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC)
+	var outcomes []TradeOutcome
+	for i := 0; i < 8; i++ {
+		outcomes = append(outcomes, TradeOutcome{
+			Symbol:    "BCHUSDT",
+			Side:      "long",
+			PnL:       -1,
+			CloseTime: now.Add(time.Duration(i) * time.Minute),
+		})
+	}
+	for i := 0; i < 20; i++ {
+		outcomes = append(outcomes, TradeOutcome{
+			Symbol:    "TESTUSDT",
+			Side:      "short",
+			PnL:       -0.5,
+			CloseTime: now.Add(time.Duration(i+8) * time.Minute),
+		})
+	}
+
+	rolling := BuildRollingPerformance(outcomes, now)
+	if rolling.SymbolGates["BCHUSDT"].State != "block" {
+		t.Fatalf("BCHUSDT 应被 block，实际=%+v", rolling.SymbolGates["BCHUSDT"])
+	}
+	if rolling.SideGates["short"].State != "penalize" || rolling.SideGates["short"].MinConfidence != 90 {
+		t.Fatalf("short side 应被降权且置信度门槛为90，实际=%+v", rolling.SideGates["short"])
+	}
+	if rolling.EffectiveMaxRiskPerTrade != 0.005 {
+		t.Fatalf("最近20笔亏损后风险应降至0.5%%，实际=%.4f", rolling.EffectiveMaxRiskPerTrade)
+	}
+}
+
 // ============================================================================
 // 需求 11.1: LogDecision 和 GetLatestRecords 往返
 // ============================================================================

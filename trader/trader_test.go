@@ -208,6 +208,49 @@ func TestSortDecisionsByPriority_EmptyList(t *testing.T) {
 	}
 }
 
+func TestDeterminePartialClosePlan_Normal(t *testing.T) {
+	plan := determinePartialClosePlan(10, 20, 10)
+	if plan.Mode != partialCloseModeNormal {
+		t.Fatalf("期望 normal，实际=%s", plan.Mode)
+	}
+	if math.Abs(plan.CloseValue-20) > 0.0001 {
+		t.Fatalf("平仓名义额期望20，实际=%.4f", plan.CloseValue)
+	}
+	if math.Abs(plan.RemainingValue-80) > 0.0001 {
+		t.Fatalf("剩余名义额期望80，实际=%.4f", plan.RemainingValue)
+	}
+}
+
+func TestDeterminePartialClosePlan_RemainingTooSmall_FullClose(t *testing.T) {
+	plan := determinePartialClosePlan(10, 95, 10)
+	if plan.Mode != partialCloseModeFull {
+		t.Fatalf("剩余仓位过小时应自动全平，实际=%s", plan.Mode)
+	}
+	if plan.RemainingQuantity != 0 || plan.CloseQuantity != 10 {
+		t.Fatalf("全平数量错误: close=%.4f remaining=%.4f", plan.CloseQuantity, plan.RemainingQuantity)
+	}
+}
+
+func TestDeterminePartialClosePlan_CloseValueTooSmall_Skip(t *testing.T) {
+	plan := determinePartialClosePlan(10, 4, 10)
+	if plan.Mode != partialCloseModeSkip {
+		t.Fatalf("平仓名义额过小时应跳过下单，实际=%s", plan.Mode)
+	}
+	if math.Abs(plan.CloseValue-4) > 0.0001 {
+		t.Fatalf("平仓名义额期望4，实际=%.4f", plan.CloseValue)
+	}
+}
+
+func TestDeterminePartialClosePlan_SmallPositionTwentyPct_FullClose(t *testing.T) {
+	plan := determinePartialClosePlan(2.4, 20, 10)
+	if plan.Mode != partialCloseModeFull {
+		t.Fatalf("小仓位20%%分批应自动全平，实际=%s", plan.Mode)
+	}
+	if math.Abs(plan.CloseValue-24) > 0.0001 || plan.RemainingValue != 0 {
+		t.Fatalf("全平名义额错误: close=%.4f remaining=%.4f", plan.CloseValue, plan.RemainingValue)
+	}
+}
+
 func TestSortDecisionsByPriority_FullPriorityOrder(t *testing.T) {
 	decisions := []decision.Decision{
 		{Symbol: "A", Action: "wait"},

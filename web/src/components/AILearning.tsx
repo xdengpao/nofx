@@ -44,6 +44,22 @@ interface PerformanceAnalysis {
   profit_factor: number;
   sharpe_ratio: number;
   recent_trades: TradeOutcome[];
+  unmatched?: unknown[];
+  rolling?: {
+    effective_max_risk_per_trade: number;
+    recent_10: { trade_count: number; profit_factor: number; total_pn_l: number };
+    recent_20: { trade_count: number; profit_factor: number; total_pn_l: number };
+    symbol_gates: Record<string, { state: string; reason?: string; min_confidence: number }>;
+    side_gates: Record<string, { state: string; reason?: string; min_confidence: number }>;
+    reasons?: string[];
+  };
+  execution_quality?: {
+    partial_close_attempts: number;
+    partial_close_failures: number;
+    partial_close_failure_rate: number;
+    ai_failure_count: number;
+    unmatched_action_count: number;
+  };
   symbol_stats: { [key: string]: SymbolPerformance };
   best_symbol: string;
   worst_symbol: string;
@@ -107,6 +123,20 @@ export default function AILearning({ traderId }: AILearningProps) {
   const symbolStatsList = Object.values(symbolStats).filter(stat => stat != null).sort(
     (a, b) => (b.total_pn_l || 0) - (a.total_pn_l || 0)
   );
+  const rolling = performance.rolling;
+  const execution = performance.execution_quality;
+  const blockedSymbols = rolling
+    ? Object.values(rolling.symbol_gates || {}).filter((gate) => gate.state === 'block').length
+    : 0;
+  const penalizedSymbols = rolling
+    ? Object.values(rolling.symbol_gates || {}).filter((gate) => gate.state === 'penalize').length
+    : 0;
+  const penalizedSides = rolling
+    ? Object.values(rolling.side_gates || {}).filter((gate) => gate.state === 'penalize').length
+    : 0;
+  const effectiveRiskPct = rolling?.effective_max_risk_per_trade
+    ? rolling.effective_max_risk_per_trade * 100
+    : 2;
 
   return (
     <div className="space-y-8">
@@ -139,6 +169,37 @@ export default function AILearning({ traderId }: AILearningProps) {
               {t('tradesAnalyzed', language, { count: performance.total_trades })}
             </p>
           </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-3">
+        <div className="rounded-lg p-4" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
+          <div className="text-xs uppercase mb-2" style={{ color: '#848E9C' }}>Strategy Risk</div>
+          <div className="text-2xl font-bold mono" style={{ color: effectiveRiskPct < 2 ? '#F87171' : '#10B981' }}>
+            {effectiveRiskPct.toFixed(2)}%
+          </div>
+          <div className="text-xs mt-1" style={{ color: '#94A3B8' }}>max risk per trade</div>
+        </div>
+        <div className="rounded-lg p-4" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
+          <div className="text-xs uppercase mb-2" style={{ color: '#848E9C' }}>Rolling Gate</div>
+          <div className="text-2xl font-bold mono" style={{ color: blockedSymbols > 0 ? '#F87171' : '#F0B90B' }}>
+            {blockedSymbols} / {penalizedSymbols}
+          </div>
+          <div className="text-xs mt-1" style={{ color: '#94A3B8' }}>blocked / penalized symbols</div>
+        </div>
+        <div className="rounded-lg p-4" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
+          <div className="text-xs uppercase mb-2" style={{ color: '#848E9C' }}>Side Filter</div>
+          <div className="text-2xl font-bold mono" style={{ color: penalizedSides > 0 ? '#F0B90B' : '#10B981' }}>
+            {penalizedSides}
+          </div>
+          <div className="text-xs mt-1" style={{ color: '#94A3B8' }}>penalized directions</div>
+        </div>
+        <div className="rounded-lg p-4" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
+          <div className="text-xs uppercase mb-2" style={{ color: '#848E9C' }}>Execution Quality</div>
+          <div className="text-2xl font-bold mono" style={{ color: (execution?.partial_close_failures || 0) > 0 ? '#F87171' : '#10B981' }}>
+            {(execution?.partial_close_failure_rate || 0).toFixed(1)}%
+          </div>
+          <div className="text-xs mt-1" style={{ color: '#94A3B8' }}>partial close failure rate</div>
         </div>
       </div>
 

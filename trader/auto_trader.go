@@ -455,6 +455,7 @@ func (at *AutoTrader) runCycle() error {
 			Price:     0,
 			Timestamp: time.Now(),
 			Success:   false,
+			Reasoning: d.Reasoning,
 		}
 
 		if err := at.executeDecisionWithRecord(&d, &actionRecord); err != nil {
@@ -708,14 +709,24 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		// 不影响主流程，继续执行（但设置performance为nil以避免传递错误数据）
 		performance = nil
 	}
+	effectiveMaxRiskPerTrade := 0.02
+	var performanceGates *logger.RollingPerformanceSnapshot
+	if performance != nil && performance.Rolling != nil {
+		performanceGates = performance.Rolling
+		if performance.Rolling.EffectiveMaxRiskPerTrade > 0 {
+			effectiveMaxRiskPerTrade = performance.Rolling.EffectiveMaxRiskPerTrade
+		}
+	}
 
 	// 6. 构建上下文
 	ctx := &decision.Context{
-		CurrentTime:     time.Now().Format("2006-01-02 15:04:05"),
-		RuntimeMinutes:  int(time.Since(at.startTime).Minutes()),
-		CallCount:       at.callCount,
-		BTCETHLeverage:  at.config.BTCETHLeverage,  // 使用配置的杠杆倍数
-		AltcoinLeverage: at.config.AltcoinLeverage, // 使用配置的杠杆倍数
+		CurrentTime:              time.Now().Format("2006-01-02 15:04:05"),
+		RuntimeMinutes:           int(time.Since(at.startTime).Minutes()),
+		CallCount:                at.callCount,
+		BTCETHLeverage:           at.config.BTCETHLeverage,  // 使用配置的杠杆倍数
+		AltcoinLeverage:          at.config.AltcoinLeverage, // 使用配置的杠杆倍数
+		MaxRiskPerTrade:          effectiveMaxRiskPerTrade,
+		EffectiveMaxRiskPerTrade: effectiveMaxRiskPerTrade,
 		Account: decision.AccountInfo{
 			TotalEquity:      totalEquity,
 			AvailableBalance: availableBalance,
@@ -725,9 +736,10 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 			MarginUsedPct:    marginUsedPct,
 			PositionCount:    len(positionInfos),
 		},
-		Positions:      positionInfos,
-		CandidateCoins: candidateCoins,
-		Performance:    performance, // 添加历史表现分析
+		Positions:        positionInfos,
+		CandidateCoins:   candidateCoins,
+		Performance:      performance, // 添加历史表现分析
+		PerformanceGates: performanceGates,
 	}
 	// 🆕 在返回前更新持仓快照（用于下一周期检测自动平仓）
 	at.updatePositionSnapshots(positionInfos)
@@ -1419,17 +1431,80 @@ func (at *AutoTrader) executeUpdateTakeProfitWithRecord(decision *decision.Decis
 	return nil
 }
 
+const (
+	minPartialCloseOrderValueUSDT = 5.0
+	minRemainingPositionValueUSDT = 10.0
+	smallPositionFullCloseUSDT    = 25.0
+)
+
+type partialCloseMode string
+
+const (
+	partialCloseModeNormal partialCloseMode = "normal"
+	partialCloseModeFull   partialCloseMode = "full"
+	partialCloseModeSkip   partialCloseMode = "skip"
+)
+
+type partialClosePlan struct {
+	Mode                 partialCloseMode
+	CurrentPositionValue float64
+	CloseQuantity        float64
+	CloseValue           float64
+	RemainingQuantity    float64
+	RemainingValue       float64
+}
+
+func determinePartialClosePlan(totalQuantity, closePercentage, markPrice float64) partialClosePlan {
+	closeQuantity := totalQuantity * (closePercentage / 100.0)
+	remainingQuantity := totalQuantity - closeQuantity
+	if remainingQuantity < 0 {
+		remainingQuantity = 0
+	}
+
+	plan := partialClosePlan{
+		Mode:                 partialCloseModeNormal,
+		CurrentPositionValue: totalQuantity * markPrice,
+		CloseQuantity:        closeQuantity,
+		CloseValue:           closeQuantity * markPrice,
+		RemainingQuantity:    remainingQuantity,
+		RemainingValue:       remainingQuantity * markPrice,
+	}
+
+	if plan.RemainingValue > 0 && plan.RemainingValue <= minRemainingPositionValueUSDT {
+		plan.Mode = partialCloseModeFull
+		plan.CloseQuantity = totalQuantity
+		plan.CloseValue = plan.CurrentPositionValue
+		plan.RemainingQuantity = 0
+		plan.RemainingValue = 0
+		return plan
+	}
+
+	if plan.CloseValue > 0 && plan.CloseValue < minPartialCloseOrderValueUSDT {
+		if plan.CurrentPositionValue <= smallPositionFullCloseUSDT && math.Abs(closePercentage-20.0) < 0.0001 {
+			plan.Mode = partialCloseModeFull
+			plan.CloseQuantity = totalQuantity
+			plan.CloseValue = plan.CurrentPositionValue
+			plan.RemainingQuantity = 0
+			plan.RemainingValue = 0
+			return plan
+		}
+		plan.Mode = partialCloseModeSkip
+	}
+
+	return plan
+}
+
 // executePartialCloseWithRecord 执行部分平仓并记录详细信息
-func (at *AutoTrader) executePartialCloseWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
-	log.Printf("  📊 部分平仓: %s %.1f%%", decision.Symbol, decision.ClosePercentage)
+func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, actionRecord *logger.DecisionAction) error {
+	log.Printf("  📊 部分平仓: %s %.1f%%", d.Symbol, d.ClosePercentage)
 
 	// 验证百分比范围
-	if decision.ClosePercentage <= 0 || decision.ClosePercentage > 100 {
-		return fmt.Errorf("平仓百分比必须在 0-100 之间，当前: %.1f", decision.ClosePercentage)
+	if d.ClosePercentage <= 0 || d.ClosePercentage > 100 {
+		return fmt.Errorf("平仓百分比必须在 0-100 之间，当前: %.1f", d.ClosePercentage)
 	}
 
 	// 获取当前价格
-	marketData, err := market.Get(decision.Symbol)
+	marketData, err := market.Get(d.Symbol)
 	if err != nil {
 		return err
 	}
@@ -1452,14 +1527,14 @@ func (at *AutoTrader) executePartialCloseWithRecord(decision *decision.Decision,
 		if !ok {
 			continue
 		}
-		if symbol == decision.Symbol && posAmt != 0 {
+		if symbol == d.Symbol && posAmt != 0 {
 			targetPosition = pos
 			break
 		}
 	}
 
 	if targetPosition == nil {
-		return fmt.Errorf("持仓不存在: %s", decision.Symbol)
+		return fmt.Errorf("持仓不存在: %s", d.Symbol)
 	}
 
 	// 获取持仓方向和数量
@@ -1476,7 +1551,7 @@ func (at *AutoTrader) executePartialCloseWithRecord(decision *decision.Decision,
 
 	// 计算平仓数量
 	totalQuantity := math.Abs(positionAmt)
-	closeQuantity := totalQuantity * (decision.ClosePercentage / 100.0)
+	closeQuantity := totalQuantity * (d.ClosePercentage / 100.0)
 	actionRecord.Quantity = closeQuantity
 
 	// ✅ Layer 2: 最小仓位检查（防止产生小额剩余）
@@ -1485,37 +1560,57 @@ func (at *AutoTrader) executePartialCloseWithRecord(decision *decision.Decision,
 		return fmt.Errorf("failed to parse mark price, cannot perform minimum position check")
 	}
 
-	currentPositionValue := totalQuantity * markPrice
-	remainingQuantity := totalQuantity - closeQuantity
-	remainingValue := remainingQuantity * markPrice
+	plan := determinePartialClosePlan(totalQuantity, d.ClosePercentage, markPrice)
+	closeQuantity = plan.CloseQuantity
+	remainingQuantity := plan.RemainingQuantity
+	actionRecord.Quantity = closeQuantity
 
-	const MIN_POSITION_VALUE = 10.0 // 最小持仓价值 10 USDT（對齊交易所底线，小仓位建议直接全平）
-
-	if remainingValue > 0 && remainingValue <= MIN_POSITION_VALUE {
+	if plan.Mode == partialCloseModeFull {
 		log.Printf("⚠️ 检测到 partial_close 后剩余仓位 %.2f USDT < %.0f USDT",
-			remainingValue, MIN_POSITION_VALUE)
+			plan.RemainingValue, minRemainingPositionValueUSDT)
 		log.Printf("  → 当前仓位价值: %.2f USDT, 平仓 %.1f%%, 剩余: %.2f USDT",
-			currentPositionValue, decision.ClosePercentage, remainingValue)
+			plan.CurrentPositionValue, d.ClosePercentage, plan.RemainingValue)
 		log.Printf("  → 自动修正为全部平仓，避免产生无法平仓的小额剩余")
 
 		// 🔄 自动修正为全部平仓
 		if positionSide == "LONG" {
-			decision.Action = "close_long"
+			d.Action = "close_long"
 			log.Printf("  ✓ 已修正为: close_long")
-			return at.executeCloseLongWithRecord(decision, actionRecord)
+			return at.executeCloseLongWithRecord(d, actionRecord)
 		} else {
-			decision.Action = "close_short"
+			d.Action = "close_short"
 			log.Printf("  ✓ 已修正为: close_short")
-			return at.executeCloseShortWithRecord(decision, actionRecord)
+			return at.executeCloseShortWithRecord(d, actionRecord)
 		}
+	}
+
+	if plan.Mode == partialCloseModeSkip {
+		log.Printf("⚠️ 跳过 partial_close: 本次平仓名义额 %.2f USDT < %.2f USDT",
+			plan.CloseValue, minPartialCloseOrderValueUSDT)
+		log.Printf("  → 当前仓位价值: %.2f USDT, 平仓 %.1f%%, 预计剩余: %.2f USDT",
+			plan.CurrentPositionValue, d.ClosePercentage, plan.RemainingValue)
+		actionRecord.Quantity = 0
+		actionRecord.Reasoning = fmt.Sprintf("跳过小额部分平仓: 名义额 %.2f USDT < %.2f USDT",
+			plan.CloseValue, minPartialCloseOrderValueUSDT)
+
+		if d.NewStopLoss > 0 {
+			if err := at.trader.SetStopLoss(d.Symbol, positionSide, totalQuantity, d.NewStopLoss); err != nil {
+				log.Printf("  ⚠️ 小额部分平仓跳过后设置保护止损失败: %v", err)
+			} else {
+				log.Printf("  ✓ 小额部分平仓跳过后已更新保护止损: %.4f", d.NewStopLoss)
+			}
+		}
+
+		decision.OnPartialClose(d.Symbol, d.TrancheIndex, 0, d.NewStopLoss)
+		return nil
 	}
 
 	// 执行平仓
 	var order map[string]interface{}
 	if positionSide == "LONG" {
-		order, err = at.trader.CloseLong(decision.Symbol, closeQuantity)
+		order, err = at.trader.CloseLong(d.Symbol, closeQuantity)
 	} else {
-		order, err = at.trader.CloseShort(decision.Symbol, closeQuantity)
+		order, err = at.trader.CloseShort(d.Symbol, closeQuantity)
 	}
 
 	if err != nil {
@@ -1528,34 +1623,34 @@ func (at *AutoTrader) executePartialCloseWithRecord(decision *decision.Decision,
 	}
 
 	log.Printf("  ✓ 部分平仓成功: 平仓 %.4f (%.1f%%), 剩余 %.4f",
-		closeQuantity, decision.ClosePercentage, remainingQuantity)
+		closeQuantity, d.ClosePercentage, remainingQuantity)
 
 	// 🔧 FIX: 部分平仓后重新设置止盈止损（基于剩余数量）
 	// 币安会自动取消原来的止盈止损订单（因为数量不匹配），所以必须重新设置
-	if decision.NewStopLoss > 0 || decision.NewTakeProfit > 0 {
+	if d.NewStopLoss > 0 || d.NewTakeProfit > 0 {
 		log.Printf("  🎯 更新剩余仓位的止盈止损...")
 
 		// 设置新止损（基于剩余数量）
-		if decision.NewStopLoss > 0 {
-			if err := at.trader.SetStopLoss(decision.Symbol, positionSide, remainingQuantity, decision.NewStopLoss); err != nil {
+		if d.NewStopLoss > 0 {
+			if err := at.trader.SetStopLoss(d.Symbol, positionSide, remainingQuantity, d.NewStopLoss); err != nil {
 				log.Printf("  ⚠️ 设置新止损失败: %v", err)
 			} else {
-				log.Printf("  ✓ 已设置新止损: %.4f (数量: %.4f)", decision.NewStopLoss, remainingQuantity)
+				log.Printf("  ✓ 已设置新止损: %.4f (数量: %.4f)", d.NewStopLoss, remainingQuantity)
 			}
 		}
 
 		// 设置新止盈（基于剩余数量）
-		if decision.NewTakeProfit > 0 {
-			if err := at.trader.SetTakeProfit(decision.Symbol, positionSide, remainingQuantity, decision.NewTakeProfit); err != nil {
+		if d.NewTakeProfit > 0 {
+			if err := at.trader.SetTakeProfit(d.Symbol, positionSide, remainingQuantity, d.NewTakeProfit); err != nil {
 				log.Printf("  ⚠️ 设置新止盈失败: %v", err)
 			} else {
-				log.Printf("  ✓ 已设置新止盈: %.4f (数量: %.4f)", decision.NewTakeProfit, remainingQuantity)
+				log.Printf("  ✓ 已设置新止盈: %.4f (数量: %.4f)", d.NewTakeProfit, remainingQuantity)
 			}
 		}
 	} else {
 		// ⚠️ AI 没有提供新的止盈止损，剩余仓位将失去保护
 		log.Printf("  ⚠️⚠️⚠️ 警告: 部分平仓后AI未提供新的止盈止损价格")
-		log.Printf("  → 剩余仓位 %.4f (价值 %.2f USDT) 目前没有止盈止损保护", remainingQuantity, remainingValue)
+		log.Printf("  → 剩余仓位 %.4f (价值 %.2f USDT) 目前没有止盈止损保护", remainingQuantity, plan.RemainingValue)
 		log.Printf("  → 建议: 在 partial_close 决策中包含 new_stop_loss 和 new_take_profit 字段")
 	}
 

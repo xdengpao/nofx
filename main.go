@@ -203,13 +203,14 @@ func initializeModules(cfg *config.Config) error {
 
 	// 2. 初始化决策模块
 	decisionConfig := &decision.Config{
-		MaxRiskPerTrade:     0.02,
-		TotalRiskBudget:     0.08,
-		AnalysisIntervalMin: 15,
-		BTCETHLeverage:      cfg.Leverage.BTCETHLeverage,
-		AltcoinLeverage:     cfg.Leverage.AltcoinLeverage,
-		DataDir:             DefaultDataDir,
-		RiskFreeRate:        0.0,
+		MaxRiskPerTrade:       0.02,
+		TotalRiskBudget:       0.08,
+		MaxAccountDrawdownPct: cfg.MaxDrawdown,
+		AnalysisIntervalMin:   15,
+		BTCETHLeverage:        cfg.Leverage.BTCETHLeverage,
+		AltcoinLeverage:       cfg.Leverage.AltcoinLeverage,
+		DataDir:               DefaultDataDir,
+		RiskFreeRate:          0.0,
 	}
 
 	if err := decision.Initialize(decisionConfig); err != nil {
@@ -315,10 +316,10 @@ func printTradingMode(cfg *config.Config) {
 
 	// 风险配置
 	if cfg.MaxDailyLoss > 0 {
-		fmt.Printf("  📉 日最大亏损限制: %.1f%%\n", cfg.MaxDailyLoss*100)
+		fmt.Printf("  📉 日最大亏损限制: %.1f%%\n", formatPercentConfig(cfg.MaxDailyLoss))
 	}
 	if cfg.MaxDrawdown > 0 {
-		fmt.Printf("  📉 最大回撤限制: %.1f%%\n", cfg.MaxDrawdown*100)
+		fmt.Printf("  📉 最大回撤限制: %.1f%%\n", formatPercentConfig(cfg.MaxDrawdown))
 	}
 
 	fmt.Println()
@@ -327,6 +328,13 @@ func printTradingMode(cfg *config.Config) {
 	fmt.Println("按 Ctrl+C 停止运行")
 	fmt.Println(strings.Repeat("═", 60))
 	fmt.Println()
+}
+
+func formatPercentConfig(value float64) float64 {
+	if value <= 1 {
+		return value * 100
+	}
+	return value
 }
 
 // gracefulShutdown 优雅退出

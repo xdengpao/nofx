@@ -276,13 +276,14 @@ type PersistentData struct {
 
 // Config 配置结构
 type Config struct {
-	MaxRiskPerTrade     float64 `json:"max_risk_per_trade"`
-	TotalRiskBudget     float64 `json:"total_risk_budget"`
-	AnalysisIntervalMin int     `json:"analysis_interval_min"`
-	BTCETHLeverage      int     `json:"btc_eth_leverage"`
-	AltcoinLeverage     int     `json:"altcoin_leverage"`
-	DataDir             string  `json:"data_dir"`
-	RiskFreeRate        float64 `json:"risk_free_rate"`
+	MaxRiskPerTrade       float64 `json:"max_risk_per_trade"`
+	TotalRiskBudget       float64 `json:"total_risk_budget"`
+	MaxAccountDrawdownPct float64 `json:"max_account_drawdown_pct"`
+	AnalysisIntervalMin   int     `json:"analysis_interval_min"`
+	BTCETHLeverage        int     `json:"btc_eth_leverage"`
+	AltcoinLeverage       int     `json:"altcoin_leverage"`
+	DataDir               string  `json:"data_dir"`
+	RiskFreeRate          float64 `json:"risk_free_rate"`
 }
 
 // SharpeConfig 夏普比率配置

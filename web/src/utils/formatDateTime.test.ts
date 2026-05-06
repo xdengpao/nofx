@@ -14,7 +14,7 @@ describe('Property 50: 时间格式化一致性', () => {
         fc.date({
           min: new Date('1970-01-01T00:00:00Z'),
           max: new Date('2099-12-31T23:59:59Z'),
-        }),
+        }).filter((date) => !Number.isNaN(date.getTime())),
         (date: Date) => {
           const iso = date.toISOString();
           const result = formatDateTime(iso);

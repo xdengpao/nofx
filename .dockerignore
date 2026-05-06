@@ -18,6 +18,8 @@ docker-compose.yml
 # Build artifacts
 nofx
 nofx_test
+.tools/
+.cache/
 *.exe
 *.dll
 *.so
