@@ -17,6 +17,22 @@
 - 扩展 `ExecutionQualityStats`、`DecisionRecord`、`DecisionAction`、`/api/performance` 测试和前端类型/策略学习展示。
 - 新增 `cmd/replay` 与 `logger.BuildReplayReport()`，支持 report-only/dry-run 风格的离线 gate 对比报告。
 
+## 2026-05-07 增量优化
+
+当前 `decision_logs/` replay 默认排除 `.bak`/backup 目录后，读取 34,572 条日志，得到 161 笔闭合交易，理论 PnL -9.2138 USDT；最近20笔胜率 20.0%、Profit Factor 0.4490，最近3笔全部亏损。基于该风险基线，本次追加落地：
+
+- 新增全局 rolling performance gate：最近20笔 PF<0.8 且胜率<35% 时暂停所有新开仓24小时；最近3笔连续亏损且总 PnL<0 时暂停12小时；冷却后仍以更高置信度和半风险降权。
+- 将 `GlobalGate` 接入开仓验证和默认仓位 sizing，确保硬暂停和降权在决策验证、风险预算、自动补仓位中一致生效。
+- 在决策合并后增加最终持仓上限硬拦截，超过3个持仓容量的新增开仓会被丢弃，并写入 CoT trace；若只剩被拒绝开仓，则返回 `wait`。同时将 `mergeDecisions()` 改为稳定保留输入顺序，避免容量不足时随机选择开仓。
+- 在自适应分批止盈输出前检查本次平仓名义额和剩余仓位名义额，跳过交易所注定拒绝的小额 `partial_close`。
+
+## P1/P2/P3 与外部校准
+
+- P1：开仓验证失败会写入 `FullDecision.OpenRejections`，交易日志生成 `open_rejected` 动作，执行质量统计可累计真实风控拒绝原因；同时 `risk_state` 记录有效风险预算、AI backoff 和 open gate 原因。
+- P2：候选币增加评分、数据质量、过滤原因、是否进入 prompt、行情源/执行交易所价差 warning，并写入 `candidate_details`。
+- P3：`cmd/replay` 默认排除 `.bak`/backup 目录，并支持 `-trader`、`-from`、`-to`、`-include-backups`，避免离线评估口径被备份样本污染。
+- 外部校准：新增 `cmd/calibrate-exchange`，已对 Aster 和 Binance 公开 `exchangeInfo` 生成校准报告；Aster 样本最小名义额为 5 USDT，当前系统开仓 10 USDT 更保守；Binance BTCUSDT/ETHUSDT 最小名义额分别为 50/20 USDT，已接入交易执行层的 symbol 级最小名义额校准。
+
 ## 验证结果
 
 - `git diff --check` 通过。
@@ -27,6 +43,9 @@
 - `go test ./...` 通过。
 - `node node_modules/typescript/bin/tsc` 在 `web/` 下通过。
 - `cd web && npm run build` 通过。
+- 2026-05-07 增量验证：`timeout 60s go test ./decision -run 'TestEvaluateOpenGate_GlobalRollingBlock|TestEnforceFinalDecisionLimits|TestEffectiveOpenGate_AppliesGlobalPenalty|TestEvaluateAdaptiveScaledExit' -count=1` 通过。
+- 2026-05-07 增量验证：`go test ./logger -count=1`、`go test ./trader ./market -count=1` 通过。
+- P1/P2/P3/外部校准验证：`go test ./logger ./cmd/replay ./cmd/calibrate-exchange -count=1`、`go test ./trader -run 'TestDeterminePartialClosePlan|TestCalibratedMinOrderValue|TestEvaluateExecutionPreflight' -count=1` 通过。
 
 ## 前端环境修复记录
 

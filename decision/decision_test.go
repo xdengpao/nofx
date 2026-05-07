@@ -125,6 +125,90 @@ func TestValidateOpenDecision_RollingGateBlocksSymbol(t *testing.T) {
 	}
 }
 
+func TestEnforceFinalDecisionLimits_DropsExcessOpens(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Account.PositionCount = 3
+
+	decisions := []Decision{
+		{Symbol: "BTCUSDT", Action: "hold", Reasoning: "已有持仓管理"},
+		{Symbol: "ETHUSDT", Action: "open_long", Reasoning: "新机会"},
+	}
+	filtered, rejected := enforceFinalDecisionLimits(decisions, ctx)
+
+	if len(rejected) != 1 {
+		t.Fatalf("持仓满仓时应拒绝新增开仓，rejected=%v", rejected)
+	}
+	if len(filtered) != 1 || filtered[0].Action != "hold" {
+		t.Fatalf("应保留非开仓决策并丢弃新增开仓: %+v", filtered)
+	}
+}
+
+func TestEnforceFinalDecisionLimits_OnlyRejectedOpenBecomesWait(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Account.PositionCount = 3
+
+	filtered, rejected := enforceFinalDecisionLimits([]Decision{
+		{Symbol: "ETHUSDT", Action: "open_long", Reasoning: "新机会"},
+	}, ctx)
+
+	if len(rejected) != 1 {
+		t.Fatalf("持仓满仓时应拒绝新增开仓，rejected=%v", rejected)
+	}
+	if len(filtered) != 1 || filtered[0].Action != "wait" {
+		t.Fatalf("只有被拒绝开仓时应输出wait: %+v", filtered)
+	}
+}
+
+func TestEffectiveOpenGate_AppliesGlobalPenalty(t *testing.T) {
+	ctx := newTestContext()
+	ctx.PerformanceGates = &logger.RollingPerformanceSnapshot{
+		GlobalGate: logger.PerformanceGate{
+			Key:            "ALL",
+			Scope:          "global",
+			State:          "penalize",
+			MinConfidence:  95,
+			RiskMultiplier: 0.5,
+			Reason:         "全局负期望降权",
+		},
+		SymbolGates: map[string]logger.PerformanceGate{},
+		SideGates:   map[string]logger.PerformanceGate{},
+	}
+
+	limit := effectiveOpenGate(&Decision{Symbol: "ETHUSDT", Action: "open_long"}, ctx)
+	if limit.minConfidence != 95 {
+		t.Fatalf("全局门控应提升最低置信度: %+v", limit)
+	}
+	if limit.maxRiskPerTrade != 0.01 {
+		t.Fatalf("全局门控应降低风险预算: %+v", limit)
+	}
+}
+
+func TestEvaluateCandidateQuality_MarksIncludedAndFiltered(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Exchange = "aster"
+	ctx.CandidateCoins = []CandidateCoin{
+		{Symbol: "ETHUSDT", Sources: []string{"ai500"}},
+		{Symbol: "SOLUSDT", Sources: []string{"oi_top"}, FilterReason: "OI价值过低"},
+	}
+	ctx.MarketDataMap["ETHUSDT"] = newTestMarketData(100)
+	ctx.MarketDataMap["SOLUSDT"] = newTestMarketData(50)
+
+	evaluateCandidateQuality(ctx)
+
+	if !ctx.CandidateCoins[0].IncludedInPrompt || ctx.CandidateCoins[0].Score <= 0 {
+		t.Fatalf("有效候选应进入prompt并有评分: %+v", ctx.CandidateCoins[0])
+	}
+	if ctx.CandidateCoins[0].DataQuality != "ok" && ctx.CandidateCoins[0].DataQuality != "warn" {
+		t.Fatalf("有效候选应有数据质量状态: %+v", ctx.CandidateCoins[0])
+	}
+	if len(ctx.CandidateCoins[0].Warnings) == 0 {
+		t.Fatalf("跨交易所行情源风险应记录为warning: %+v", ctx.CandidateCoins[0])
+	}
+	if ctx.CandidateCoins[1].IncludedInPrompt || ctx.CandidateCoins[1].DataQuality != "insufficient" {
+		t.Fatalf("已有过滤原因的候选不应进入prompt: %+v", ctx.CandidateCoins[1])
+	}
+}
+
 // ============================================================================
 // 需求: 策略亏损缓解 — 最大账户回撤硬停
 // ============================================================================
@@ -429,6 +513,24 @@ func TestMergeDecisions_EmptyPositionDecisions_AIDecisionsKept(t *testing.T) {
 	merged := mergeDecisions(posDecisions, aiDecisions)
 	if len(merged) != 2 {
 		t.Errorf("无持仓评估时 AI 决策应全部保留, 实际=%d", len(merged))
+	}
+}
+
+func TestMergeDecisions_PreservesAIOrderForCapacityGate(t *testing.T) {
+	aiDecisions := []Decision{
+		{Symbol: "BTCUSDT", Action: "open_long"},
+		{Symbol: "ETHUSDT", Action: "open_long"},
+	}
+	merged := mergeDecisions(nil, aiDecisions)
+	filtered, rejected := enforceFinalDecisionLimits(merged, &Context{
+		Account: AccountInfo{PositionCount: 2},
+	})
+
+	if len(rejected) != 1 {
+		t.Fatalf("只剩1个持仓容量时应拒绝1个新增开仓: rejected=%v", rejected)
+	}
+	if len(filtered) != 1 || filtered[0].Symbol != "BTCUSDT" {
+		t.Fatalf("应稳定保留AI输出顺序中的第一个开仓: %+v", filtered)
 	}
 }
 

@@ -14,19 +14,21 @@ import (
 
 // DecisionRecord 决策记录
 type DecisionRecord struct {
-	Timestamp      time.Time          `json:"timestamp"`       // 决策时间
-	CycleNumber    int                `json:"cycle_number"`    // 周期编号
-	InputPrompt    string             `json:"input_prompt"`    // 发送给AI的输入prompt
-	CoTTrace       string             `json:"cot_trace"`       // AI思维链（输出）
-	DecisionJSON   string             `json:"decision_json"`   // 决策JSON
-	AccountState   AccountSnapshot    `json:"account_state"`   // 账户状态快照
-	Positions      []PositionSnapshot `json:"positions"`       // 持仓快照
-	CandidateCoins []string           `json:"candidate_coins"` // 候选币种列表
-	Decisions      []DecisionAction   `json:"decisions"`       // 执行的决策
-	ExecutionLog   []string           `json:"execution_log"`   // 执行日志
-	Success        bool               `json:"success"`         // 是否成功
-	ErrorMessage   string             `json:"error_message"`   // 错误信息（如果有）
-	RiskState      *RiskStateSnapshot `json:"risk_state,omitempty"`
+	Timestamp        time.Time           `json:"timestamp"`       // 决策时间
+	SourcePath       string              `json:"-"`               // 离线读取时的源文件路径
+	CycleNumber      int                 `json:"cycle_number"`    // 周期编号
+	InputPrompt      string              `json:"input_prompt"`    // 发送给AI的输入prompt
+	CoTTrace         string              `json:"cot_trace"`       // AI思维链（输出）
+	DecisionJSON     string              `json:"decision_json"`   // 决策JSON
+	AccountState     AccountSnapshot     `json:"account_state"`   // 账户状态快照
+	Positions        []PositionSnapshot  `json:"positions"`       // 持仓快照
+	CandidateCoins   []string            `json:"candidate_coins"` // 候选币种列表
+	CandidateDetails []CandidateSnapshot `json:"candidate_details,omitempty"`
+	Decisions        []DecisionAction    `json:"decisions"`     // 执行的决策
+	ExecutionLog     []string            `json:"execution_log"` // 执行日志
+	Success          bool                `json:"success"`       // 是否成功
+	ErrorMessage     string              `json:"error_message"` // 错误信息（如果有）
+	RiskState        *RiskStateSnapshot  `json:"risk_state,omitempty"`
 }
 
 // RiskStateSnapshot 记录本周期可观测风险状态，保持旧日志兼容。
@@ -63,6 +65,19 @@ type PositionSnapshot struct {
 	UnrealizedProfit float64 `json:"unrealized_profit"`
 	Leverage         float64 `json:"leverage"`
 	LiquidationPrice float64 `json:"liquidation_price"`
+}
+
+// CandidateSnapshot 记录候选币来源、数据质量和是否进入 prompt。
+type CandidateSnapshot struct {
+	Symbol           string   `json:"symbol"`
+	Sources          []string `json:"sources,omitempty"`
+	Score            float64  `json:"score,omitempty"`
+	MarketState      string   `json:"market_state,omitempty"`
+	StateConfidence  int      `json:"state_confidence,omitempty"`
+	DataQuality      string   `json:"data_quality,omitempty"`
+	FilterReason     string   `json:"filter_reason,omitempty"`
+	IncludedInPrompt bool     `json:"included_in_prompt"`
+	Warnings         []string `json:"warnings,omitempty"`
 }
 
 // DecisionAction 决策动作
@@ -361,6 +376,7 @@ type SymbolPerformance struct {
 
 // RollingPerformanceSnapshot 表示策略门控所需的滚动绩效视图。
 type RollingPerformanceSnapshot struct {
+	GlobalGate               PerformanceGate            `json:"global_gate,omitempty"`
 	SymbolGates              map[string]PerformanceGate `json:"symbol_gates"`
 	SideGates                map[string]PerformanceGate `json:"side_gates"`
 	Recent3                  RollingStats               `json:"recent_3"`
@@ -540,6 +556,11 @@ func BuildRollingPerformance(outcomes []TradeOutcome, now time.Time) *RollingPer
 		now = time.Now()
 	}
 
+	snapshot.GlobalGate = buildGlobalGate(outcomes, snapshot, now)
+	if snapshot.GlobalGate.Reason != "" && snapshot.GlobalGate.State != "" && snapshot.GlobalGate.State != "allow" {
+		snapshot.Reasons = append(snapshot.Reasons, snapshot.GlobalGate.Reason)
+	}
+
 	if snapshot.Recent20.TradeCount >= 20 && snapshot.Recent20.ProfitFactor < 0.8 {
 		snapshot.EffectiveMaxRiskPerTrade = 0.005
 		snapshot.Reasons = append(snapshot.Reasons, "最近20笔PF低于0.8，单笔风险降至0.5%")
@@ -577,6 +598,64 @@ func BuildRollingPerformance(outcomes []TradeOutcome, now time.Time) *RollingPer
 	applyGlobalRecentLossGate(snapshot)
 
 	return snapshot
+}
+
+func buildGlobalGate(outcomes []TradeOutcome, snapshot *RollingPerformanceSnapshot, now time.Time) PerformanceGate {
+	gate := PerformanceGate{
+		Key:            "ALL",
+		Scope:          "global",
+		State:          "allow",
+		RiskMultiplier: 1,
+	}
+	if snapshot == nil {
+		return gate
+	}
+
+	latestClose := latestTradeCloseTime(outcomes)
+	if latestClose.IsZero() {
+		latestClose = now
+	}
+
+	if snapshot.Recent20.TradeCount >= 20 &&
+		snapshot.Recent20.ProfitFactor < 0.8 &&
+		snapshot.Recent20.WinRate < 35 {
+		gate.TradeCount = snapshot.Recent20.TradeCount
+		gate.TotalPnL = snapshot.Recent20.TotalPnL
+		gate.WinRate = snapshot.Recent20.WinRate
+		gate.ProfitFactor = snapshot.Recent20.ProfitFactor
+		gate.MinConfidence = 95
+		gate.CooldownUntil = latestClose.Add(24 * time.Hour)
+		gate.Reason = "最近20笔PF低于0.8且胜率低于35%，全局暂停新开仓24小时"
+		if now.Before(gate.CooldownUntil) {
+			gate.State = "block"
+			gate.RiskMultiplier = 0
+			return gate
+		}
+		gate.State = "penalize"
+		gate.RiskMultiplier = 0.5
+		return gate
+	}
+
+	if snapshot.Recent3.TradeCount >= 3 &&
+		snapshot.Recent3Losses >= 3 &&
+		snapshot.Recent3.TotalPnL < 0 {
+		gate.TradeCount = snapshot.Recent3.TradeCount
+		gate.TotalPnL = snapshot.Recent3.TotalPnL
+		gate.WinRate = snapshot.Recent3.WinRate
+		gate.ProfitFactor = snapshot.Recent3.ProfitFactor
+		gate.MinConfidence = 90
+		gate.CooldownUntil = latestClose.Add(12 * time.Hour)
+		gate.Reason = "最近3笔连续亏损且总PnL为负，全局暂停新开仓12小时"
+		if now.Before(gate.CooldownUntil) {
+			gate.State = "block"
+			gate.RiskMultiplier = 0
+			return gate
+		}
+		gate.State = "penalize"
+		gate.RiskMultiplier = 0.5
+	}
+
+	return gate
 }
 
 func buildSymbolGate(symbol string, trades []TradeOutcome, now time.Time) PerformanceGate {

@@ -213,7 +213,7 @@ func TestSortDecisionsByPriority_EmptyList(t *testing.T) {
 }
 
 func TestDeterminePartialClosePlan_Normal(t *testing.T) {
-	plan := determinePartialClosePlan(10, 20, 10)
+	plan := determinePartialClosePlan(10, 20, 10, 5, 10)
 	if plan.Mode != partialCloseModeNormal {
 		t.Fatalf("期望 normal，实际=%s", plan.Mode)
 	}
@@ -226,7 +226,7 @@ func TestDeterminePartialClosePlan_Normal(t *testing.T) {
 }
 
 func TestDeterminePartialClosePlan_RemainingTooSmall_FullClose(t *testing.T) {
-	plan := determinePartialClosePlan(10, 95, 10)
+	plan := determinePartialClosePlan(10, 95, 10, 5, 10)
 	if plan.Mode != partialCloseModeFull {
 		t.Fatalf("剩余仓位过小时应自动全平，实际=%s", plan.Mode)
 	}
@@ -236,7 +236,7 @@ func TestDeterminePartialClosePlan_RemainingTooSmall_FullClose(t *testing.T) {
 }
 
 func TestDeterminePartialClosePlan_CloseValueTooSmall_Skip(t *testing.T) {
-	plan := determinePartialClosePlan(10, 4, 10)
+	plan := determinePartialClosePlan(10, 4, 10, 5, 10)
 	if plan.Mode != partialCloseModeSkip {
 		t.Fatalf("平仓名义额过小时应跳过下单，实际=%s", plan.Mode)
 	}
@@ -246,12 +246,24 @@ func TestDeterminePartialClosePlan_CloseValueTooSmall_Skip(t *testing.T) {
 }
 
 func TestDeterminePartialClosePlan_SmallPositionTwentyPct_FullClose(t *testing.T) {
-	plan := determinePartialClosePlan(2.4, 20, 10)
+	plan := determinePartialClosePlan(2.4, 20, 10, 5, 10)
 	if plan.Mode != partialCloseModeFull {
 		t.Fatalf("小仓位20%%分批应自动全平，实际=%s", plan.Mode)
 	}
 	if math.Abs(plan.CloseValue-24) > 0.0001 || plan.RemainingValue != 0 {
 		t.Fatalf("全平名义额错误: close=%.4f remaining=%.4f", plan.CloseValue, plan.RemainingValue)
+	}
+}
+
+func TestCalibratedMinOrderValue_BinanceBTC(t *testing.T) {
+	if got := calibratedOpenMinOrderValueUSDT("binance", "BTCUSDT"); got != 50 {
+		t.Fatalf("Binance BTCUSDT开仓最小名义额应按外部校准提高到50，实际=%.2f", got)
+	}
+	if got := calibratedPartialCloseMinValueUSDT("binance", "ETHUSDT"); got != 20 {
+		t.Fatalf("Binance ETHUSDT部分平仓最小名义额应按外部校准提高到20，实际=%.2f", got)
+	}
+	if got := calibratedOpenMinOrderValueUSDT("aster", "BTCUSDT"); got != 10 {
+		t.Fatalf("Aster开仓预检应保留系统更保守10USDT，实际=%.2f", got)
 	}
 }
 

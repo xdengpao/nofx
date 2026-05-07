@@ -93,3 +93,23 @@
 - [x] 7.4 若触及共享后端合约，运行 `go test ./...`
 - [x] 7.5 若触及前端，运行 `cd web && npm run build` — 已通过；Vite build 输出 `dist/index.html`、CSS 和 JS bundle，仅保留 chunk size 与 Browserslist 数据过期提示
 - [x] 7.6 汇总实现结果、剩余风险、未跑测试原因和上线开关建议
+
+## Phase 8: 2026-05-07 增量策略优化
+
+- [x] 8.1 使用当前 `decision_logs/` 样本重新运行 replay，默认排除备份目录后确认最近20笔 PF=0.449、胜率20%、理论 PnL 为 -9.2138 USDT
+- [x] 8.2 新增全局 rolling performance gate：最近20笔 PF<0.8 且胜率<35% 时暂停新开仓24小时；最近3笔连续亏损且总 PnL<0 时暂停12小时
+- [x] 8.3 将 `GlobalGate` 同时接入 `EvaluateOpenGate()` 和默认仓位 sizing 的 `effectiveOpenGate()`，确保 block/penalize 在验证和仓位建议中一致生效
+- [x] 8.4 在 `GetFullDecision()` 合并决策后增加最终持仓上限硬拦截，超过3个总持仓容量的新增开仓直接丢弃并写入 CoT trace；同时让 `mergeDecisions()` 保持输入顺序，避免容量不足时随机保留开仓
+- [x] 8.5 在自适应分批止盈前检查本次平仓名义额和剩余仓位名义额，跳过注定低于最小名义额的 `partial_close`
+- [x] 8.6 添加全局门控、最终持仓上限和小仓位分批止盈测试，并运行 `go test ./decision` 相关用例、`go test ./logger`、`go test ./trader ./market`
+
+## Phase 9: P1/P2/P3 与外部校准
+
+- [x] 9.1 P1：将开仓风控拒绝写入 `FullDecision.OpenRejections`，并在 trader 日志中生成 `open_rejected` 决策动作
+- [x] 9.2 P1：将有效风险预算、AI backoff、open gate 原因写入 `risk_state`，让执行质量统计闭环可复盘
+- [x] 9.3 P2：为候选币增加评分、数据质量、过滤原因、是否进入 prompt 和行情源/执行所价差 warning
+- [x] 9.4 P2：将候选币详情写入 `candidate_details`，并在 prompt 中展示数据质量与评分
+- [x] 9.5 P3：增强 `cmd/replay`，默认排除 `.bak`/backup 目录，并支持 trader/time window 过滤
+- [x] 9.6 外部校准：新增 `cmd/calibrate-exchange`，使用公开 exchangeInfo 校准 min notional、tick size、step size
+- [x] 9.7 外部校准：生成 Aster/Binance 校准报告，并将 Binance BTCUSDT/ETHUSDT symbol 级最小名义额接入执行 preflight 和 partial close
+- [x] 9.8 运行 P1/P2/P3/校准相关 Go 测试

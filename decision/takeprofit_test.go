@@ -521,6 +521,48 @@ func TestEvaluateSoftStop_LostBreakevenWithWeakMomentum(t *testing.T) {
 	}
 }
 
+func TestEvaluateAdaptiveScaledExit_SkipsSmallPosition(t *testing.T) {
+	plan := newLongPlan(100, 90, 200)
+	plan.PositionSizeUSD = 30
+	pos := newLongPosition(100, 131, 31.0, pastTime(90))
+	md := newMarketData(131)
+	md.CurrentADX = 30
+	e := &PositionEvaluator{Position: pos, Plan: plan, MarketData: md, Symbol: "BTCUSDT"}
+
+	result := e.Evaluate()
+	if result.Action == "partial_close" {
+		t.Fatalf("小仓位不应触发注定失败的分批止盈: %+v", result)
+	}
+}
+
+func TestEvaluateAdaptiveScaledExit_AllowsExecutablePosition(t *testing.T) {
+	plan := newLongPlan(100, 90, 200)
+	plan.PositionSizeUSD = 120
+	pos := newLongPosition(100, 131, 31.0, pastTime(90))
+	md := newMarketData(131)
+	md.CurrentADX = 30
+	e := &PositionEvaluator{Position: pos, Plan: plan, MarketData: md, Symbol: "BTCUSDT"}
+
+	result := e.Evaluate()
+	if result.Action != "partial_close" {
+		t.Fatalf("可执行仓位达到RR档位时应允许分批止盈: action=%s reason=%s", result.Action, result.Reason)
+	}
+}
+
+func TestEvaluateAdaptiveScaledExit_UsesBinanceSymbolCalibration(t *testing.T) {
+	plan := newLongPlan(100, 90, 200)
+	plan.PositionSizeUSD = 120
+	pos := newLongPosition(100, 131, 31.0, pastTime(90))
+	md := newMarketData(131)
+	md.CurrentADX = 30
+	e := &PositionEvaluator{Position: pos, Plan: plan, MarketData: md, Symbol: "BTCUSDT", Exchange: "binance"}
+
+	result := e.Evaluate()
+	if result.Action == "partial_close" {
+		t.Fatalf("Binance BTCUSDT 20%%分批名义额低于50USDT时不应输出partial_close: %+v", result)
+	}
+}
+
 // ============================================================================
 // 需求 4.10: 计划失效条件检查时机
 // ============================================================================

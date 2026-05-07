@@ -1,0 +1,89 @@
+{
+  "generated_at": "2026-05-07T17:31:21.05118949+08:00",
+  "exchange": "aster",
+  "source_url": "https://fapi.asterdex.com/fapi/v3/exchangeInfo",
+  "system_min_order_value_usdt": 10,
+  "system_partial_close_min_usdt": 5,
+  "symbols": [
+    {
+      "symbol": "ASTERUSDT",
+      "status": "TRADING",
+      "step_size": "0.01",
+      "tick_size": "0.00010",
+      "min_qty": "0.01",
+      "min_notional_usdt": 5,
+      "recommended_min_order_value_usdt": 10,
+      "recommended_partial_close_min_usdt": 5
+    },
+    {
+      "symbol": "BNBUSDT",
+      "status": "TRADING",
+      "step_size": "0.01",
+      "tick_size": "0.010",
+      "min_qty": "0.01",
+      "min_notional_usdt": 5,
+      "recommended_min_order_value_usdt": 10,
+      "recommended_partial_close_min_usdt": 5
+    },
+    {
+      "symbol": "BTCUSDT",
+      "status": "TRADING",
+      "step_size": "0.001",
+      "tick_size": "0.1",
+      "min_qty": "0.001",
+      "min_notional_usdt": 5,
+      "recommended_min_order_value_usdt": 10,
+      "recommended_partial_close_min_usdt": 5
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "status": "TRADING",
+      "step_size": "1",
+      "tick_size": "0.000010",
+      "min_qty": "1",
+      "min_notional_usdt": 5,
+      "recommended_min_order_value_usdt": 10,
+      "recommended_partial_close_min_usdt": 5
+    },
+    {
+      "symbol": "ETHUSDT",
+      "status": "TRADING",
+      "step_size": "0.001",
+      "tick_size": "0.01",
+      "min_qty": "0.001",
+      "min_notional_usdt": 5,
+      "recommended_min_order_value_usdt": 10,
+      "recommended_partial_close_min_usdt": 5
+    },
+    {
+      "symbol": "HYPEUSDT",
+      "status": "TRADING",
+      "step_size": "0.01",
+      "tick_size": "0.00100",
+      "min_qty": "0.01",
+      "min_notional_usdt": 5,
+      "recommended_min_order_value_usdt": 10,
+      "recommended_partial_close_min_usdt": 5
+    },
+    {
+      "symbol": "SOLUSDT",
+      "status": "TRADING",
+      "step_size": "0.01",
+      "tick_size": "0.0100",
+      "min_qty": "0.01",
+      "min_notional_usdt": 5,
+      "recommended_min_order_value_usdt": 10,
+      "recommended_partial_close_min_usdt": 5
+    },
+    {
+      "symbol": "XRPUSDT",
+      "status": "TRADING",
+      "step_size": "0.1",
+      "tick_size": "0.0001",
+      "min_qty": "0.1",
+      "min_notional_usdt": 5,
+      "recommended_min_order_value_usdt": 10,
+      "recommended_partial_close_min_usdt": 5
+    }
+  ]
+}

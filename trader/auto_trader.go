@@ -408,10 +408,7 @@ func (at *AutoTrader) runCycle() error {
 		})
 	}
 
-	// 保存候选币种列表
-	for _, coin := range ctx.CandidateCoins {
-		record.CandidateCoins = append(record.CandidateCoins, coin.Symbol)
-	}
+	at.fillCandidateSnapshots(record, ctx)
 
 	log.Printf("📊 账户净值: %.2f USDT | 可用: %.2f USDT | 持仓: %d",
 		ctx.Account.TotalEquity, ctx.Account.AvailableBalance, ctx.Account.PositionCount)
@@ -428,6 +425,9 @@ func (at *AutoTrader) runCycle() error {
 			decisionJSON, _ := json.MarshalIndent(decision.Decisions, "", "  ")
 			record.DecisionJSON = string(decisionJSON)
 		}
+		at.appendOpenRejectionsToRecord(record, decision.OpenRejections)
+		record.RiskState = at.buildRiskStateSnapshot(ctx, decision.OpenRejections)
+		at.fillCandidateSnapshots(record, ctx)
 		at.applyAICallState(decision)
 	}
 
@@ -538,6 +538,85 @@ func (at *AutoTrader) applyAICallState(fullDecision *decision.FullDecision) {
 		backoff = defaultAIBackoffInterval
 	}
 	at.aiBackoffUntil = attemptTime.Add(backoff)
+}
+
+func (at *AutoTrader) appendOpenRejectionsToRecord(record *logger.DecisionRecord, rejections []decision.OpenRejection) {
+	if record == nil {
+		return
+	}
+	for _, rejection := range rejections {
+		reason := strings.TrimSpace(rejection.Reason)
+		if reason == "" {
+			reason = strings.Join(rejection.GateReasons, "; ")
+		}
+		record.Decisions = append(record.Decisions, logger.DecisionAction{
+			Action:      "open_rejected",
+			Symbol:      rejection.Symbol,
+			Timestamp:   time.Now(),
+			Success:     false,
+			Error:       reason,
+			Reasoning:   reason,
+			GateState:   rejection.GateState,
+			GateReasons: append([]string(nil), rejection.GateReasons...),
+		})
+		record.ExecutionLog = append(record.ExecutionLog,
+			fmt.Sprintf("⚠ %s %s 被开仓门控拒绝: %s", rejection.Symbol, rejection.Action, reason))
+	}
+}
+
+func (at *AutoTrader) buildRiskStateSnapshot(ctx *decision.Context, rejections []decision.OpenRejection) *logger.RiskStateSnapshot {
+	if ctx == nil {
+		return nil
+	}
+	usedRisk, _ := decision.CalculateTotalRisk(ctx)
+	remainingRisk := ctx.TotalRiskBudget - usedRisk
+	if remainingRisk < 0 {
+		remainingRisk = 0
+	}
+	snapshot := &logger.RiskStateSnapshot{
+		TraderID:                 ctx.TraderID,
+		Exchange:                 ctx.Exchange,
+		MaxRiskPerTrade:          ctx.MaxRiskPerTrade,
+		EffectiveMaxRiskPerTrade: ctx.EffectiveMaxRiskPerTrade,
+		TotalRiskBudget:          ctx.TotalRiskBudget,
+		RemainingRiskBudget:      remainingRisk,
+		MaxDailyLossPct:          ctx.MaxDailyLossPct,
+		MaxAccountDrawdownPct:    ctx.MaxAccountDrawdownPct,
+		ConsecutiveAIFails:       ctx.ConsecutiveAIFails,
+	}
+	if !ctx.AIBackoffUntil.IsZero() {
+		snapshot.AIBackoffUntil = ctx.AIBackoffUntil.Format(time.RFC3339)
+	}
+	for _, rejection := range rejections {
+		if rejection.Reason != "" {
+			snapshot.OpenGateReasons = append(snapshot.OpenGateReasons, rejection.Reason)
+			continue
+		}
+		snapshot.OpenGateReasons = append(snapshot.OpenGateReasons, rejection.GateReasons...)
+	}
+	return snapshot
+}
+
+func (at *AutoTrader) fillCandidateSnapshots(record *logger.DecisionRecord, ctx *decision.Context) {
+	if record == nil || ctx == nil {
+		return
+	}
+	record.CandidateCoins = record.CandidateCoins[:0]
+	record.CandidateDetails = record.CandidateDetails[:0]
+	for _, coin := range ctx.CandidateCoins {
+		record.CandidateCoins = append(record.CandidateCoins, coin.Symbol)
+		record.CandidateDetails = append(record.CandidateDetails, logger.CandidateSnapshot{
+			Symbol:           coin.Symbol,
+			Sources:          append([]string(nil), coin.Sources...),
+			Score:            coin.Score,
+			MarketState:      coin.MarketState,
+			StateConfidence:  coin.StateConfidence,
+			DataQuality:      coin.DataQuality,
+			FilterReason:     coin.FilterReason,
+			IncludedInPrompt: coin.IncludedInPrompt,
+			Warnings:         append([]string(nil), coin.Warnings...),
+		})
+	}
 }
 
 // 🆕 syncAutoClosedOrders 同步自动成交的订单
@@ -911,7 +990,7 @@ func (at *AutoTrader) executeOpenLongWithRecord(d *decision.Decision, actionReco
 		Quantity:      quantity,
 		Price:         marketData.CurrentPrice,
 		Leverage:      d.Leverage,
-		MinOrderValue: minPreflightOrderValueUSDT,
+		MinOrderValue: calibratedOpenMinOrderValueUSDT(at.exchange, d.Symbol),
 		Positions:     positions,
 	})
 	if !preflight.Allowed {
@@ -1000,7 +1079,7 @@ func (at *AutoTrader) executeOpenShortWithRecord(d *decision.Decision, actionRec
 		Quantity:      quantity,
 		Price:         marketData.CurrentPrice,
 		Leverage:      d.Leverage,
-		MinOrderValue: minPreflightOrderValueUSDT,
+		MinOrderValue: calibratedOpenMinOrderValueUSDT(at.exchange, d.Symbol),
 		Positions:     positions,
 	})
 	if !preflight.Allowed {
@@ -1604,7 +1683,13 @@ func resolveProtectiveStopLoss(requestedStopLoss, fallbackStopLoss float64) floa
 	return fallbackStopLoss
 }
 
-func determinePartialClosePlan(totalQuantity, closePercentage, markPrice float64) partialClosePlan {
+func determinePartialClosePlan(totalQuantity, closePercentage, markPrice, minPartialCloseValue, minRemainingValue float64) partialClosePlan {
+	if minPartialCloseValue <= 0 {
+		minPartialCloseValue = minPartialCloseOrderValueUSDT
+	}
+	if minRemainingValue <= 0 {
+		minRemainingValue = minRemainingPositionValueUSDT
+	}
 	closeQuantity := totalQuantity * (closePercentage / 100.0)
 	remainingQuantity := totalQuantity - closeQuantity
 	if remainingQuantity < 0 {
@@ -1620,7 +1705,7 @@ func determinePartialClosePlan(totalQuantity, closePercentage, markPrice float64
 		RemainingValue:       remainingQuantity * markPrice,
 	}
 
-	if plan.RemainingValue > 0 && plan.RemainingValue <= minRemainingPositionValueUSDT {
+	if plan.RemainingValue > 0 && plan.RemainingValue <= minRemainingValue {
 		plan.Mode = partialCloseModeFull
 		plan.CloseQuantity = totalQuantity
 		plan.CloseValue = plan.CurrentPositionValue
@@ -1629,7 +1714,7 @@ func determinePartialClosePlan(totalQuantity, closePercentage, markPrice float64
 		return plan
 	}
 
-	if plan.CloseValue > 0 && plan.CloseValue < minPartialCloseOrderValueUSDT {
+	if plan.CloseValue > 0 && plan.CloseValue < minPartialCloseValue {
 		if plan.CurrentPositionValue <= smallPositionFullCloseUSDT && math.Abs(closePercentage-20.0) < 0.0001 {
 			plan.Mode = partialCloseModeFull
 			plan.CloseQuantity = totalQuantity
@@ -1711,14 +1796,16 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 		return fmt.Errorf("failed to parse mark price, cannot perform minimum position check")
 	}
 
-	plan := determinePartialClosePlan(totalQuantity, d.ClosePercentage, markPrice)
+	minPartialCloseValue := calibratedPartialCloseMinValueUSDT(at.exchange, d.Symbol)
+	minRemainingValue := maxFloat(minRemainingPositionValueUSDT, minPartialCloseValue)
+	plan := determinePartialClosePlan(totalQuantity, d.ClosePercentage, markPrice, minPartialCloseValue, minRemainingValue)
 	closeQuantity = plan.CloseQuantity
 	remainingQuantity := plan.RemainingQuantity
 	actionRecord.Quantity = closeQuantity
 
 	if plan.Mode == partialCloseModeFull {
 		log.Printf("⚠️ 检测到 partial_close 后剩余仓位 %.2f USDT < %.0f USDT",
-			plan.RemainingValue, minRemainingPositionValueUSDT)
+			plan.RemainingValue, minRemainingValue)
 		log.Printf("  → 当前仓位价值: %.2f USDT, 平仓 %.1f%%, 剩余: %.2f USDT",
 			plan.CurrentPositionValue, d.ClosePercentage, plan.RemainingValue)
 		log.Printf("  → 自动修正为全部平仓，避免产生无法平仓的小额剩余")
@@ -1737,12 +1824,12 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 
 	if plan.Mode == partialCloseModeSkip {
 		log.Printf("⚠️ 跳过 partial_close: 本次平仓名义额 %.2f USDT < %.2f USDT",
-			plan.CloseValue, minPartialCloseOrderValueUSDT)
+			plan.CloseValue, minPartialCloseValue)
 		log.Printf("  → 当前仓位价值: %.2f USDT, 平仓 %.1f%%, 预计剩余: %.2f USDT",
 			plan.CurrentPositionValue, d.ClosePercentage, plan.RemainingValue)
 		actionRecord.Quantity = 0
 		actionRecord.Reasoning = fmt.Sprintf("跳过小额部分平仓: 名义额 %.2f USDT < %.2f USDT",
-			plan.CloseValue, minPartialCloseOrderValueUSDT)
+			plan.CloseValue, minPartialCloseValue)
 
 		stopLossForPlan := 0.0
 		if d.NewStopLoss > 0 {

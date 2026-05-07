@@ -61,4 +61,47 @@ func TestLoadDecisionRecordsRecursive(t *testing.T) {
 	if len(records) != 1 {
 		t.Fatalf("应只读取decision日志，实际=%d", len(records))
 	}
+	if records[0].SourcePath == "" {
+		t.Fatalf("replay应保留源文件路径")
+	}
+}
+
+func TestFilterReplayRecords_ExcludesBackupsAndFiltersTrader(t *testing.T) {
+	now := time.Date(2026, 5, 6, 14, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{
+		{Timestamp: now, SourcePath: "/logs/trader-a/decision_1.json"},
+		{Timestamp: now, SourcePath: "/logs/trader-a.bak/decision_2.json"},
+		{Timestamp: now, SourcePath: "/logs/trader-b/decision_3.json"},
+	}
+
+	filtered := FilterReplayRecords(records, ReplayFilter{TraderID: "trader-a"})
+	if len(filtered) != 1 || filtered[0].SourcePath != "/logs/trader-a/decision_1.json" {
+		t.Fatalf("应排除备份目录并按trader过滤: %+v", filtered)
+	}
+
+	withBackups := FilterReplayRecords(records, ReplayFilter{TraderID: "trader-a", IncludeBackups: true})
+	if len(withBackups) != 1 {
+		t.Fatalf(".bak目录名不应被误识别为trader-a: %+v", withBackups)
+	}
+}
+
+func TestBuildRollingPerformance_GlobalBlockAfterPoorRecent20(t *testing.T) {
+	now := time.Date(2026, 5, 6, 14, 0, 0, 0, time.UTC)
+	outcomes := make([]TradeOutcome, 20)
+	for i := range outcomes {
+		outcomes[i] = TradeOutcome{
+			Symbol:    "BTCUSDT",
+			Side:      "long",
+			PnL:       -1,
+			CloseTime: now.Add(-time.Duration(20-i) * time.Minute),
+		}
+	}
+
+	snapshot := BuildRollingPerformance(outcomes, now)
+	if snapshot.GlobalGate.State != "block" {
+		t.Fatalf("最近20笔表现过差应全局暂停开仓: %+v", snapshot.GlobalGate)
+	}
+	if snapshot.GlobalGate.RiskMultiplier != 0 {
+		t.Fatalf("全局暂停时风险倍率应为0: %+v", snapshot.GlobalGate)
+	}
 }

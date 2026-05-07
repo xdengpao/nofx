@@ -32,6 +32,58 @@ func TestEvaluateOpenGate_RollingBlock(t *testing.T) {
 	}
 }
 
+func TestEvaluateOpenGate_GlobalRollingBlock(t *testing.T) {
+	ctx := newTestContext()
+	ctx.PerformanceGates = &logger.RollingPerformanceSnapshot{
+		GlobalGate: logger.PerformanceGate{
+			Key:           "ALL",
+			Scope:         "global",
+			State:         "block",
+			CooldownUntil: time.Now().Add(time.Hour),
+			Reason:        "全局负期望暂停",
+		},
+		SymbolGates: map[string]logger.PerformanceGate{},
+		SideGates:   map[string]logger.PerformanceGate{},
+	}
+
+	result := EvaluateOpenGate(OpenGateInput{
+		Decision:   &Decision{Symbol: "ETHUSDT", Action: "open_long"},
+		Context:    ctx,
+		MarketData: newTestMarketData(100),
+	})
+	if result.Allowed {
+		t.Fatalf("global rolling block 应拒绝开仓: %+v", result)
+	}
+}
+
+func TestBuildOpenRejection_IncludesGateDetails(t *testing.T) {
+	ctx := newTestContext()
+	ctx.MarketDataMap["ETHUSDT"] = newTestMarketData(100)
+	ctx.PerformanceGates = &logger.RollingPerformanceSnapshot{
+		GlobalGate: logger.PerformanceGate{
+			Key:           "ALL",
+			Scope:         "global",
+			State:         "block",
+			CooldownUntil: time.Now().Add(time.Hour),
+			Reason:        "全局负期望暂停",
+		},
+		SymbolGates: map[string]logger.PerformanceGate{},
+		SideGates:   map[string]logger.PerformanceGate{},
+	}
+
+	rejection := buildOpenRejection(
+		Decision{Symbol: "ETHUSDT", Action: "open_long"},
+		ctx,
+		"ETHUSDT open_long 被风控过滤",
+	)
+	if rejection.GateState != "block" {
+		t.Fatalf("应记录 gate state: %+v", rejection)
+	}
+	if len(rejection.GateReasons) == 0 || rejection.GateReasons[0] != "全局负期望暂停" {
+		t.Fatalf("应记录 gate reason: %+v", rejection)
+	}
+}
+
 func TestEvaluateOpenGate_ShortConfidenceRequirement(t *testing.T) {
 	ctx := newTestContext()
 	result := EvaluateOpenGate(OpenGateInput{

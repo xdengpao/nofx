@@ -40,8 +40,15 @@ type AccountInfo struct {
 
 // CandidateCoin 候选币种
 type CandidateCoin struct {
-	Symbol  string   `json:"symbol"`
-	Sources []string `json:"sources"`
+	Symbol           string   `json:"symbol"`
+	Sources          []string `json:"sources"`
+	Score            float64  `json:"score,omitempty"`
+	MarketState      string   `json:"market_state,omitempty"`
+	StateConfidence  int      `json:"state_confidence,omitempty"`
+	DataQuality      string   `json:"data_quality,omitempty"` // ok, warn, insufficient
+	FilterReason     string   `json:"filter_reason,omitempty"`
+	IncludedInPrompt bool     `json:"included_in_prompt"`
+	Warnings         []string `json:"warnings,omitempty"`
 }
 
 // OITopData 持仓量增长Top数据
@@ -196,13 +203,23 @@ type Decision struct {
 
 // FullDecision AI的完整决策
 type FullDecision struct {
-	UserPrompt      string     `json:"user_prompt"`
-	CoTTrace        string     `json:"cot_trace"`
-	Decisions       []Decision `json:"decisions"`
-	Timestamp       time.Time  `json:"timestamp"`
-	AICallAttempted bool       `json:"ai_call_attempted,omitempty"`
-	AICallSucceeded bool       `json:"ai_call_succeeded,omitempty"`
-	AIFailureReason string     `json:"ai_failure_reason,omitempty"`
+	UserPrompt      string          `json:"user_prompt"`
+	CoTTrace        string          `json:"cot_trace"`
+	Decisions       []Decision      `json:"decisions"`
+	Timestamp       time.Time       `json:"timestamp"`
+	AICallAttempted bool            `json:"ai_call_attempted,omitempty"`
+	AICallSucceeded bool            `json:"ai_call_succeeded,omitempty"`
+	AIFailureReason string          `json:"ai_failure_reason,omitempty"`
+	OpenRejections  []OpenRejection `json:"open_rejections,omitempty"`
+}
+
+// OpenRejection 记录开仓建议被确定性风控拒绝的原因。
+type OpenRejection struct {
+	Symbol      string   `json:"symbol"`
+	Action      string   `json:"action"`
+	Reason      string   `json:"reason"`
+	GateState   string   `json:"gate_state,omitempty"`
+	GateReasons []string `json:"gate_reasons,omitempty"`
 }
 
 // EvaluationResult 评估结果

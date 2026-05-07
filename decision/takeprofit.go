@@ -112,6 +112,7 @@ type PositionEvaluator struct {
 	MarketData    *market.Data
 	BTCMarketData *market.Data
 	Symbol        string
+	Exchange      string
 }
 
 // Evaluate 评估持仓
@@ -567,6 +568,14 @@ func (e *PositionEvaluator) evaluateAdaptiveScaledExit() *EvaluationResult {
 			continue
 		}
 
+		remainingPositionUSD := remainingPositionValueUSD(e.Plan)
+		minOrderValue := minScaledExitOrderValueUSDT(e.Exchange, e.Symbol)
+		if !canExecuteScaledExit(remainingPositionUSD, tranche.ClosePercent, minOrderValue) {
+			log.Printf("📊 %s: %s但仓位%.2f USD过小，跳过%.0f%%分批止盈",
+				e.Symbol, triggerReason, remainingPositionUSD, tranche.ClosePercent)
+			continue
+		}
+
 		newStopLoss := e.calculateStopLossForTranche(tranche.MoveStopTo)
 
 		return &EvaluationResult{
@@ -581,6 +590,47 @@ func (e *PositionEvaluator) evaluateAdaptiveScaledExit() *EvaluationResult {
 	}
 
 	return nil
+}
+
+func remainingPositionValueUSD(plan *TradePlan) float64 {
+	if plan == nil {
+		return 0
+	}
+	positionUSD := plan.PositionSizeUSD
+	if positionUSD <= 0 && plan.ActualQuantity > 0 && plan.ActualEntry > 0 {
+		positionUSD = plan.ActualQuantity * plan.ActualEntry
+	}
+	if positionUSD <= 0 {
+		return 0
+	}
+	closedPct := math.Max(0, math.Min(100, plan.TotalClosedPercent))
+	return positionUSD * (1 - closedPct/100)
+}
+
+func canExecuteScaledExit(positionUSD, closePct, minOrderValueUSD float64) bool {
+	if positionUSD <= 0 || closePct <= 0 || closePct > 100 {
+		return false
+	}
+	if minOrderValueUSD <= 0 {
+		minOrderValueUSD = defaultMinOrderValueUSDT
+	}
+	closeValue := positionUSD * closePct / 100
+	remainingValue := positionUSD - closeValue
+	return closeValue >= minOrderValueUSD && remainingValue >= minOrderValueUSD
+}
+
+func minScaledExitOrderValueUSDT(exchange, symbol string) float64 {
+	exchange = strings.ToLower(strings.TrimSpace(exchange))
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if exchange == "binance" {
+		switch symbol {
+		case "BTCUSDT":
+			return 50
+		case "ETHUSDT":
+			return 20
+		}
+	}
+	return defaultMinOrderValueUSDT
 }
 
 func (e *PositionEvaluator) checkMomentumConfirmation() bool {

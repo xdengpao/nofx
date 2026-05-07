@@ -123,6 +123,7 @@ func applyRollingPerformanceGate(result *OpenGateResult, d *Decision, ctx *Conte
 	if g, ok := ctx.PerformanceGates.SideGates[side]; ok {
 		applyGate(g)
 	}
+	applyGate(ctx.PerformanceGates.GlobalGate)
 }
 
 func applyBTCMarketGate(result *OpenGateResult, ctx *Context) {

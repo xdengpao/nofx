@@ -31,6 +31,14 @@ type ReplayReport struct {
 	RecentOpenRejectionText []string                    `json:"recent_open_rejection_text,omitempty"`
 }
 
+// ReplayFilter 定义离线 replay 的样本过滤条件。
+type ReplayFilter struct {
+	IncludeBackups bool
+	TraderID       string
+	From           time.Time
+	To             time.Time
+}
+
 // LoadDecisionRecordsRecursive 递归读取指定目录下的 decision_*.json 日志。
 func LoadDecisionRecordsRecursive(logDir string) ([]*DecisionRecord, error) {
 	var records []*DecisionRecord
@@ -53,6 +61,7 @@ func LoadDecisionRecordsRecursive(logDir string) ([]*DecisionRecord, error) {
 		if err := json.Unmarshal(data, &record); err != nil {
 			return nil
 		}
+		record.SourcePath = path
 		records = append(records, &record)
 		return nil
 	})
@@ -63,6 +72,59 @@ func LoadDecisionRecordsRecursive(logDir string) ([]*DecisionRecord, error) {
 		return records[i].Timestamp.Before(records[j].Timestamp)
 	})
 	return records, nil
+}
+
+func FilterReplayRecords(records []*DecisionRecord, filter ReplayFilter) []*DecisionRecord {
+	var filtered []*DecisionRecord
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		if !filter.IncludeBackups && isBackupReplayPath(record.SourcePath) {
+			continue
+		}
+		if filter.TraderID != "" && !recordMatchesTrader(record, filter.TraderID) {
+			continue
+		}
+		if !filter.From.IsZero() && record.Timestamp.Before(filter.From) {
+			continue
+		}
+		if !filter.To.IsZero() && record.Timestamp.After(filter.To) {
+			continue
+		}
+		filtered = append(filtered, record)
+	}
+	return filtered
+}
+
+func isBackupReplayPath(path string) bool {
+	if path == "" {
+		return false
+	}
+	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
+		lower := strings.ToLower(part)
+		if strings.Contains(lower, ".bak") || strings.Contains(lower, "backup") {
+			return true
+		}
+	}
+	return false
+}
+
+func recordMatchesTrader(record *DecisionRecord, traderID string) bool {
+	traderID = strings.TrimSpace(traderID)
+	if traderID == "" {
+		return true
+	}
+	if record.RiskState != nil && record.RiskState.TraderID == traderID {
+		return true
+	}
+	source := filepath.ToSlash(record.SourcePath)
+	for _, part := range strings.Split(source, "/") {
+		if part == traderID {
+			return true
+		}
+	}
+	return false
 }
 
 // BuildReplayReport 根据决策日志生成离线复盘报告。

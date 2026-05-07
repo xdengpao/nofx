@@ -90,6 +90,7 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 
 	// 计算相关性矩阵
 	CalculateCorrelationMatrix(ctx)
+	evaluateCandidateQuality(ctx)
 
 	// 评估现有持仓
 	positionDecisions := evaluateExistingPositions(ctx)
@@ -117,6 +118,7 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 	var aiDecisions []Decision
 	var cotTrace string
 	var userPrompt string
+	var openRejections []OpenRejection
 
 	if shouldCallAI {
 		remainingBudget := calculateRemainingRiskBudget(ctx)
@@ -176,6 +178,11 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 							reason := fmt.Sprintf("%s %s 参数补充失败: %v", d.Symbol, d.Action, err)
 							log.Printf("⚠️ 决策%s", reason)
 							rejectedReasons = append(rejectedReasons, reason)
+							openRejections = append(openRejections, OpenRejection{
+								Symbol: d.Symbol,
+								Action: d.Action,
+								Reason: reason,
+							})
 							continue
 						}
 
@@ -183,6 +190,7 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 							reason := fmt.Sprintf("%s %s 被风控过滤: %v", d.Symbol, d.Action, err)
 							log.Printf("⚠️ 开仓决策验证失败: %v", err)
 							rejectedReasons = append(rejectedReasons, reason)
+							openRejections = append(openRejections, buildOpenRejection(d, ctx, reason))
 							continue
 						}
 						validDecisions = append(validDecisions, d)
@@ -212,6 +220,17 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 	}
 
 	allDecisions := mergeDecisions(positionDecisions, aiDecisions)
+	var finalRejections []string
+	allDecisions, finalRejections = enforceFinalDecisionLimits(allDecisions, ctx)
+	if len(finalRejections) > 0 {
+		reason := "最终风控拦截: " + strings.Join(finalRejections, "; ")
+		log.Printf("⚠️ %s", reason)
+		if strings.TrimSpace(cotTrace) == "" {
+			cotTrace = reason
+		} else {
+			cotTrace += "\n" + reason
+		}
+	}
 
 	if err := validateFinalDecisions(allDecisions, ctx); err != nil {
 		log.Printf("⚠️ 决策验证警告: %v", err)
@@ -227,7 +246,35 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 		Timestamp:       time.Now(),
 		AICallAttempted: shouldCallAI && userPrompt != "",
 		AICallSucceeded: shouldCallAI && userPrompt != "",
+		OpenRejections:  openRejections,
 	}, nil
+}
+
+func buildOpenRejection(d Decision, ctx *Context, reason string) OpenRejection {
+	rejection := OpenRejection{
+		Symbol: d.Symbol,
+		Action: d.Action,
+		Reason: reason,
+	}
+	if ctx == nil || ctx.MarketDataMap == nil {
+		return rejection
+	}
+	marketData := ctx.MarketDataMap[d.Symbol]
+	if marketData == nil {
+		return rejection
+	}
+	gate := EvaluateOpenGate(OpenGateInput{
+		Decision:         &d,
+		Context:          ctx,
+		MarketData:       marketData,
+		ExecutionQuality: ctx.ExecutionQuality,
+	})
+	rejection.GateState = gate.State
+	rejection.GateReasons = append(rejection.GateReasons, gate.Reasons...)
+	if len(rejection.GateReasons) == 0 && strings.TrimSpace(reason) != "" {
+		rejection.GateReasons = append(rejection.GateReasons, reason)
+	}
+	return rejection
 }
 
 func waitDecision(reason string) Decision {
@@ -329,6 +376,7 @@ func evaluateExistingPositions(ctx *Context) []Decision {
 			MarketData:    marketData,
 			BTCMarketData: ctx.MarketDataMap["BTCUSDT"],
 			Symbol:        pos.Symbol,
+			Exchange:      ctx.Exchange,
 		}
 
 		result := evaluator.Evaluate()
@@ -469,29 +517,38 @@ func calculateRemainingRiskBudget(ctx *Context) float64 {
 // ============================================================================
 
 func mergeDecisions(positionDecisions, aiDecisions []Decision) []Decision {
-	decisionMap := make(map[string]Decision)
+	var result []Decision
+	indexBySymbol := make(map[string]int)
 
 	for _, d := range positionDecisions {
-		decisionMap[d.Symbol] = d
+		if idx, exists := indexBySymbol[d.Symbol]; exists {
+			result[idx] = d
+			continue
+		}
+		indexBySymbol[d.Symbol] = len(result)
+		result = append(result, d)
 	}
 
 	for _, d := range aiDecisions {
 		if d.Action == "open_long" || d.Action == "open_short" {
-			if existing, exists := decisionMap[d.Symbol]; exists {
+			if idx, exists := indexBySymbol[d.Symbol]; exists {
 				// 持仓评估决策（任何非 wait 的决策）优先于 AI 新开仓决策
-				if existing.Action != "wait" {
+				if result[idx].Action != "wait" {
 					continue
 				}
+				result[idx] = d
+				continue
 			}
-			decisionMap[d.Symbol] = d
+			indexBySymbol[d.Symbol] = len(result)
+			result = append(result, d)
 		} else if d.Action == "wait" && len(positionDecisions) == 0 {
-			decisionMap[d.Symbol] = d
+			if idx, exists := indexBySymbol[d.Symbol]; exists {
+				result[idx] = d
+				continue
+			}
+			indexBySymbol[d.Symbol] = len(result)
+			result = append(result, d)
 		}
-	}
-
-	var result []Decision
-	for _, d := range decisionMap {
-		result = append(result, d)
 	}
 
 	return result
@@ -669,6 +726,7 @@ func effectiveOpenGate(d *Decision, ctx *Context) openGateLimit {
 	if g, ok := ctx.PerformanceGates.SideGates[side]; ok {
 		applyGate(g)
 	}
+	applyGate(ctx.PerformanceGates.GlobalGate)
 	if limit.reason == "" {
 		limit.reason = "rolling performance gate"
 	}
@@ -689,6 +747,39 @@ func validateFinalDecisions(decisions []Decision, ctx *Context) error {
 	}
 
 	return nil
+}
+
+func enforceFinalDecisionLimits(decisions []Decision, ctx *Context) ([]Decision, []string) {
+	if ctx == nil {
+		return decisions, nil
+	}
+
+	availableSlots := 3 - ctx.Account.PositionCount
+	if availableSlots < 0 {
+		availableSlots = 0
+	}
+
+	var result []Decision
+	var rejections []string
+	keptOpens := 0
+	for _, d := range decisions {
+		if d.Action != "open_long" && d.Action != "open_short" {
+			result = append(result, d)
+			continue
+		}
+		if keptOpens >= availableSlots {
+			rejections = append(rejections, fmt.Sprintf("%s %s 因持仓上限3个被拒绝", d.Symbol, d.Action))
+			continue
+		}
+		result = append(result, d)
+		keptOpens++
+	}
+
+	if len(result) == 0 && len(rejections) > 0 {
+		result = append(result, waitDecision("最终风控拦截: "+strings.Join(rejections, "; ")))
+	}
+
+	return result, rejections
 }
 
 // ValidateAndEnrichDecision 验证并补充决策参数
@@ -1293,6 +1384,7 @@ func fetchMarketDataForContext(ctx *Context) error {
 		data, err := market.Get(symbol)
 		if err != nil {
 			log.Printf("⚠️ 获取 %s 数据失败: %v", symbol, err)
+			markCandidateFiltered(ctx, symbol, fmt.Sprintf("市场数据获取失败: %v", err))
 			continue
 		}
 
@@ -1301,6 +1393,7 @@ func fetchMarketDataForContext(ctx *Context) error {
 			oiValueInMillions := data.OIValueUSD / 1_000_000
 			if oiValueInMillions < 15 {
 				log.Printf("⚠️ %s OI价值过低(%.2fM USD < 15M)，跳过", symbol, oiValueInMillions)
+				markCandidateFiltered(ctx, symbol, fmt.Sprintf("OI价值过低 %.2fM USD < 15M", oiValueInMillions))
 				continue
 			}
 		}
@@ -1323,6 +1416,103 @@ func fetchMarketDataForContext(ctx *Context) error {
 	}
 
 	return nil
+}
+
+func markCandidateFiltered(ctx *Context, symbol string, reason string) {
+	if ctx == nil {
+		return
+	}
+	for i := range ctx.CandidateCoins {
+		if ctx.CandidateCoins[i].Symbol != symbol {
+			continue
+		}
+		ctx.CandidateCoins[i].IncludedInPrompt = false
+		ctx.CandidateCoins[i].DataQuality = "insufficient"
+		ctx.CandidateCoins[i].FilterReason = reason
+		return
+	}
+}
+
+func evaluateCandidateQuality(ctx *Context) {
+	if ctx == nil {
+		return
+	}
+	for i := range ctx.CandidateCoins {
+		coin := &ctx.CandidateCoins[i]
+		coin.IncludedInPrompt = true
+		if coin.DataQuality == "" {
+			coin.DataQuality = "ok"
+		}
+
+		data := ctx.MarketDataMap[coin.Symbol]
+		if data == nil {
+			if coin.FilterReason == "" {
+				coin.FilterReason = "缺少市场数据"
+			}
+			coin.DataQuality = "insufficient"
+			coin.IncludedInPrompt = false
+			continue
+		}
+
+		state, confidence := market.GetMarketState(data)
+		coin.MarketState = state
+		coin.StateConfidence = confidence
+		coin.Score = calculateCoinScore(data, ctx.CorrelationMap[coin.Symbol])
+
+		var warnings []string
+		if ctx.Exchange != "" && ctx.Exchange != "binance" {
+			warnings = append(warnings, fmt.Sprintf("行情源为Binance，执行交易所为%s，需关注价差", ctx.Exchange))
+		}
+		if data.CurrentPrice <= 0 {
+			coin.FilterReason = "当前价格缺失"
+			coin.DataQuality = "insufficient"
+			coin.IncludedInPrompt = false
+		}
+		if data.CurrentADX <= 0 || data.CurrentRSI14 <= 0 {
+			warnings = append(warnings, "ADX/RSI关键指标不足")
+			if coin.DataQuality == "ok" {
+				coin.DataQuality = "warn"
+			}
+		}
+		if data.LongerTermContext == nil || data.LongerTermContext.ATR14 <= 0 {
+			warnings = append(warnings, "4h ATR数据不足")
+			if coin.DataQuality == "ok" {
+				coin.DataQuality = "warn"
+			}
+		}
+		if coin.FilterReason != "" {
+			coin.DataQuality = "insufficient"
+			coin.IncludedInPrompt = false
+		}
+		coin.Warnings = appendUniqueStrings(coin.Warnings, warnings...)
+	}
+}
+
+func appendUniqueStrings(values []string, additions ...string) []string {
+	for _, addition := range additions {
+		addition = strings.TrimSpace(addition)
+		if addition == "" {
+			continue
+		}
+		exists := false
+		for _, value := range values {
+			if value == addition {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			values = append(values, addition)
+		}
+	}
+	return values
+}
+
+func candidateIncludedInPrompt(coin CandidateCoin) bool {
+	if coin.IncludedInPrompt {
+		return true
+	}
+	return coin.FilterReason == "" && coin.DataQuality == ""
 }
 
 // ============================================================================
@@ -1567,6 +1757,9 @@ func buildUserPrompt(ctx *Context, remainingBudget float64) string {
 		if coin.Symbol == "BTCUSDT" {
 			continue
 		}
+		if !candidateIncludedInPrompt(coin) {
+			continue
+		}
 		hasPosition := false
 		for _, pos := range ctx.Positions {
 			if pos.Symbol == coin.Symbol {
@@ -1599,16 +1792,28 @@ func buildUserPrompt(ctx *Context, remainingBudget float64) string {
 		if marketData.LongerTermContext != nil {
 			atr14 = marketData.LongerTermContext.ATR14
 		}
+		riskForSizing := ctx.MaxRiskPerTrade
+		if ctx.EffectiveMaxRiskPerTrade > 0 && (riskForSizing == 0 || ctx.EffectiveMaxRiskPerTrade < riskForSizing) {
+			riskForSizing = ctx.EffectiveMaxRiskPerTrade
+		}
 		suggestedSize, stopDist := market.CalculateAdaptivePositionSize(
 			ctx.Account.TotalEquity,
 			atr14,
 			marketData.CurrentPrice,
-			ctx.MaxRiskPerTrade,
+			riskForSizing,
 			isAltcoin,
 		)
 
 		sb.WriteString(fmt.Sprintf("### %d. %s\n", displayedCount, coin.Symbol))
-		sb.WriteString(fmt.Sprintf("**趋势**: %s%s\n", marketState, corrInfo))
+		sb.WriteString(fmt.Sprintf("**趋势**: %s%s | **数据质量**: %s | **评分**: %.1f\n",
+			marketState, corrInfo, coin.DataQuality, coin.Score))
+		if len(coin.Sources) > 0 || len(coin.Warnings) > 0 {
+			sb.WriteString(fmt.Sprintf("**来源**: %s", strings.Join(coin.Sources, ",")))
+			if len(coin.Warnings) > 0 {
+				sb.WriteString(fmt.Sprintf(" | **警告**: %s", strings.Join(coin.Warnings, "; ")))
+			}
+			sb.WriteString("\n")
+		}
 		sb.WriteString(fmt.Sprintf("**建议仓位**: %.0f USD | **止损距离**: %.4f\n",
 			suggestedSize, stopDist))
 		sb.WriteString(market.FormatCompact(marketData))
@@ -2039,11 +2244,19 @@ func QuickAnalyze(ctx *Context) string {
 		if coin.Symbol == "BTCUSDT" {
 			continue
 		}
+		if !candidateIncludedInPrompt(coin) {
+			reason := coin.FilterReason
+			if reason == "" {
+				reason = "未进入prompt"
+			}
+			sb.WriteString(fmt.Sprintf("  %s: 过滤 | %s\n", coin.Symbol, reason))
+			continue
+		}
 		if data, ok := ctx.MarketDataMap[coin.Symbol]; ok {
 			state, conf := market.GetMarketState(data)
 			score := calculateCoinScore(data, ctx.CorrelationMap[coin.Symbol])
-			sb.WriteString(fmt.Sprintf("  %s: %s(%d%%) | 评分=%.1f\n",
-				coin.Symbol, state, conf, score))
+			sb.WriteString(fmt.Sprintf("  %s: %s(%d%%) | 评分=%.1f | 数据=%s\n",
+				coin.Symbol, state, conf, score, coin.DataQuality))
 		}
 	}
 
