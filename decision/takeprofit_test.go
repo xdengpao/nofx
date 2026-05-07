@@ -330,6 +330,7 @@ func TestMinHoldTime_AfterProtection_AllowsClose(t *testing.T) {
 		t.Errorf("超过保护期后利润保护应可触发, 实际=%s", result.Action)
 	}
 }
+
 // ============================================================================
 // 需求 4.5: 利润保护触发
 // ============================================================================
@@ -373,9 +374,39 @@ func TestProfitProtection_Short_Triggered(t *testing.T) {
 	}
 }
 
+func TestEvaluateProfitProtection_HighPeakUsesSixtyFivePercentLine(t *testing.T) {
+	plan := newLongPlan(50000, 45000, 60000)
+	plan.PeakPnLPercent = 12.0
+	pos := newLongPosition(50000, 51000, 7.7, pastTime(90))
+	md := newMarketData(51000)
+	e := &PositionEvaluator{Position: pos, Plan: plan, MarketData: md, Symbol: "BTCUSDT"}
+
+	result := e.Evaluate()
+	if result.Action != "close" {
+		t.Fatalf("峰值12%%时保护线应至少65%%，当前7.7%%低于7.8%%应平仓: action=%s reason=%s", result.Action, result.Reason)
+	}
+}
+
 // ============================================================================
 // 需求 4.8: 移动止损单调性
 // ============================================================================
+
+func TestEvaluateTrailingStop_BreakevenAtSixPercent(t *testing.T) {
+	plan := newLongPlan(50000, 40000, 65000)
+	plan.CurrentStopLoss = 40000
+	pos := newLongPosition(50000, 53000, 6.0, pastTime(90))
+	md := newMarketData(53000)
+	md.CurrentADX = 25
+	e := &PositionEvaluator{Position: pos, Plan: plan, MarketData: md, Symbol: "BTCUSDT"}
+
+	result := e.Evaluate()
+	if result.Action != "update_stop_loss" {
+		t.Fatalf("浮盈6%%应允许移动到保本/小幅盈利止损: action=%s reason=%s", result.Action, result.Reason)
+	}
+	if result.NewStopLoss <= plan.EntryPrice {
+		t.Fatalf("6%%保本止损应高于入场价: newSL=%.4f entry=%.4f", result.NewStopLoss, plan.EntryPrice)
+	}
+}
 
 func TestTrailingStop_Long_Monotonic_OnlyRises(t *testing.T) {
 	plan := newLongPlan(50000, 49000, 60000)
@@ -440,6 +471,53 @@ func TestTrailingStop_Short_NoUpgrade(t *testing.T) {
 	result := e.Evaluate()
 	if result.Action == "update_stop_loss" && result.NewStopLoss > plan.CurrentStopLoss {
 		t.Errorf("空头移动止损不应上升: 新%.4f > 当前%.4f", result.NewStopLoss, plan.CurrentStopLoss)
+	}
+}
+
+func TestEvaluateSoftStop_AfterProtectionAtMinusFive(t *testing.T) {
+	plan := newLongPlan(50000, 44000, 62000)
+	plan.MinHoldMinutes = 30
+	pos := newLongPosition(50000, 47500, -5.0, pastTime(60))
+	md := newMarketData(47500)
+	e := &PositionEvaluator{Position: pos, Plan: plan, MarketData: md, Symbol: "BTCUSDT"}
+
+	result := e.Evaluate()
+	if result.Action != "close" || result.IsHardStop {
+		t.Fatalf("保护期后-5%%应触发软止损平仓: action=%s hard=%v reason=%s", result.Action, result.IsHardStop, result.Reason)
+	}
+}
+
+func TestEvaluateSoftStop_NoMomentumAfterSixtyMinutes(t *testing.T) {
+	plan := newLongPlan(50000, 45000, 62000)
+	plan.MinHoldMinutes = 30
+	plan.PeakPnLPercent = 2.0
+	pos := newLongPosition(50000, 48400, -3.2, pastTime(70))
+	md := newMarketData(48400)
+	e := &PositionEvaluator{Position: pos, Plan: plan, MarketData: md, Symbol: "BTCUSDT"}
+
+	result := e.Evaluate()
+	if result.Action != "close" || result.IsHardStop {
+		t.Fatalf("持仓超过60分钟且MFE不足、当前亏损超过3%%应软止损: action=%s hard=%v reason=%s", result.Action, result.IsHardStop, result.Reason)
+	}
+}
+
+func TestEvaluateSoftStop_LostBreakevenWithWeakMomentum(t *testing.T) {
+	plan := newLongPlan(50000, 45000, 62000)
+	plan.MinHoldMinutes = 30
+	plan.PeakPnLPercent = 4.0
+	pos := newLongPosition(50000, 49900, -0.2, pastTime(90))
+	md := newMarketData(49900)
+	md.PriceChange1h = -0.8
+	md.MidTermSeries15m = &market.MidTermData15m{
+		EMA20Values: []float64{49800},
+		EMA50Values: []float64{50100},
+		MACDHist:    []float64{-1},
+	}
+	e := &PositionEvaluator{Position: pos, Plan: plan, MarketData: md, Symbol: "BTCUSDT"}
+
+	result := e.Evaluate()
+	if result.Action != "close" {
+		t.Fatalf("曾盈利后跌回开仓价以下且动量转弱应平仓: action=%s reason=%s", result.Action, result.Reason)
 	}
 }
 

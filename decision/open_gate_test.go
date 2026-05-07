@@ -95,6 +95,136 @@ func TestEvaluateOpenGate_ExecutionQualityBlocks(t *testing.T) {
 	}
 }
 
+func TestEvaluateOpenGate_BTCMultiTimeframeBearishBlocksAltLong(t *testing.T) {
+	ctx := newTestContext()
+	ctx.MarketDataMap["BTCUSDT"] = &market.Data{
+		Symbol:         "BTCUSDT",
+		CurrentPrice:   95000,
+		CurrentDIPlus:  12,
+		CurrentDIMinus: 28,
+		LongerTermContext: &market.LongerTermData{
+			EMA20: 97000,
+			EMA50: 98000,
+		},
+		MidTermSeries1h: &market.MidTermData1h{
+			EMA20Values: []float64{96000},
+			EMA50Values: []float64{98000},
+			MACDHist:    []float64{-10},
+		},
+	}
+
+	result := EvaluateOpenGate(OpenGateInput{
+		Decision:   &Decision{Symbol: "SOLUSDT", Action: "open_long"},
+		Context:    ctx,
+		MarketData: newTestMarketData(100),
+	})
+	if result.Allowed {
+		t.Fatalf("BTC 1h/4h 空头结构应阻断高 beta 多单: %+v", result)
+	}
+}
+
+func TestEvaluateOpenGate_BTCConflictPenalizesAltLong(t *testing.T) {
+	ctx := newTestContext()
+	ctx.MarketDataMap["BTCUSDT"] = &market.Data{
+		Symbol:         "BTCUSDT",
+		CurrentPrice:   100000,
+		CurrentDIPlus:  30,
+		CurrentDIMinus: 15,
+		LongerTermContext: &market.LongerTermData{
+			EMA20: 99000,
+			EMA50: 97000,
+		},
+		MidTermSeries15m: &market.MidTermData15m{
+			EMA20Values: []float64{99500},
+			EMA50Values: []float64{100100},
+			MACDHist:    []float64{-1},
+		},
+		MidTermSeries1h: &market.MidTermData1h{
+			EMA20Values: []float64{100200},
+			EMA50Values: []float64{99000},
+			MACDHist:    []float64{1},
+		},
+	}
+
+	result := EvaluateOpenGate(OpenGateInput{
+		Decision:   &Decision{Symbol: "SOLUSDT", Action: "open_long"},
+		Context:    ctx,
+		MarketData: newTestMarketData(100),
+	})
+	if !result.Allowed || result.MinConfidence < btcConflictMinConfidence || result.EffectiveRisk >= ctx.MaxRiskPerTrade {
+		t.Fatalf("BTC 多周期冲突应降权并提高置信度: %+v", result)
+	}
+}
+
+func TestEvaluateOpenGate_SameSideExposureBlocksThirdHighBetaLong(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Positions = []PositionInfo{
+		{Symbol: "ETHUSDT", Side: "long", UnrealizedPnLPct: 1},
+		{Symbol: "SOLUSDT", Side: "BUY", UnrealizedPnLPct: 1},
+	}
+
+	result := EvaluateOpenGate(OpenGateInput{
+		Decision:   &Decision{Symbol: "BNBUSDT", Action: "open_long"},
+		Context:    ctx,
+		MarketData: newTestMarketData(100),
+	})
+	if result.Allowed {
+		t.Fatalf("已有2个同向多单时应拒绝新增高 beta 多单: %+v", result)
+	}
+}
+
+func TestEvaluateOpenGate_LosingSameSidePositionBlocksAdd(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Positions = []PositionInfo{
+		{Symbol: "SOLUSDT", Side: "long", UnrealizedPnLPct: -4.2},
+	}
+
+	result := EvaluateOpenGate(OpenGateInput{
+		Decision:   &Decision{Symbol: "ETHUSDT", Action: "open_long"},
+		Context:    ctx,
+		MarketData: newTestMarketData(100),
+	})
+	if result.Allowed {
+		t.Fatalf("已有同向浮亏持仓时应拒绝继续加同向仓: %+v", result)
+	}
+}
+
+func TestEvaluateOpenGate_ExtremeADXChaseBlocks(t *testing.T) {
+	ctx := newTestContext()
+	md := newTestMarketData(100)
+	md.CurrentADX = 65
+	md.PriceChange1h = 2.0
+	md.CurrentEMA20 = 94
+	md.MidTermSeries15m = &market.MidTermData15m{
+		RSI14Values: []float64{68},
+		MACDHist:    []float64{2, 1},
+	}
+
+	result := EvaluateOpenGate(OpenGateInput{
+		Decision:   &Decision{Symbol: "SOLUSDT", Action: "open_long"},
+		Context:    ctx,
+		MarketData: md,
+	})
+	if result.Allowed {
+		t.Fatalf("极高ADX且无回踩确认时应拒绝追高: %+v", result)
+	}
+}
+
+func TestEvaluateOpenGate_ElevatedADXPenalizes(t *testing.T) {
+	ctx := newTestContext()
+	md := newTestMarketData(100)
+	md.CurrentADX = 55
+
+	result := EvaluateOpenGate(OpenGateInput{
+		Decision:   &Decision{Symbol: "SOLUSDT", Action: "open_long"},
+		Context:    ctx,
+		MarketData: md,
+	})
+	if !result.Allowed || result.MinConfidence < highADXMinConfidence || result.EffectiveRisk >= ctx.MaxRiskPerTrade {
+		t.Fatalf("高ADX但未追高阻断时应降权并提高置信度: %+v", result)
+	}
+}
+
 func TestValidateOpenDecision_ShortConfidenceTooLow(t *testing.T) {
 	ctx := newTestContext()
 	ctx.MarketDataMap["BTCUSDT"] = newTestMarketData(100)

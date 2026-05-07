@@ -148,6 +148,58 @@ func TestBuildRollingPerformance_SymbolAndSideGates(t *testing.T) {
 	}
 }
 
+func TestBuildRollingPerformance_RecentTwoLossesReduceRisk(t *testing.T) {
+	now := time.Date(2026, 5, 6, 12, 30, 0, 0, time.UTC)
+	outcomes := []TradeOutcome{
+		{Symbol: "BTCUSDT", Side: "long", PnL: 1, CloseTime: now},
+		{Symbol: "ETHUSDT", Side: "long", PnL: -0.5, CloseTime: now.Add(time.Minute)},
+		{Symbol: "SOLUSDT", Side: "long", PnL: -0.5, CloseTime: now.Add(2 * time.Minute)},
+	}
+
+	rolling := BuildRollingPerformance(outcomes, now)
+	if rolling.RecentLossStreak != 2 {
+		t.Fatalf("最近两笔连续亏损应记录 streak=2，实际=%d", rolling.RecentLossStreak)
+	}
+	if rolling.EffectiveMaxRiskPerTrade != 0.01 {
+		t.Fatalf("最近两笔亏损后风险应降至1%%，实际=%.4f", rolling.EffectiveMaxRiskPerTrade)
+	}
+}
+
+func TestBuildRollingPerformance_RecentThreeTwoLossesRaisesConfidence(t *testing.T) {
+	now := time.Date(2026, 5, 6, 13, 0, 0, 0, time.UTC)
+	outcomes := []TradeOutcome{
+		{Symbol: "BTCUSDT", Side: "long", PnL: 0.4, CloseTime: now},
+		{Symbol: "ETHUSDT", Side: "long", PnL: -0.8, CloseTime: now.Add(time.Minute)},
+		{Symbol: "SOLUSDT", Side: "short", PnL: -0.7, CloseTime: now.Add(2 * time.Minute)},
+	}
+
+	rolling := BuildRollingPerformance(outcomes, now)
+	if rolling.Recent3.TradeCount != 3 || rolling.Recent3Losses != 2 || rolling.Recent3.TotalPnL >= 0 {
+		t.Fatalf("最近3笔亏损统计错误: recent3=%+v losses=%d", rolling.Recent3, rolling.Recent3Losses)
+	}
+	if rolling.SideGates["long"].State != "penalize" || rolling.SideGates["long"].MinConfidence < 85 {
+		t.Fatalf("最近3笔两亏后 long side 应提高置信度: %+v", rolling.SideGates["long"])
+	}
+	if rolling.SideGates["short"].MinConfidence < 85 {
+		t.Fatalf("最近3笔两亏后 short side 应保持或提高置信度: %+v", rolling.SideGates["short"])
+	}
+}
+
+func TestBuildRollingPerformance_InsufficientSamplesDoNotBlock(t *testing.T) {
+	now := time.Date(2026, 5, 6, 13, 30, 0, 0, time.UTC)
+	outcomes := []TradeOutcome{
+		{Symbol: "BTCUSDT", Side: "long", PnL: -0.5, CloseTime: now},
+	}
+
+	rolling := BuildRollingPerformance(outcomes, now)
+	if rolling.EffectiveMaxRiskPerTrade != 0.02 {
+		t.Fatalf("样本不足时不应降风险: %.4f", rolling.EffectiveMaxRiskPerTrade)
+	}
+	if rolling.SideGates["long"].State == "block" {
+		t.Fatalf("样本不足不应 block long side: %+v", rolling.SideGates["long"])
+	}
+}
+
 func TestBuildExecutionQuality_DetectsRiskAndRejections(t *testing.T) {
 	falseValue := false
 	now := time.Date(2026, 5, 6, 13, 0, 0, 0, time.UTC)

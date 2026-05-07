@@ -8,6 +8,16 @@ import (
 	"time"
 )
 
+const (
+	highBetaLongMaxSameSidePositions = 2
+	losingSameSideBlockPnLPct        = -4.0
+	extremeADX                       = 60.0
+	elevatedADX                      = 50.0
+	highADXRiskMultiplier            = 0.5
+	highADXMinConfidence             = 90
+	btcConflictMinConfidence         = 88
+)
+
 // OpenGateInput 是开仓准入评估的输入。
 type OpenGateInput struct {
 	Decision         *Decision
@@ -54,7 +64,10 @@ func EvaluateOpenGate(input OpenGateInput) OpenGateResult {
 
 	applyRollingPerformanceGate(&result, input.Decision, ctx)
 	applyBTCMarketGate(&result, ctx)
+	applyBTCMultiTimeframeGate(&result, input.Decision, ctx)
+	applySameSideExposureGate(&result, input.Decision, ctx)
 	applyCorrelationConcentrationGate(&result, input.Decision, ctx)
+	applyHighADXChaseGate(&result, input.Decision, input.MarketData)
 	applyShortSideGate(&result, input.Decision)
 	applyExecutionQualityGate(&result, input.ExecutionQuality)
 
@@ -113,6 +126,9 @@ func applyRollingPerformanceGate(result *OpenGateResult, d *Decision, ctx *Conte
 }
 
 func applyBTCMarketGate(result *OpenGateResult, ctx *Context) {
+	if ctx.MarketDataMap == nil {
+		return
+	}
 	btcData := ctx.MarketDataMap["BTCUSDT"]
 	if btcData == nil {
 		return
@@ -130,6 +146,62 @@ func applyBTCMarketGate(result *OpenGateResult, ctx *Context) {
 	}
 }
 
+func applyBTCMultiTimeframeGate(result *OpenGateResult, d *Decision, ctx *Context) {
+	if d.Action != "open_long" || !isHighBetaAltcoin(d.Symbol) || ctx.MarketDataMap == nil {
+		return
+	}
+	btcData := ctx.MarketDataMap["BTCUSDT"]
+	if btcData == nil {
+		return
+	}
+	if isBearishStructure(btcData) {
+		result.block("BTC 1h/4h 明显转弱，禁止新开高 beta 山寨多单")
+		return
+	}
+	if hasBTCMultiTimeframeConflict(btcData) {
+		result.penalize("BTC 15m 与 1h/4h 趋势冲突，高 beta 山寨多单降权")
+		if result.MinConfidence < btcConflictMinConfidence {
+			result.MinConfidence = btcConflictMinConfidence
+		}
+		result.EffectiveRisk *= 0.5
+	}
+}
+
+func applySameSideExposureGate(result *OpenGateResult, d *Decision, ctx *Context) {
+	side := decisionSide(d.Action)
+	if side == "" {
+		return
+	}
+	sameSidePositions := 0
+	sameSideHighBetaPositions := 0
+	for _, pos := range ctx.Positions {
+		posSide := normalizePositionSide(pos.Side)
+		if posSide != side {
+			continue
+		}
+		if pos.UnrealizedPnLPct <= losingSameSideBlockPnLPct {
+			result.block(fmt.Sprintf("已有同向持仓 %s 浮亏 %.2f%%，禁止继续加同向仓", pos.Symbol, pos.UnrealizedPnLPct))
+			return
+		}
+		sameSidePositions++
+		if isHighBetaAltcoin(pos.Symbol) {
+			sameSideHighBetaPositions++
+		}
+	}
+
+	if d.Action != "open_long" || !isHighBetaAltcoin(d.Symbol) {
+		return
+	}
+	if sameSidePositions >= highBetaLongMaxSameSidePositions {
+		result.block("已有2个及以上同向多单，禁止继续叠加高 beta 多单")
+		return
+	}
+	if sameSideHighBetaPositions >= 1 {
+		result.penalize("已有同向高 beta 多单，新开仓风险减半")
+		result.EffectiveRisk *= 0.5
+	}
+}
+
 func applyCorrelationConcentrationGate(result *OpenGateResult, d *Decision, ctx *Context) {
 	targetCorr, ok := ctx.CorrelationMap[d.Symbol]
 	if !ok || !targetCorr.IsHighCorr {
@@ -141,7 +213,7 @@ func applyCorrelationConcentrationGate(result *OpenGateResult, d *Decision, ctx 
 	}
 	sameSideHighCorr := 0
 	for _, pos := range ctx.Positions {
-		if pos.Side != side {
+		if normalizePositionSide(pos.Side) != side {
 			continue
 		}
 		if corr, ok := ctx.CorrelationMap[pos.Symbol]; ok && corr.IsHighCorr {
@@ -155,6 +227,26 @@ func applyCorrelationConcentrationGate(result *OpenGateResult, d *Decision, ctx 
 	if sameSideHighCorr == 1 {
 		result.penalize("已有同向高相关持仓，新开仓降权")
 		result.EffectiveRisk *= 0.5
+	}
+}
+
+func applyHighADXChaseGate(result *OpenGateResult, d *Decision, data *market.Data) {
+	if d.Action != "open_long" || !isHighBetaAltcoin(d.Symbol) || data == nil {
+		return
+	}
+	if data.CurrentADX > extremeADX {
+		isExtended := data.PriceChange1h >= 1.5 || data.PriceChange4h >= 4
+		if isExtended && !hasPullbackConfirmationForLong(data) {
+			result.block(fmt.Sprintf("%s ADX %.1f 且短期涨幅过大，缺少回踩确认，拒绝追高", d.Symbol, data.CurrentADX))
+			return
+		}
+	}
+	if data.CurrentADX > elevatedADX {
+		result.penalize(fmt.Sprintf("%s ADX %.1f 偏高，按趋势末端追入风险降权", d.Symbol, data.CurrentADX))
+		if result.MinConfidence < highADXMinConfidence {
+			result.MinConfidence = highADXMinConfidence
+		}
+		result.EffectiveRisk *= highADXRiskMultiplier
 	}
 }
 
@@ -214,4 +306,119 @@ func appendUniqueReason(reasons []string, reason string) []string {
 		}
 	}
 	return append(reasons, reason)
+}
+
+func isHighBetaAltcoin(symbol string) bool {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	return symbol != "" && symbol != "BTCUSDT" && symbol != "ETHUSDT"
+}
+
+func normalizePositionSide(side string) string {
+	switch strings.ToLower(strings.TrimSpace(side)) {
+	case "long", "buy":
+		return "long"
+	case "short", "sell":
+		return "short"
+	default:
+		return strings.ToLower(strings.TrimSpace(side))
+	}
+}
+
+func decisionSide(action string) string {
+	switch action {
+	case "open_long":
+		return "long"
+	case "open_short":
+		return "short"
+	default:
+		return ""
+	}
+}
+
+func isBearishStructure(data *market.Data) bool {
+	if data == nil {
+		return false
+	}
+	if data.CurrentDIPlus > 0 && data.CurrentDIMinus > 0 && data.CurrentDIPlus < data.CurrentDIMinus &&
+		data.LongerTermContext != nil && data.LongerTermContext.EMA20 > 0 && data.CurrentPrice < data.LongerTermContext.EMA20 {
+		return true
+	}
+	if data.LongerTermContext != nil {
+		macdHist := lastFloat(data.LongerTermContext.MACDHist)
+		if macdHist < 0 && data.LongerTermContext.EMA50 > 0 && data.CurrentPrice < data.LongerTermContext.EMA50 {
+			return true
+		}
+	}
+	if data.MidTermSeries1h != nil {
+		ema20 := lastFloat(data.MidTermSeries1h.EMA20Values)
+		ema50 := lastFloat(data.MidTermSeries1h.EMA50Values)
+		if ema20 > 0 && ema50 > 0 && ema20 < ema50 {
+			return true
+		}
+		macdHist := lastFloat(data.MidTermSeries1h.MACDHist)
+		if macdHist < 0 && data.PriceChange1h < 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasBTCMultiTimeframeConflict(data *market.Data) bool {
+	if data == nil || data.MidTermSeries15m == nil {
+		return false
+	}
+	shortBearish := isSeriesBearish(data.MidTermSeries15m.EMA20Values, data.MidTermSeries15m.EMA50Values, data.MidTermSeries15m.MACDHist)
+	shortBullish := isSeriesBullish(data.MidTermSeries15m.EMA20Values, data.MidTermSeries15m.EMA50Values, data.MidTermSeries15m.MACDHist)
+	if !shortBearish && !shortBullish {
+		return false
+	}
+
+	midBullish := false
+	midBearish := false
+	if data.MidTermSeries1h != nil {
+		midBullish = isSeriesBullish(data.MidTermSeries1h.EMA20Values, data.MidTermSeries1h.EMA50Values, data.MidTermSeries1h.MACDHist)
+		midBearish = isSeriesBearish(data.MidTermSeries1h.EMA20Values, data.MidTermSeries1h.EMA50Values, data.MidTermSeries1h.MACDHist)
+	}
+	longBullish := data.LongerTermContext != nil && data.LongerTermContext.EMA20 > 0 && data.CurrentPrice > data.LongerTermContext.EMA20 && data.CurrentDIPlus >= data.CurrentDIMinus
+	longBearish := data.LongerTermContext != nil && data.LongerTermContext.EMA20 > 0 && data.CurrentPrice < data.LongerTermContext.EMA20 && data.CurrentDIPlus < data.CurrentDIMinus
+
+	return (shortBearish && (midBullish || longBullish)) || (shortBullish && (midBearish || longBearish))
+}
+
+func hasPullbackConfirmationForLong(data *market.Data) bool {
+	if data == nil {
+		return false
+	}
+	if data.CurrentEMA20 > 0 && data.CurrentPrice <= data.CurrentEMA20*1.01 {
+		return true
+	}
+	if data.MidTermSeries15m != nil {
+		rsi := lastFloat(data.MidTermSeries15m.RSI14Values)
+		hist := data.MidTermSeries15m.MACDHist
+		if rsi > 0 && rsi < 60 && len(hist) >= 2 && hist[len(hist)-1] > hist[len(hist)-2] {
+			return true
+		}
+	}
+	return false
+}
+
+func isSeriesBullish(ema20Values, ema50Values, macdHistValues []float64) bool {
+	ema20 := lastFloat(ema20Values)
+	ema50 := lastFloat(ema50Values)
+	macdHist := lastFloat(macdHistValues)
+	return ema20 > 0 && ema50 > 0 && ema20 >= ema50 && macdHist >= 0
+}
+
+func isSeriesBearish(ema20Values, ema50Values, macdHistValues []float64) bool {
+	ema20 := lastFloat(ema20Values)
+	ema50 := lastFloat(ema50Values)
+	macdHist := lastFloat(macdHistValues)
+	return ema20 > 0 && ema50 > 0 && ema20 < ema50 && macdHist < 0
+}
+
+func lastFloat(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	return values[len(values)-1]
 }

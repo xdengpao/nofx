@@ -363,8 +363,11 @@ type SymbolPerformance struct {
 type RollingPerformanceSnapshot struct {
 	SymbolGates              map[string]PerformanceGate `json:"symbol_gates"`
 	SideGates                map[string]PerformanceGate `json:"side_gates"`
+	Recent3                  RollingStats               `json:"recent_3"`
 	Recent10                 RollingStats               `json:"recent_10"`
 	Recent20                 RollingStats               `json:"recent_20"`
+	RecentLossStreak         int                        `json:"recent_loss_streak,omitempty"`
+	Recent3Losses            int                        `json:"recent_3_losses,omitempty"`
 	EffectiveMaxRiskPerTrade float64                    `json:"effective_max_risk_per_trade"`
 	Reasons                  []string                   `json:"reasons,omitempty"`
 }
@@ -526,8 +529,11 @@ func BuildRollingPerformance(outcomes []TradeOutcome, now time.Time) *RollingPer
 	snapshot := &RollingPerformanceSnapshot{
 		SymbolGates:              make(map[string]PerformanceGate),
 		SideGates:                make(map[string]PerformanceGate),
+		Recent3:                  rollingStats(lastTrades(outcomes, 3)),
 		Recent10:                 rollingStats(lastTrades(outcomes, 10)),
 		Recent20:                 rollingStats(lastTrades(outcomes, 20)),
+		RecentLossStreak:         recentLossStreak(outcomes),
+		Recent3Losses:            countLosses(lastTrades(outcomes, 3)),
 		EffectiveMaxRiskPerTrade: 0.02,
 	}
 	if now.IsZero() {
@@ -540,6 +546,10 @@ func BuildRollingPerformance(outcomes []TradeOutcome, now time.Time) *RollingPer
 	} else if snapshot.Recent10.TradeCount >= 10 && snapshot.Recent10.ProfitFactor < 1.0 {
 		snapshot.EffectiveMaxRiskPerTrade = 0.01
 		snapshot.Reasons = append(snapshot.Reasons, "最近10笔PF低于1.0，单笔风险降至1%")
+	}
+	if snapshot.RecentLossStreak >= 2 && snapshot.EffectiveMaxRiskPerTrade > 0.01 {
+		snapshot.EffectiveMaxRiskPerTrade = 0.01
+		snapshot.Reasons = append(snapshot.Reasons, "最近2笔连续亏损，下一笔单笔风险降至1%")
 	}
 
 	symbols := make(map[string]struct{})
@@ -564,6 +574,7 @@ func BuildRollingPerformance(outcomes []TradeOutcome, now time.Time) *RollingPer
 		})
 		snapshot.SideGates[side] = buildSideGate(side, trades)
 	}
+	applyGlobalRecentLossGate(snapshot)
 
 	return snapshot
 }
@@ -676,6 +687,55 @@ func rollingStats(trades []TradeOutcome) RollingStats {
 	}
 	_ = losses
 	return stats
+}
+
+func recentLossStreak(trades []TradeOutcome) int {
+	streak := 0
+	for i := len(trades) - 1; i >= 0; i-- {
+		if trades[i].PnL < 0 {
+			streak++
+			continue
+		}
+		break
+	}
+	return streak
+}
+
+func countLosses(trades []TradeOutcome) int {
+	losses := 0
+	for _, trade := range trades {
+		if trade.PnL < 0 {
+			losses++
+		}
+	}
+	return losses
+}
+
+func applyGlobalRecentLossGate(snapshot *RollingPerformanceSnapshot) {
+	if snapshot == nil || snapshot.Recent3.TradeCount < 3 ||
+		snapshot.Recent3Losses < 2 || snapshot.Recent3.TotalPnL >= 0 {
+		return
+	}
+	snapshot.Reasons = append(snapshot.Reasons, "最近3笔中至少2笔亏损且总PnL为负，提高下一笔开仓门槛")
+	for _, side := range []string{"long", "short"} {
+		gate := snapshot.SideGates[side]
+		if gate.Key == "" {
+			gate = PerformanceGate{Key: side, Scope: "side", State: "allow", RiskMultiplier: 1}
+		}
+		if gate.State == "" || gate.State == "allow" {
+			gate.State = "penalize"
+		}
+		if gate.MinConfidence < 85 {
+			gate.MinConfidence = 85
+		}
+		if gate.RiskMultiplier <= 0 || gate.RiskMultiplier > 0.75 {
+			gate.RiskMultiplier = 0.75
+		}
+		if gate.Reason == "" {
+			gate.Reason = "最近3笔中至少2笔亏损且总PnL为负"
+		}
+		snapshot.SideGates[side] = gate
+	}
 }
 
 func lastTrades(trades []TradeOutcome, n int) []TradeOutcome {

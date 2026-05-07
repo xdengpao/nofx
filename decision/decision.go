@@ -293,10 +293,11 @@ func evaluateExistingPositions(ctx *Context) []Decision {
 		marketData := ctx.MarketDataMap[pos.Symbol]
 
 		evaluator := &PositionEvaluator{
-			Position:   &pos,
-			Plan:       plan,
-			MarketData: marketData,
-			Symbol:     pos.Symbol,
+			Position:      &pos,
+			Plan:          plan,
+			MarketData:    marketData,
+			BTCMarketData: ctx.MarketDataMap["BTCUSDT"],
+			Symbol:        pos.Symbol,
 		}
 
 		result := evaluator.Evaluate()
@@ -1359,14 +1360,22 @@ func buildSystemPrompt(ctx *Context) string {
 	sb.WriteString("| 单笔风险 | ≤ 账户净值的2% |\n")
 	sb.WriteString(fmt.Sprintf("| 仓位上限 | 山寨币 %.0f USD / BTC&ETH %.0f USD |\n", maxPositionForAltcoin, maxPositionForBTCETH))
 	sb.WriteString("| OI价值 | ≥ 15M USD |\n\n")
+	sb.WriteString("**额外风控硬约束**:\n")
+	sb.WriteString("- BTC 1h/4h 明显转弱时，禁止新开高 beta 山寨多单\n")
+	sb.WriteString("- BTC 15m 与 1h/4h 方向冲突时，山寨多单必须降权且置信度更高\n")
+	sb.WriteString("- 已有2个同向多单时，不要继续叠加高 beta 多单\n")
+	sb.WriteString("- 任一同向持仓浮亏超过4%时，禁止继续加同向仓\n")
+	sb.WriteString("- ADX 25-50 可视为趋势确认；ADX>60 代表追高风险，必须等待回踩确认\n")
+	sb.WriteString("- 最近连续亏损后系统会自动降仓，AI应同步降低交易频率\n\n")
 
 	sb.WriteString("# 📋 开仓决策流程\n\n")
 	sb.WriteString("1. **评估BTC趋势** → 确定大方向\n")
-	sb.WriteString("2. **筛选候选币种** → ADX>25 + 趋势方向一致\n")
-	sb.WriteString("3. **多时间框架确认** → 4h/1h/15m 信号对齐\n")
-	sb.WriteString("4. **计算仓位** → ATR自适应 + 相关性调整\n")
-	sb.WriteString("5. **设置止损止盈** → 止损=ATR×2.5, RR≥1:3.5\n")
-	sb.WriteString("6. **定义失效条件** → 什么情况下计划失效\n\n")
+	sb.WriteString("2. **筛选候选币种** → ADX 25-50 + 趋势方向一致，ADX>60 需回踩确认\n")
+	sb.WriteString("3. **检查组合暴露** → 避免同向高 beta 持仓过度集中\n")
+	sb.WriteString("4. **多时间框架确认** → 4h/1h/15m 信号对齐\n")
+	sb.WriteString("5. **计算仓位** → ATR自适应 + 相关性调整 + 亏损后降仓\n")
+	sb.WriteString("6. **设置止损止盈** → 止损=ATR×2.5, RR≥1:3.5\n")
+	sb.WriteString("7. **定义失效条件** → 什么情况下计划失效\n\n")
 
 	// 🆕 新增：失效条件格式说明
 	sb.WriteString("# 🚫 失效条件格式（重要！）\n\n")

@@ -44,6 +44,16 @@ type TrailingStopLevel struct {
 	RequireADXAbove float64
 }
 
+const (
+	softStopLossPnLPct         = -5.0
+	noMomentumMFEThresholdPct  = 3.0
+	noMomentumLossPnLPct       = -3.0
+	noMomentumHoldMinutes      = 60
+	highPeakProfitProtectPct   = 12.0
+	highPeakProfitProtectRatio = 0.65
+	basePeakProfitProtectRatio = 0.60
+)
+
 // DynamicExitTranche 动态出场档位
 type DynamicExitTranche struct {
 	BaseRR           float64
@@ -64,15 +74,15 @@ var defaultTPConfig = &TakeProfitEngineConfig{
 	MinimumProfitLock:    5.0,
 	ATRTrailingMult:      2.5,
 	ProfitProtectTrigger: 8.0,
-	ProfitProtectRatio:   0.5,
+	ProfitProtectRatio:   basePeakProfitProtectRatio,
 }
 
 var defaultTrailingConfig = &TrailingStopConfig{
-	BreakevenThreshold: 10.0,
+	BreakevenThreshold: 6.0,
 	LockProfitThresholds: []TrailingStopLevel{
-		{PnLThreshold: 15.0, LockPercent: 0.30, RequireADXAbove: 25},
-		{PnLThreshold: 20.0, LockPercent: 0.50, RequireADXAbove: 20},
-		{PnLThreshold: 30.0, LockPercent: 0.70, RequireADXAbove: 15},
+		{PnLThreshold: 10.0, LockPercent: 0.25, RequireADXAbove: 20},
+		{PnLThreshold: 12.0, LockPercent: 0.40, RequireADXAbove: 20},
+		{PnLThreshold: 20.0, LockPercent: 0.60, RequireADXAbove: 15},
 	},
 	UseATRMultiplier:    true,
 	ATRSafetyMultiplier: 1.5,
@@ -97,10 +107,11 @@ func GetTakeProfitConfig() *TakeProfitEngineConfig {
 
 // PositionEvaluator 持仓评估器
 type PositionEvaluator struct {
-	Position   *PositionInfo
-	Plan       *TradePlan
-	MarketData *market.Data
-	Symbol     string
+	Position      *PositionInfo
+	Plan          *TradePlan
+	MarketData    *market.Data
+	BTCMarketData *market.Data
+	Symbol        string
 }
 
 // Evaluate 评估持仓
@@ -177,42 +188,47 @@ func (e *PositionEvaluator) Evaluate() *EvaluationResult {
 		return result
 	}
 
-	// 第四优先级：利润保护机制
+	// 第四优先级：保护期后的软止损
+	if softStopResult := e.evaluateSoftStop(holdingMinutes); softStopResult != nil {
+		return softStopResult
+	}
+
+	// 第五优先级：利润保护机制
 	if tpConfig.EnableProfitProtect && e.Plan != nil {
 		if protectResult := e.checkProfitProtection(tpConfig); protectResult != nil {
 			return protectResult
 		}
 	}
 
-	// 第五优先级：ATR跟踪止盈
+	// 第六优先级：ATR跟踪止盈
 	if tpConfig.EnableATRTrailing && e.Position.UnrealizedPnLPct > 5.0 && e.Plan != nil {
 		if atrResult := e.evaluateATRTrailingTakeProfit(tpConfig); atrResult != nil {
 			return atrResult
 		}
 	}
 
-	// 第六优先级：智能分批止盈
+	// 第七优先级：智能分批止盈
 	if tpConfig.EnableScaledExit && e.Plan != nil && e.Position.UnrealizedPnLPct > 0 {
 		if scaledResult := e.evaluateAdaptiveScaledExit(); scaledResult != nil {
 			return scaledResult
 		}
 	}
 
-	// 第七优先级：移动止损
+	// 第八优先级：移动止损
 	if e.Position.UnrealizedPnLPct > 0 && e.Plan != nil {
 		if trailingResult := e.evaluateTrailingStop(); trailingResult != nil {
 			return trailingResult
 		}
 	}
 
-	// 第八优先级：动态止盈调整
+	// 第九优先级：动态止盈调整
 	if tpConfig.EnableDynamicTP && e.Plan != nil {
 		if newTP := e.calculateDynamicTakeProfit(tpConfig); newTP > 0 {
 			result.NewTakeProfit = newTP
 		}
 	}
 
-	// 第九优先级：计划失效条件检查
+	// 第十优先级：计划失效条件检查
 	if holdingMinutes >= 60 && e.Plan != nil {
 		if invalidated, reason := e.checkPlanInvalidation(); invalidated {
 			return &EvaluationResult{
@@ -269,6 +285,86 @@ func (e *PositionEvaluator) getATR() float64 {
 }
 
 // ============================================================================
+// 保护期后的软止损
+// ============================================================================
+
+func (e *PositionEvaluator) evaluateSoftStop(holdingMinutes int64) *EvaluationResult {
+	pnlPct := e.Position.UnrealizedPnLPct
+	if pnlPct <= softStopLossPnLPct {
+		return &EvaluationResult{
+			Action: "close",
+			Reason: fmt.Sprintf("⚠️ 软止损触发: 持仓%d分钟，当前亏损%.2f%% <= %.2f%%",
+				holdingMinutes, pnlPct, softStopLossPnLPct),
+			IsHardStop: false,
+		}
+	}
+
+	if e.Plan == nil {
+		return nil
+	}
+
+	peakPnL := math.Max(e.Plan.PeakPnLPercent, pnlPct)
+	if holdingMinutes >= noMomentumHoldMinutes &&
+		peakPnL < noMomentumMFEThresholdPct &&
+		pnlPct <= noMomentumLossPnLPct {
+		return &EvaluationResult{
+			Action: "close",
+			Reason: fmt.Sprintf("⚠️ 动量失败软止损: 持仓%d分钟，MFE %.2f%% < %.2f%%，当前%.2f%%",
+				holdingMinutes, peakPnL, noMomentumMFEThresholdPct, pnlPct),
+			IsHardStop: false,
+		}
+	}
+
+	if e.checkLostBreakevenWithWeakMomentum(peakPnL) {
+		return &EvaluationResult{
+			Action: "close",
+			Reason: fmt.Sprintf("⚠️ 浮盈回吐软止损: 峰值盈利%.2f%%，当前%.2f%%，短周期动量转弱",
+				peakPnL, pnlPct),
+			IsHardStop: false,
+		}
+	}
+
+	return nil
+}
+
+func (e *PositionEvaluator) checkLostBreakevenWithWeakMomentum(peakPnL float64) bool {
+	if peakPnL < noMomentumMFEThresholdPct || e.Position.UnrealizedPnLPct > 0 {
+		return false
+	}
+	return hasWeakShortTermMomentum(e.MarketData, e.Plan.Direction) ||
+		hasWeakShortTermMomentum(e.BTCMarketData, e.Plan.Direction)
+}
+
+func hasWeakShortTermMomentum(data *market.Data, direction string) bool {
+	if data == nil {
+		return false
+	}
+	direction = strings.ToLower(strings.TrimSpace(direction))
+	macdHist := 0.0
+	if data.MidTermSeries15m != nil {
+		macdHist = market.GetLastValue(data.MidTermSeries15m.MACDHist)
+		ema20 := market.GetLastValue(data.MidTermSeries15m.EMA20Values)
+		ema50 := market.GetLastValue(data.MidTermSeries15m.EMA50Values)
+		if direction == "long" && ema20 > 0 && ema50 > 0 && ema20 < ema50 {
+			return true
+		}
+		if direction == "short" && ema20 > 0 && ema50 > 0 && ema20 > ema50 {
+			return true
+		}
+	}
+	if data.IntradaySeries != nil && macdHist == 0 {
+		macdHist = market.GetLastValue(data.IntradaySeries.MACDHist)
+	}
+	if direction == "long" {
+		return macdHist < 0 || data.PriceChange1h < -0.5 || data.CurrentDIPlus < data.CurrentDIMinus
+	}
+	if direction == "short" {
+		return macdHist > 0 || data.PriceChange1h > 0.5 || data.CurrentDIPlus > data.CurrentDIMinus
+	}
+	return false
+}
+
+// ============================================================================
 // 利润保护
 // ============================================================================
 
@@ -288,7 +384,7 @@ func (e *PositionEvaluator) checkProfitProtection(config *TakeProfitEngineConfig
 		return nil
 	}
 
-	protectLine := peakPnL * config.ProfitProtectRatio
+	protectLine := peakPnL * profitProtectRatioForPeak(peakPnL, config)
 
 	if pnlPct < protectLine {
 		return &EvaluationResult{
@@ -309,6 +405,17 @@ func (e *PositionEvaluator) checkProfitProtection(config *TakeProfitEngineConfig
 	}
 
 	return nil
+}
+
+func profitProtectRatioForPeak(peakPnL float64, config *TakeProfitEngineConfig) float64 {
+	ratio := basePeakProfitProtectRatio
+	if config != nil && config.ProfitProtectRatio > ratio {
+		ratio = config.ProfitProtectRatio
+	}
+	if peakPnL >= highPeakProfitProtectPct && ratio < highPeakProfitProtectRatio {
+		ratio = highPeakProfitProtectRatio
+	}
+	return ratio
 }
 
 // ============================================================================
