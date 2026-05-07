@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"nofx/config"
+	"nofx/logger"
 	"nofx/manager"
 	"testing"
+	"time"
 )
 
 // ============================================================================
@@ -368,6 +370,40 @@ func TestDecisionsLatest_WithTrader(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("GET /api/decisions/latest: 期望状态码 200, 实际=%d", w.Code)
+	}
+}
+
+func TestFilterDisplayableDecisionRecords_DropsLegacyEmptyRecords(t *testing.T) {
+	legacyEmpty := &logger.DecisionRecord{
+		Timestamp:    time.Now().Add(-2 * time.Minute),
+		CoTTrace:     "无决策输出",
+		Success:      true,
+		Decisions:    nil,
+		DecisionJSON: "",
+	}
+	validWait := &logger.DecisionRecord{
+		Timestamp:    time.Now().Add(-1 * time.Minute),
+		CoTTrace:     "距离上次AI新机会分析2.8分钟，未满15分钟间隔",
+		DecisionJSON: `[{"symbol":"ALL","action":"wait"}]`,
+		Decisions: []logger.DecisionAction{{
+			Symbol:  "ALL",
+			Action:  "wait",
+			Success: true,
+		}},
+		Success: true,
+	}
+
+	records := filterDisplayableDecisionRecords([]*logger.DecisionRecord{
+		nil,
+		legacyEmpty,
+		validWait,
+	})
+
+	if len(records) != 1 {
+		t.Fatalf("过滤后应只剩 1 条有效决策，实际=%d", len(records))
+	}
+	if records[0] != validWait {
+		t.Fatalf("应保留带 wait 原因的有效决策")
 	}
 }
 

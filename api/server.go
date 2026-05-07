@@ -4,9 +4,16 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"nofx/logger"
 	"nofx/manager"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+)
+
+const (
+	latestDecisionLimit      = 5
+	latestDecisionScanWindow = 100
 )
 
 // Server HTTP API服务器
@@ -246,12 +253,16 @@ func (s *Server) handleLatestDecisions(c *gin.Context) {
 		return
 	}
 
-	records, err := trader.GetDecisionLogger().GetLatestRecords(5)
+	records, err := trader.GetDecisionLogger().GetLatestRecords(latestDecisionScanWindow)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": fmt.Sprintf("获取决策日志失败: %v", err),
 		})
 		return
+	}
+	records = filterDisplayableDecisionRecords(records)
+	if len(records) > latestDecisionLimit {
+		records = records[len(records)-latestDecisionLimit:]
 	}
 
 	// 反转数组，让最新的在前面（用于列表显示）
@@ -261,6 +272,23 @@ func (s *Server) handleLatestDecisions(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, records)
+}
+
+func filterDisplayableDecisionRecords(records []*logger.DecisionRecord) []*logger.DecisionRecord {
+	filtered := make([]*logger.DecisionRecord, 0, len(records))
+	for _, record := range records {
+		if record == nil || isLegacyEmptyDecisionRecord(record) {
+			continue
+		}
+		filtered = append(filtered, record)
+	}
+	return filtered
+}
+
+func isLegacyEmptyDecisionRecord(record *logger.DecisionRecord) bool {
+	return len(record.Decisions) == 0 &&
+		strings.TrimSpace(record.DecisionJSON) == "" &&
+		strings.TrimSpace(record.CoTTrace) == "无决策输出"
 }
 
 // handleStatistics 统计信息
