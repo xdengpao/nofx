@@ -121,7 +121,10 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 	if shouldCallAI {
 		remainingBudget := calculateRemainingRiskBudget(ctx)
 		if remainingBudget <= 0 {
-			log.Printf("⚠️ 风险预算已用尽(剩余%.2f%%)，跳过新机会搜索", remainingBudget*100)
+			reason := fmt.Sprintf("风险预算已用尽(剩余%.2f%%)，跳过本周期新机会搜索", remainingBudget*100)
+			log.Printf("⚠️ %s", reason)
+			cotTrace = reason
+			aiDecisions = []Decision{waitDecision(reason)}
 		} else {
 			systemPrompt := buildSystemPrompt(ctx)
 			userPrompt = buildUserPrompt(ctx, remainingBudget)
@@ -165,15 +168,21 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 				cotTrace = parsedTrace
 
 				var validDecisions []Decision
+				var rejectedReasons []string
 				for _, d := range aiDecisions {
 					if d.Action == "open_long" || d.Action == "open_short" {
 						// 补充缺失参数
 						if err := ValidateAndEnrichDecision(&d, ctx); err != nil {
-							log.Printf("⚠️ 决策参数补充失败: %v", err)
+							reason := fmt.Sprintf("%s %s 参数补充失败: %v", d.Symbol, d.Action, err)
+							log.Printf("⚠️ 决策%s", reason)
+							rejectedReasons = append(rejectedReasons, reason)
+							continue
 						}
 
 						if err := validateOpenDecision(&d, ctx); err != nil {
+							reason := fmt.Sprintf("%s %s 被风控过滤: %v", d.Symbol, d.Action, err)
 							log.Printf("⚠️ 开仓决策验证失败: %v", err)
+							rejectedReasons = append(rejectedReasons, reason)
 							continue
 						}
 						validDecisions = append(validDecisions, d)
@@ -181,11 +190,25 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 						validDecisions = append(validDecisions, d)
 					}
 				}
+				if len(validDecisions) == 0 {
+					reason := "AI未给出可执行交易决策，等待更高质量机会"
+					if len(rejectedReasons) > 0 {
+						reason = "AI开仓建议已全部被风控过滤，等待更高质量机会: " + strings.Join(rejectedReasons, "; ")
+					}
+					validDecisions = append(validDecisions, waitDecision(reason))
+					if strings.TrimSpace(cotTrace) == "" {
+						cotTrace = reason
+					}
+				}
 				aiDecisions = validDecisions
 			}
 		}
 
 		ctx.LastAnalysisTime = time.Now()
+	} else {
+		reason := describeAISkipReason(ctx)
+		cotTrace = reason
+		aiDecisions = []Decision{waitDecision(reason)}
 	}
 
 	allDecisions := mergeDecisions(positionDecisions, aiDecisions)
@@ -205,6 +228,14 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 		AICallAttempted: shouldCallAI && userPrompt != "",
 		AICallSucceeded: shouldCallAI && userPrompt != "",
 	}, nil
+}
+
+func waitDecision(reason string) Decision {
+	return Decision{
+		Symbol:    "ALL",
+		Action:    "wait",
+		Reasoning: reason,
+	}
 }
 
 // ============================================================================
@@ -401,6 +432,31 @@ func shouldCallAIForNewOpportunities(ctx *Context) bool {
 	}
 
 	return true
+}
+
+func describeAISkipReason(ctx *Context) string {
+	if !ctx.AIBackoffUntil.IsZero() && time.Now().Before(ctx.AIBackoffUntil) {
+		return fmt.Sprintf("AI调用退避中，剩余%.1f分钟，跳过本周期新机会搜索", time.Until(ctx.AIBackoffUntil).Minutes())
+	}
+
+	if !ctx.LastAnalysisTime.IsZero() {
+		elapsed := time.Since(ctx.LastAnalysisTime).Minutes()
+		if elapsed < float64(ctx.AnalysisIntervalMin) {
+			return fmt.Sprintf("距离上次AI新机会分析%.1f分钟，未满%d分钟间隔，跳过本周期新机会搜索",
+				elapsed, ctx.AnalysisIntervalMin)
+		}
+	}
+
+	if ctx.Account.PositionCount >= 3 {
+		return fmt.Sprintf("持仓已满(%d/3)，跳过本周期新机会搜索", ctx.Account.PositionCount)
+	}
+
+	remainingBudget := calculateRemainingRiskBudget(ctx)
+	if remainingBudget <= 0.01 {
+		return fmt.Sprintf("风险预算不足(剩余%.2f%%)，跳过本周期新机会搜索", remainingBudget*100)
+	}
+
+	return "未满足AI新机会搜索条件，跳过本周期新机会搜索"
 }
 
 func calculateRemainingRiskBudget(ctx *Context) float64 {
