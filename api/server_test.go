@@ -373,11 +373,26 @@ func TestDecisionsLatest_WithTrader(t *testing.T) {
 	}
 }
 
-func TestFilterDisplayableDecisionRecords_DropsLegacyEmptyRecords(t *testing.T) {
+func TestFilterDisplayableDecisionRecords_DropsEmptySuccessfulRecords(t *testing.T) {
 	legacyEmpty := &logger.DecisionRecord{
 		Timestamp:    time.Now().Add(-2 * time.Minute),
 		CoTTrace:     "无决策输出",
 		Success:      true,
+		Decisions:    nil,
+		DecisionJSON: "",
+	}
+	analysisOnly := &logger.DecisionRecord{
+		Timestamp:    time.Now().Add(-90 * time.Second),
+		CoTTrace:     "## 分析\n有分析但没有决策JSON",
+		Success:      true,
+		Decisions:    nil,
+		DecisionJSON: "",
+	}
+	failedRecord := &logger.DecisionRecord{
+		Timestamp:    time.Now().Add(-75 * time.Second),
+		CoTTrace:     "AI调用失败",
+		Success:      false,
+		ErrorMessage: "AI调用失败",
 		Decisions:    nil,
 		DecisionJSON: "",
 	}
@@ -396,14 +411,16 @@ func TestFilterDisplayableDecisionRecords_DropsLegacyEmptyRecords(t *testing.T) 
 	records := filterDisplayableDecisionRecords([]*logger.DecisionRecord{
 		nil,
 		legacyEmpty,
+		analysisOnly,
+		failedRecord,
 		validWait,
 	})
 
-	if len(records) != 1 {
-		t.Fatalf("过滤后应只剩 1 条有效决策，实际=%d", len(records))
+	if len(records) != 2 {
+		t.Fatalf("过滤后应保留 2 条可展示记录，实际=%d", len(records))
 	}
-	if records[0] != validWait {
-		t.Fatalf("应保留带 wait 原因的有效决策")
+	if records[0] != failedRecord || records[1] != validWait {
+		t.Fatalf("应保留失败排障记录和带 wait 原因的有效决策")
 	}
 }
 

@@ -277,7 +277,7 @@ func (s *Server) handleLatestDecisions(c *gin.Context) {
 func filterDisplayableDecisionRecords(records []*logger.DecisionRecord) []*logger.DecisionRecord {
 	filtered := make([]*logger.DecisionRecord, 0, len(records))
 	for _, record := range records {
-		if record == nil || isLegacyEmptyDecisionRecord(record) {
+		if record == nil || isEmptySuccessfulDecisionRecord(record) {
 			continue
 		}
 		filtered = append(filtered, record)
@@ -285,10 +285,10 @@ func filterDisplayableDecisionRecords(records []*logger.DecisionRecord) []*logge
 	return filtered
 }
 
-func isLegacyEmptyDecisionRecord(record *logger.DecisionRecord) bool {
+func isEmptySuccessfulDecisionRecord(record *logger.DecisionRecord) bool {
 	return len(record.Decisions) == 0 &&
 		strings.TrimSpace(record.DecisionJSON) == "" &&
-		strings.TrimSpace(record.CoTTrace) == "无决策输出"
+		strings.TrimSpace(record.ErrorMessage) == ""
 }
 
 // handleStatistics 统计信息
