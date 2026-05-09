@@ -271,10 +271,22 @@ func buildOpenRejection(d Decision, ctx *Context, reason string) OpenRejection {
 	})
 	rejection.GateState = gate.State
 	rejection.GateReasons = append(rejection.GateReasons, gate.Reasons...)
+	rejection.GateDiagnostics = copyDiagnostics(gate.Diagnostics)
 	if len(rejection.GateReasons) == 0 && strings.TrimSpace(reason) != "" {
 		rejection.GateReasons = append(rejection.GateReasons, reason)
 	}
 	return rejection
+}
+
+func copyDiagnostics(source map[string]any) map[string]any {
+	if len(source) == 0 {
+		return nil
+	}
+	copied := make(map[string]any, len(source))
+	for key, value := range source {
+		copied[key] = value
+	}
+	return copied
 }
 
 func waitDecision(reason string) Decision {
@@ -1515,6 +1527,64 @@ func candidateIncludedInPrompt(coin CandidateCoin) bool {
 	return coin.FilterReason == "" && coin.DataQuality == ""
 }
 
+func btcAltLongPromptRestriction(ctx *Context) (string, []string) {
+	if ctx == nil || ctx.MarketDataMap == nil {
+		return "", nil
+	}
+	btcData := ctx.MarketDataMap["BTCUSDT"]
+	if btcData == nil {
+		return "", nil
+	}
+	if btcData.PriceChange1h <= -5 {
+		return "block", []string{fmt.Sprintf("BTC 1小时跌幅 %.2f%%，禁止新开仓", btcData.PriceChange1h)}
+	}
+	if isConfirmedBTCBearishStructure(btcData) {
+		return "block", []string{"BTC 1h/4h 明显转弱，禁止新开高 beta 山寨多单"}
+	}
+	var reasons []string
+	if btcData.PriceChange1h <= -3 || btcData.PriceChange4h <= -7 || btcData.BollingerWidth >= 0.12 {
+		reasons = append(reasons, "BTC波动或跌幅偏高，新开仓降权")
+	}
+	if isBearishStructure(btcData) {
+		reasons = append(reasons, "BTC 1h/4h 存在转弱信号，高 beta 山寨多单降权")
+	}
+	if hasBTCMultiTimeframeConflict(btcData) {
+		reasons = append(reasons, "BTC 15m 与 1h/4h 趋势冲突，高 beta 山寨多单降权")
+	}
+	if len(reasons) > 0 {
+		return "penalize", reasons
+	}
+	return "", nil
+}
+
+func promptCandidateOrder(ctx *Context, prioritizeCore bool) []CandidateCoin {
+	if ctx == nil || len(ctx.CandidateCoins) == 0 {
+		return nil
+	}
+	ordered := make([]CandidateCoin, 0, len(ctx.CandidateCoins))
+	used := make(map[string]bool, len(ctx.CandidateCoins))
+	if prioritizeCore {
+		for _, prioritySymbol := range []string{"BTCUSDT", "ETHUSDT"} {
+			for _, coin := range ctx.CandidateCoins {
+				if coin.Symbol != prioritySymbol || used[coin.Symbol] {
+					continue
+				}
+				ordered = append(ordered, coin)
+				used[coin.Symbol] = true
+				break
+			}
+		}
+	}
+	for _, coin := range ctx.CandidateCoins {
+		if used[coin.Symbol] {
+			continue
+		}
+		ordered = append(ordered, coin)
+		used[coin.Symbol] = true
+	}
+	return ordered
+}
+
 // ============================================================================
 // Prompt构建
 // ============================================================================
@@ -1750,11 +1820,20 @@ func buildUserPrompt(ctx *Context, remainingBudget float64) string {
 		sb.WriteString("\n")
 	}
 
+	restrictionState, restrictionReasons := btcAltLongPromptRestriction(ctx)
+	if restrictionState != "" {
+		sb.WriteString("## ⚠️ 开仓路径提示\n")
+		sb.WriteString(fmt.Sprintf("**高 beta 山寨多单 gate**: %s | %s\n",
+			restrictionState, strings.Join(restrictionReasons, "; ")))
+		sb.WriteString("优先评估 BTCUSDT、ETHUSDT 或 open_short；如仍选择山寨多单，必须有更高置信度、更小仓位和明确失效条件。\n\n")
+	}
+
 	// 候选币种
 	sb.WriteString("## 🔍 候选币种\n\n")
 	displayedCount := 0
-	for _, coin := range ctx.CandidateCoins {
-		if coin.Symbol == "BTCUSDT" {
+	prioritizeCore := restrictionState != ""
+	for _, coin := range promptCandidateOrder(ctx, prioritizeCore) {
+		if coin.Symbol == "BTCUSDT" && !prioritizeCore {
 			continue
 		}
 		if !candidateIncludedInPrompt(coin) {

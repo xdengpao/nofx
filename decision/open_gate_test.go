@@ -173,6 +173,44 @@ func TestEvaluateOpenGate_BTCMultiTimeframeBearishBlocksAltLong(t *testing.T) {
 	if result.Allowed {
 		t.Fatalf("BTC 1h/4h 空头结构应阻断高 beta 多单: %+v", result)
 	}
+	if result.Diagnostics["btc"] == nil {
+		t.Fatalf("BTC阻断应记录诊断信息: %+v", result)
+	}
+}
+
+func TestEvaluateOpenGate_BTCMildBearishPenalizesAltLong(t *testing.T) {
+	ctx := newTestContext()
+	ctx.MarketDataMap["BTCUSDT"] = &market.Data{
+		Symbol:         "BTCUSDT",
+		CurrentPrice:   100000,
+		PriceChange1h:  -0.2,
+		CurrentDIPlus:  28,
+		CurrentDIMinus: 16,
+		LongerTermContext: &market.LongerTermData{
+			EMA20: 99000,
+			EMA50: 97000,
+		},
+		MidTermSeries1h: &market.MidTermData1h{
+			EMA20Values: []float64{100200},
+			EMA50Values: []float64{99000},
+			MACDHist:    []float64{-1},
+		},
+	}
+
+	result := EvaluateOpenGate(OpenGateInput{
+		Decision:   &Decision{Symbol: "SOLUSDT", Action: "open_long"},
+		Context:    ctx,
+		MarketData: newTestMarketData(100),
+	})
+	if !result.Allowed {
+		t.Fatalf("BTC轻微转弱应降权而不是阻断: %+v", result)
+	}
+	if result.State != "penalize" || result.MinConfidence < btcConflictMinConfidence {
+		t.Fatalf("BTC轻微转弱应提高门槛: %+v", result)
+	}
+	if result.Diagnostics["btc"] == nil {
+		t.Fatalf("BTC降权应记录诊断信息: %+v", result)
+	}
 }
 
 func TestEvaluateOpenGate_BTCConflictPenalizesAltLong(t *testing.T) {
@@ -205,6 +243,38 @@ func TestEvaluateOpenGate_BTCConflictPenalizesAltLong(t *testing.T) {
 	})
 	if !result.Allowed || result.MinConfidence < btcConflictMinConfidence || result.EffectiveRisk >= ctx.MaxRiskPerTrade {
 		t.Fatalf("BTC 多周期冲突应降权并提高置信度: %+v", result)
+	}
+}
+
+func TestBuildOpenRejection_IncludesBTCDiagnostics(t *testing.T) {
+	ctx := newTestContext()
+	ctx.MarketDataMap["SOLUSDT"] = newTestMarketData(100)
+	ctx.MarketDataMap["BTCUSDT"] = &market.Data{
+		Symbol:         "BTCUSDT",
+		CurrentPrice:   95000,
+		CurrentDIPlus:  12,
+		CurrentDIMinus: 28,
+		LongerTermContext: &market.LongerTermData{
+			EMA20: 97000,
+			EMA50: 98000,
+		},
+		MidTermSeries1h: &market.MidTermData1h{
+			EMA20Values: []float64{96000},
+			EMA50Values: []float64{98000},
+			MACDHist:    []float64{-10},
+		},
+	}
+
+	rejection := buildOpenRejection(
+		Decision{Symbol: "SOLUSDT", Action: "open_long"},
+		ctx,
+		"SOLUSDT open_long 被风控过滤",
+	)
+	if rejection.GateState != "block" {
+		t.Fatalf("应记录 block gate state: %+v", rejection)
+	}
+	if rejection.GateDiagnostics["btc"] == nil {
+		t.Fatalf("应记录 BTC gate diagnostics: %+v", rejection)
 	}
 }
 

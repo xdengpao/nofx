@@ -33,17 +33,18 @@ type DecisionRecord struct {
 
 // RiskStateSnapshot 记录本周期可观测风险状态，保持旧日志兼容。
 type RiskStateSnapshot struct {
-	TraderID                 string   `json:"trader_id,omitempty"`
-	Exchange                 string   `json:"exchange,omitempty"`
-	MaxRiskPerTrade          float64  `json:"max_risk_per_trade,omitempty"`
-	EffectiveMaxRiskPerTrade float64  `json:"effective_max_risk_per_trade,omitempty"`
-	TotalRiskBudget          float64  `json:"total_risk_budget,omitempty"`
-	RemainingRiskBudget      float64  `json:"remaining_risk_budget,omitempty"`
-	MaxDailyLossPct          float64  `json:"max_daily_loss_pct,omitempty"`
-	MaxAccountDrawdownPct    float64  `json:"max_account_drawdown_pct,omitempty"`
-	AIBackoffUntil           string   `json:"ai_backoff_until,omitempty"`
-	ConsecutiveAIFails       int      `json:"consecutive_ai_fails,omitempty"`
-	OpenGateReasons          []string `json:"open_gate_reasons,omitempty"`
+	TraderID                 string           `json:"trader_id,omitempty"`
+	Exchange                 string           `json:"exchange,omitempty"`
+	MaxRiskPerTrade          float64          `json:"max_risk_per_trade,omitempty"`
+	EffectiveMaxRiskPerTrade float64          `json:"effective_max_risk_per_trade,omitempty"`
+	TotalRiskBudget          float64          `json:"total_risk_budget,omitempty"`
+	RemainingRiskBudget      float64          `json:"remaining_risk_budget,omitempty"`
+	MaxDailyLossPct          float64          `json:"max_daily_loss_pct,omitempty"`
+	MaxAccountDrawdownPct    float64          `json:"max_account_drawdown_pct,omitempty"`
+	AIBackoffUntil           string           `json:"ai_backoff_until,omitempty"`
+	ConsecutiveAIFails       int              `json:"consecutive_ai_fails,omitempty"`
+	OpenGateReasons          []string         `json:"open_gate_reasons,omitempty"`
+	OpenGateDiagnostics      []map[string]any `json:"open_gate_diagnostics,omitempty"`
 }
 
 // AccountSnapshot 账户状态快照
@@ -93,16 +94,17 @@ type DecisionAction struct {
 	Error     string    `json:"error"`     // 错误信息
 	Reasoning string    `json:"reasoning,omitempty"`
 
-	RiskUSD              float64  `json:"risk_usd,omitempty"`
-	GateState            string   `json:"gate_state,omitempty"`
-	GateReasons          []string `json:"gate_reasons,omitempty"`
-	ExecutionRisk        string   `json:"execution_risk,omitempty"`
-	StopLossSet          *bool    `json:"stop_loss_set,omitempty"`
-	TakeProfitSet        *bool    `json:"take_profit_set,omitempty"`
-	ProtectionError      string   `json:"protection_error,omitempty"`
-	HighRisk             bool     `json:"high_risk,omitempty"`
-	HighRiskReason       string   `json:"high_risk_reason,omitempty"`
-	RemainingPositionUSD float64  `json:"remaining_position_usd,omitempty"`
+	RiskUSD              float64        `json:"risk_usd,omitempty"`
+	GateState            string         `json:"gate_state,omitempty"`
+	GateReasons          []string       `json:"gate_reasons,omitempty"`
+	GateDiagnostics      map[string]any `json:"gate_diagnostics,omitempty"`
+	ExecutionRisk        string         `json:"execution_risk,omitempty"`
+	StopLossSet          *bool          `json:"stop_loss_set,omitempty"`
+	TakeProfitSet        *bool          `json:"take_profit_set,omitempty"`
+	ProtectionError      string         `json:"protection_error,omitempty"`
+	HighRisk             bool           `json:"high_risk,omitempty"`
+	HighRiskReason       string         `json:"high_risk_reason,omitempty"`
+	RemainingPositionUSD float64        `json:"remaining_position_usd,omitempty"`
 }
 
 // DecisionLogger 决策日志记录器

@@ -29,13 +29,14 @@ type OpenGateInput struct {
 
 // OpenGateResult 是结构化开仓准入结果。
 type OpenGateResult struct {
-	Allowed         bool     `json:"allowed"`
-	State           string   `json:"state"` // allow, penalize, block
-	EffectiveRisk   float64  `json:"effective_risk"`
-	MinConfidence   int      `json:"min_confidence,omitempty"`
-	AdjustedSizeUSD float64  `json:"adjusted_size_usd,omitempty"`
-	Reasons         []string `json:"reasons,omitempty"`
-	Warnings        []string `json:"warnings,omitempty"`
+	Allowed         bool           `json:"allowed"`
+	State           string         `json:"state"` // allow, penalize, block
+	EffectiveRisk   float64        `json:"effective_risk"`
+	MinConfidence   int            `json:"min_confidence,omitempty"`
+	AdjustedSizeUSD float64        `json:"adjusted_size_usd,omitempty"`
+	Reasons         []string       `json:"reasons,omitempty"`
+	Warnings        []string       `json:"warnings,omitempty"`
+	Diagnostics     map[string]any `json:"diagnostics,omitempty"`
 }
 
 // EvaluateOpenGate 汇总 rolling、市场状态、相关性、执行质量和 AI backoff gate。
@@ -155,12 +156,21 @@ func applyBTCMultiTimeframeGate(result *OpenGateResult, d *Decision, ctx *Contex
 	if btcData == nil {
 		return
 	}
+	diagnostics := buildBTCGateDiagnostics(btcData)
+	if isConfirmedBTCBearishStructure(btcData) {
+		result.blockWithDiagnostics("BTC 1h/4h 明显转弱，禁止新开高 beta 山寨多单", "btc", diagnostics)
+		return
+	}
 	if isBearishStructure(btcData) {
-		result.block("BTC 1h/4h 明显转弱，禁止新开高 beta 山寨多单")
+		result.penalizeWithDiagnostics("BTC 1h/4h 存在转弱信号，高 beta 山寨多单降权", "btc", diagnostics)
+		if result.MinConfidence < btcConflictMinConfidence {
+			result.MinConfidence = btcConflictMinConfidence
+		}
+		result.EffectiveRisk *= 0.5
 		return
 	}
 	if hasBTCMultiTimeframeConflict(btcData) {
-		result.penalize("BTC 15m 与 1h/4h 趋势冲突，高 beta 山寨多单降权")
+		result.penalizeWithDiagnostics("BTC 15m 与 1h/4h 趋势冲突，高 beta 山寨多单降权", "btc", diagnostics)
 		if result.MinConfidence < btcConflictMinConfidence {
 			result.MinConfidence = btcConflictMinConfidence
 		}
@@ -287,6 +297,11 @@ func (result *OpenGateResult) block(reason string) {
 	}
 }
 
+func (result *OpenGateResult) blockWithDiagnostics(reason, key string, diagnostics map[string]any) {
+	result.block(reason)
+	result.addDiagnostics(key, diagnostics)
+}
+
 func (result *OpenGateResult) penalize(reason string) {
 	if result.State == "" || result.State == "allow" {
 		result.State = "penalize"
@@ -294,6 +309,21 @@ func (result *OpenGateResult) penalize(reason string) {
 	if reason != "" {
 		result.Reasons = appendUniqueReason(result.Reasons, reason)
 	}
+}
+
+func (result *OpenGateResult) penalizeWithDiagnostics(reason, key string, diagnostics map[string]any) {
+	result.penalize(reason)
+	result.addDiagnostics(key, diagnostics)
+}
+
+func (result *OpenGateResult) addDiagnostics(key string, diagnostics map[string]any) {
+	if key == "" || len(diagnostics) == 0 {
+		return
+	}
+	if result.Diagnostics == nil {
+		result.Diagnostics = make(map[string]any)
+	}
+	result.Diagnostics[key] = diagnostics
 }
 
 func appendUniqueReason(reasons []string, reason string) []string {
@@ -362,6 +392,92 @@ func isBearishStructure(data *market.Data) bool {
 		}
 	}
 	return false
+}
+
+func isConfirmedBTCBearishStructure(data *market.Data) bool {
+	if data == nil {
+		return false
+	}
+	fourHBearish := isBTCFourHourBearish(data)
+	oneHBearish := isBTCOneHourBearish(data)
+	deepFourHBreak := false
+	if data.LongerTermContext != nil {
+		longMACDHist := lastFloat(data.LongerTermContext.MACDHist)
+		deepFourHBreak = data.LongerTermContext.EMA50 > 0 &&
+			data.CurrentPrice < data.LongerTermContext.EMA50 &&
+			longMACDHist < 0
+	}
+	directionalBearish := data.CurrentDIPlus > 0 && data.CurrentDIMinus > 0 && data.CurrentDIPlus < data.CurrentDIMinus
+	priceBreakdown := data.PriceChange1h <= -1.5 || data.PriceChange4h <= -3
+
+	return (fourHBearish && oneHBearish) || (deepFourHBreak && (oneHBearish || directionalBearish || priceBreakdown))
+}
+
+func isBTCFourHourBearish(data *market.Data) bool {
+	if data == nil || data.LongerTermContext == nil {
+		return false
+	}
+	priceBelowEMA20 := data.LongerTermContext.EMA20 > 0 && data.CurrentPrice < data.LongerTermContext.EMA20
+	priceBelowEMA50 := data.LongerTermContext.EMA50 > 0 && data.CurrentPrice < data.LongerTermContext.EMA50
+	diBearish := data.CurrentDIPlus > 0 && data.CurrentDIMinus > 0 && data.CurrentDIPlus < data.CurrentDIMinus
+	macdBearish := lastFloat(data.LongerTermContext.MACDHist) < 0
+	return (priceBelowEMA20 && diBearish) || (priceBelowEMA50 && macdBearish)
+}
+
+func isBTCOneHourBearish(data *market.Data) bool {
+	if data == nil || data.MidTermSeries1h == nil {
+		return false
+	}
+	ema20 := lastFloat(data.MidTermSeries1h.EMA20Values)
+	ema50 := lastFloat(data.MidTermSeries1h.EMA50Values)
+	macdHist := lastFloat(data.MidTermSeries1h.MACDHist)
+	emaBearish := ema20 > 0 && ema50 > 0 && ema20 < ema50
+	macdPriceBearish := macdHist < 0 && data.PriceChange1h < 0
+	return emaBearish || macdPriceBearish
+}
+
+func buildBTCGateDiagnostics(data *market.Data) map[string]any {
+	if data == nil {
+		return nil
+	}
+	diagnostics := map[string]any{
+		"symbol":                   data.Symbol,
+		"current_price":            data.CurrentPrice,
+		"price_change_1h_pct":      data.PriceChange1h,
+		"price_change_4h_pct":      data.PriceChange4h,
+		"bollinger_width":          data.BollingerWidth,
+		"current_di_plus":          data.CurrentDIPlus,
+		"current_di_minus":         data.CurrentDIMinus,
+		"current_adx":              data.CurrentADX,
+		"confirmed_bearish":        isConfirmedBTCBearishStructure(data),
+		"four_hour_bearish":        isBTCFourHourBearish(data),
+		"one_hour_bearish":         isBTCOneHourBearish(data),
+		"mild_bearish_signal":      isBearishStructure(data),
+		"multi_timeframe_conflict": hasBTCMultiTimeframeConflict(data),
+	}
+	if data.LongerTermContext != nil {
+		diagnostics["four_hour_ema20"] = data.LongerTermContext.EMA20
+		diagnostics["four_hour_ema50"] = data.LongerTermContext.EMA50
+		diagnostics["four_hour_macd_hist"] = lastFloat(data.LongerTermContext.MACDHist)
+		diagnostics["price_below_four_hour_ema20"] = data.LongerTermContext.EMA20 > 0 && data.CurrentPrice < data.LongerTermContext.EMA20
+		diagnostics["price_below_four_hour_ema50"] = data.LongerTermContext.EMA50 > 0 && data.CurrentPrice < data.LongerTermContext.EMA50
+	}
+	if data.MidTermSeries1h != nil {
+		ema20 := lastFloat(data.MidTermSeries1h.EMA20Values)
+		ema50 := lastFloat(data.MidTermSeries1h.EMA50Values)
+		macdHist := lastFloat(data.MidTermSeries1h.MACDHist)
+		diagnostics["one_hour_ema20"] = ema20
+		diagnostics["one_hour_ema50"] = ema50
+		diagnostics["one_hour_macd_hist"] = macdHist
+		diagnostics["one_hour_ema_bearish"] = ema20 > 0 && ema50 > 0 && ema20 < ema50
+		diagnostics["one_hour_macd_price_bearish"] = macdHist < 0 && data.PriceChange1h < 0
+	}
+	if data.MidTermSeries15m != nil {
+		diagnostics["fifteen_min_ema20"] = lastFloat(data.MidTermSeries15m.EMA20Values)
+		diagnostics["fifteen_min_ema50"] = lastFloat(data.MidTermSeries15m.EMA50Values)
+		diagnostics["fifteen_min_macd_hist"] = lastFloat(data.MidTermSeries15m.MACDHist)
+	}
+	return diagnostics
 }
 
 func hasBTCMultiTimeframeConflict(data *market.Data) bool {

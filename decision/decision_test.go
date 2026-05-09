@@ -72,6 +72,46 @@ func newOpenLongDecision(symbol string, price float64) *Decision {
 	}
 }
 
+func TestBuildUserPrompt_PrioritizesCoreSymbolsWhenBTCGateActive(t *testing.T) {
+	ctx := newTestContext()
+	ctx.CurrentTime = "2026-05-09 20:15:00"
+	ctx.CallCount = 1009
+	ctx.CandidateCoins = []CandidateCoin{
+		{Symbol: "SOLUSDT", Sources: []string{"ai500"}, IncludedInPrompt: true, DataQuality: "ok"},
+		{Symbol: "BTCUSDT", Sources: []string{"ai500"}, IncludedInPrompt: true, DataQuality: "ok"},
+		{Symbol: "ETHUSDT", Sources: []string{"ai500"}, IncludedInPrompt: true, DataQuality: "ok"},
+	}
+	ctx.MarketDataMap["SOLUSDT"] = newTestMarketData(100)
+	ctx.MarketDataMap["ETHUSDT"] = newTestMarketData(2000)
+	ctx.MarketDataMap["BTCUSDT"] = &market.Data{
+		Symbol:         "BTCUSDT",
+		CurrentPrice:   100000,
+		PriceChange1h:  -0.2,
+		CurrentDIPlus:  28,
+		CurrentDIMinus: 16,
+		LongerTermContext: &market.LongerTermData{
+			EMA20: 99000,
+			EMA50: 97000,
+			ATR14: 1500,
+		},
+		MidTermSeries1h: &market.MidTermData1h{
+			EMA20Values: []float64{100200},
+			EMA50Values: []float64{99000},
+			MACDHist:    []float64{-1},
+		},
+	}
+
+	prompt := buildUserPrompt(ctx, 0.08)
+	btcIndex := strings.Index(prompt, "### 1. BTCUSDT")
+	ethIndex := strings.Index(prompt, "### 2. ETHUSDT")
+	if btcIndex < 0 || ethIndex < 0 || ethIndex < btcIndex {
+		t.Fatalf("BTC gate活跃时应优先展示BTC/ETH候选，prompt片段: %s", prompt)
+	}
+	if !strings.Contains(prompt, "高 beta 山寨多单 gate") {
+		t.Fatalf("BTC gate活跃时应写入开仓路径提示")
+	}
+}
+
 func TestValidateOpenDecision_RollingGateRequiresHigherConfidence(t *testing.T) {
 	ctx := newTestContext()
 	ctx.MarketDataMap["BCHUSDT"] = newTestMarketData(100)

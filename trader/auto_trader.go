@@ -550,14 +550,15 @@ func (at *AutoTrader) appendOpenRejectionsToRecord(record *logger.DecisionRecord
 			reason = strings.Join(rejection.GateReasons, "; ")
 		}
 		record.Decisions = append(record.Decisions, logger.DecisionAction{
-			Action:      "open_rejected",
-			Symbol:      rejection.Symbol,
-			Timestamp:   time.Now(),
-			Success:     false,
-			Error:       reason,
-			Reasoning:   reason,
-			GateState:   rejection.GateState,
-			GateReasons: append([]string(nil), rejection.GateReasons...),
+			Action:          "open_rejected",
+			Symbol:          rejection.Symbol,
+			Timestamp:       time.Now(),
+			Success:         false,
+			Error:           reason,
+			Reasoning:       reason,
+			GateState:       rejection.GateState,
+			GateReasons:     append([]string(nil), rejection.GateReasons...),
+			GateDiagnostics: copyGateDiagnostics(rejection.GateDiagnostics),
 		})
 		record.ExecutionLog = append(record.ExecutionLog,
 			fmt.Sprintf("⚠ %s %s 被开仓门控拒绝: %s", rejection.Symbol, rejection.Action, reason))
@@ -588,6 +589,9 @@ func (at *AutoTrader) buildRiskStateSnapshot(ctx *decision.Context, rejections [
 		snapshot.AIBackoffUntil = ctx.AIBackoffUntil.Format(time.RFC3339)
 	}
 	for _, rejection := range rejections {
+		if len(rejection.GateDiagnostics) > 0 {
+			snapshot.OpenGateDiagnostics = append(snapshot.OpenGateDiagnostics, copyGateDiagnostics(rejection.GateDiagnostics))
+		}
 		if rejection.Reason != "" {
 			snapshot.OpenGateReasons = append(snapshot.OpenGateReasons, rejection.Reason)
 			continue
@@ -595,6 +599,17 @@ func (at *AutoTrader) buildRiskStateSnapshot(ctx *decision.Context, rejections [
 		snapshot.OpenGateReasons = append(snapshot.OpenGateReasons, rejection.GateReasons...)
 	}
 	return snapshot
+}
+
+func copyGateDiagnostics(source map[string]any) map[string]any {
+	if len(source) == 0 {
+		return nil
+	}
+	copied := make(map[string]any, len(source))
+	for key, value := range source {
+		copied[key] = value
+	}
+	return copied
 }
 
 func (at *AutoTrader) fillCandidateSnapshots(record *logger.DecisionRecord, ctx *decision.Context) {
