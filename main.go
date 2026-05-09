@@ -201,6 +201,21 @@ func initializeModules(cfg *config.Config) error {
 		log.Printf("✓ 已配置OI Top API")
 	}
 
+	pool.SetDynamicCandidatePoolConfig(pool.DynamicCandidatePoolConfig{
+		Enabled:                 cfg.DynamicCandidatePool.IsEnabled(),
+		RefreshHour:             cfg.DynamicCandidatePool.RefreshHour,
+		TTLHours:                cfg.DynamicCandidatePool.TTLHours,
+		MinPoolSize:             cfg.DynamicCandidatePool.MinPoolSize,
+		MaxPoolSize:             cfg.DynamicCandidatePool.MaxPoolSize,
+		PromptCandidateLimit:    cfg.DynamicCandidatePool.PromptCandidateLimit,
+		CoreSymbols:             cfg.DynamicCandidatePool.CoreSymbols,
+		MinOIValueUSD:           cfg.DynamicCandidatePool.MinOIValueUSD,
+		MinQuoteVolume24hUSD:    cfg.DynamicCandidatePool.MinQuoteVolume24hUSD,
+		CooldownDaysAfterLosses: cfg.DynamicCandidatePool.CooldownDaysAfterLosses,
+		ExchangeVolumeTopLimit:  cfg.DynamicCandidatePool.ExchangeVolumeTopLimit,
+		SnapshotPath:            cfg.DynamicCandidatePool.SnapshotPath,
+	})
+
 	// 2. 初始化决策模块
 	decisionConfig := &decision.Config{
 		MaxRiskPerTrade:       0.02,

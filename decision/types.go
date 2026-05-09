@@ -43,6 +43,9 @@ type CandidateCoin struct {
 	Symbol           string   `json:"symbol"`
 	Sources          []string `json:"sources"`
 	Score            float64  `json:"score,omitempty"`
+	Tier             string   `json:"tier,omitempty"`
+	PoolScore        float64  `json:"pool_score,omitempty"`
+	PoolReasons      []string `json:"pool_reasons,omitempty"`
 	MarketState      string   `json:"market_state,omitempty"`
 	StateConfidence  int      `json:"state_confidence,omitempty"`
 	DataQuality      string   `json:"data_quality,omitempty"` // ok, warn, insufficient

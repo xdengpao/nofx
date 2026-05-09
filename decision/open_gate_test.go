@@ -132,6 +132,44 @@ func TestEvaluateOpenGate_BTCMarketCrashBlocks(t *testing.T) {
 	}
 }
 
+func TestEvaluateOpenGate_BTCNormalBollingerWidthDoesNotPenalize(t *testing.T) {
+	ctx := newTestContext()
+	ctx.MarketDataMap["BTCUSDT"] = &market.Data{
+		Symbol:         "BTCUSDT",
+		PriceChange1h:  0.1,
+		PriceChange4h:  0.2,
+		BollingerWidth: 3.5,
+	}
+
+	result := EvaluateOpenGate(OpenGateInput{
+		Decision:   &Decision{Symbol: "BTCUSDT", Action: "open_long"},
+		Context:    ctx,
+		MarketData: newTestMarketData(100),
+	})
+	if !result.Allowed || result.State != "allow" || result.MinConfidence != 0 {
+		t.Fatalf("3.5%% 布林带宽度不应触发 BTC 高波动降权: %+v", result)
+	}
+}
+
+func TestEvaluateOpenGate_BTCHighBollingerWidthPenalizes(t *testing.T) {
+	ctx := newTestContext()
+	ctx.MarketDataMap["BTCUSDT"] = &market.Data{
+		Symbol:         "BTCUSDT",
+		PriceChange1h:  0.1,
+		PriceChange4h:  0.2,
+		BollingerWidth: 13.0,
+	}
+
+	result := EvaluateOpenGate(OpenGateInput{
+		Decision:   &Decision{Symbol: "BTCUSDT", Action: "open_long"},
+		Context:    ctx,
+		MarketData: newTestMarketData(100),
+	})
+	if !result.Allowed || result.State != "penalize" || result.MinConfidence < 85 {
+		t.Fatalf("13%% 布林带宽度应触发 BTC 高波动降权: %+v", result)
+	}
+}
+
 func TestEvaluateOpenGate_ExecutionQualityBlocks(t *testing.T) {
 	ctx := newTestContext()
 	quality := &logger.ExecutionQualityStats{ProtectionOrderFailures: 1}

@@ -33,6 +33,7 @@ config.json
 decision_logs/
 coin_pool_cache/
 data/trade_plans.json
+data/dynamic_candidate_pool.json
 nofx_test
 
 # Node.js

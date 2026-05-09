@@ -138,6 +138,40 @@ func TestLoadConfig_WithAPIURL_KeepsUseDefaultCoinsAsFalse(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_DynamicCandidatePoolDefaultsEnabled(t *testing.T) {
+	cfg := validConfig()
+	path := writeConfigFile(t, cfg)
+
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	if !loaded.DynamicCandidatePool.IsEnabled() {
+		t.Fatal("未显式配置时动态候选池应默认启用")
+	}
+	if loaded.DynamicCandidatePool.PromptCandidateLimit != 8 {
+		t.Fatalf("PromptCandidateLimit 默认值应为8，实际=%d", loaded.DynamicCandidatePool.PromptCandidateLimit)
+	}
+	if len(loaded.DynamicCandidatePool.CoreSymbols) != 2 {
+		t.Fatalf("CoreSymbols 默认值应包含 BTC/ETH，实际=%v", loaded.DynamicCandidatePool.CoreSymbols)
+	}
+}
+
+func TestLoadConfig_DynamicCandidatePoolCanBeDisabled(t *testing.T) {
+	cfg := validConfig()
+	enabled := false
+	cfg.DynamicCandidatePool.Enabled = &enabled
+	path := writeConfigFile(t, cfg)
+
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	if loaded.DynamicCandidatePool.IsEnabled() {
+		t.Fatal("显式 enabled=false 时动态候选池应关闭")
+	}
+}
+
 // ============================================================================
 // 需求 1.9: 杠杆默认值
 // ============================================================================

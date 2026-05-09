@@ -590,10 +590,12 @@ func GetOITopSymbols() ([]string, error) {
 
 // MergedCoinPool 合并的币种池（AI500 + OI Top）
 type MergedCoinPool struct {
-	AI500Coins    []CoinInfo          // AI500评分币种
-	OITopCoins    []OIPosition        // 持仓量增长Top20
-	AllSymbols    []string            // 所有不重复的币种符号
-	SymbolSources map[string][]string // 每个币种的来源（"ai500"/"oi_top"）
+	AI500Coins        []CoinInfo                  // AI500评分币种
+	OITopCoins        []OIPosition                // 持仓量增长Top20
+	AllSymbols        []string                    // 所有不重复的币种符号
+	SymbolSources     map[string][]string         // 每个币种的来源（"ai500"/"oi_top"/"default"/"dynamic"）
+	DynamicCandidates map[string]DynamicCandidate // 动态候选池详情
+	MarketRegime      string                      // 动态候选池生成时的市场状态
 }
 
 // GetMergedCoinPool 获取合并后的币种池（AI500 + OI Top，去重）
@@ -617,9 +619,13 @@ func GetMergedCoinPool(ai500Limit int) (*MergedCoinPool, error) {
 	symbolSources := make(map[string][]string)
 
 	// 添加AI500币种
+	ai500Source := "ai500"
+	if coinPoolConfig.UseDefaultCoins {
+		ai500Source = "default"
+	}
 	for _, symbol := range ai500TopSymbols {
 		symbolSet[symbol] = true
-		symbolSources[symbol] = append(symbolSources[symbol], "ai500")
+		symbolSources[symbol] = append(symbolSources[symbol], ai500Source)
 	}
 
 	// 添加OI Top币种

@@ -1542,7 +1542,7 @@ func btcAltLongPromptRestriction(ctx *Context) (string, []string) {
 		return "block", []string{"BTC 1h/4h 明显转弱，禁止新开高 beta 山寨多单"}
 	}
 	var reasons []string
-	if btcData.PriceChange1h <= -3 || btcData.PriceChange4h <= -7 || btcData.BollingerWidth >= 0.12 {
+	if btcData.PriceChange1h <= -3 || btcData.PriceChange4h <= -7 || btcData.BollingerWidth >= btcHighVolatilityBollingerPct {
 		reasons = append(reasons, "BTC波动或跌幅偏高，新开仓降权")
 	}
 	if isBearishStructure(btcData) {
@@ -1888,6 +1888,12 @@ func buildUserPrompt(ctx *Context, remainingBudget float64) string {
 			marketState, corrInfo, coin.DataQuality, coin.Score))
 		if len(coin.Sources) > 0 || len(coin.Warnings) > 0 {
 			sb.WriteString(fmt.Sprintf("**来源**: %s", strings.Join(coin.Sources, ",")))
+			if coin.Tier != "" {
+				sb.WriteString(fmt.Sprintf(" | **池层级**: %s", coin.Tier))
+			}
+			if coin.PoolScore > 0 {
+				sb.WriteString(fmt.Sprintf(" | **池评分**: %.1f", coin.PoolScore))
+			}
 			if len(coin.Warnings) > 0 {
 				sb.WriteString(fmt.Sprintf(" | **警告**: %s", strings.Join(coin.Warnings, "; ")))
 			}
@@ -2334,8 +2340,12 @@ func QuickAnalyze(ctx *Context) string {
 		if data, ok := ctx.MarketDataMap[coin.Symbol]; ok {
 			state, conf := market.GetMarketState(data)
 			score := calculateCoinScore(data, ctx.CorrelationMap[coin.Symbol])
-			sb.WriteString(fmt.Sprintf("  %s: %s(%d%%) | 评分=%.1f | 数据=%s\n",
-				coin.Symbol, state, conf, score, coin.DataQuality))
+			poolInfo := ""
+			if coin.Tier != "" || coin.PoolScore > 0 {
+				poolInfo = fmt.Sprintf(" | 池=%s/%.1f", coin.Tier, coin.PoolScore)
+			}
+			sb.WriteString(fmt.Sprintf("  %s: %s(%d%%) | 评分=%.1f%s | 数据=%s\n",
+				coin.Symbol, state, conf, score, poolInfo, coin.DataQuality))
 		}
 	}
 

@@ -50,18 +50,35 @@ type LeverageConfig struct {
 	AltcoinLeverage int `json:"altcoin_leverage"` // 山寨币的杠杆倍数（主账户建议5-20，子账户≤5）
 }
 
+// DynamicCandidatePoolConfig 动态候选池配置。
+type DynamicCandidatePoolConfig struct {
+	Enabled                 *bool    `json:"enabled,omitempty"`
+	RefreshHour             int      `json:"refresh_hour"`
+	TTLHours                int      `json:"ttl_hours"`
+	MinPoolSize             int      `json:"min_pool_size"`
+	MaxPoolSize             int      `json:"max_pool_size"`
+	PromptCandidateLimit    int      `json:"prompt_candidate_limit"`
+	CoreSymbols             []string `json:"core_symbols"`
+	MinOIValueUSD           float64  `json:"min_oi_value_usd"`
+	MinQuoteVolume24hUSD    float64  `json:"min_quote_volume_24h_usd"`
+	CooldownDaysAfterLosses int      `json:"cooldown_days_after_losses"`
+	ExchangeVolumeTopLimit  int      `json:"exchange_volume_top_limit"`
+	SnapshotPath            string   `json:"snapshot_path"`
+}
+
 // Config 总配置
 type Config struct {
-	Traders            []TraderConfig `json:"traders"`
-	UseDefaultCoins    bool           `json:"use_default_coins"` // 是否使用默认主流币种列表
-	DefaultCoins       []string       `json:"default_coins"`     // 默认主流币种池
-	CoinPoolAPIURL     string         `json:"coin_pool_api_url"`
-	OITopAPIURL        string         `json:"oi_top_api_url"`
-	APIServerPort      int            `json:"api_server_port"`
-	MaxDailyLoss       float64        `json:"max_daily_loss"`
-	MaxDrawdown        float64        `json:"max_drawdown"`
-	StopTradingMinutes int            `json:"stop_trading_minutes"`
-	Leverage           LeverageConfig `json:"leverage"` // 杠杆配置
+	Traders              []TraderConfig             `json:"traders"`
+	UseDefaultCoins      bool                       `json:"use_default_coins"` // 是否使用默认主流币种列表
+	DefaultCoins         []string                   `json:"default_coins"`     // 默认主流币种池
+	CoinPoolAPIURL       string                     `json:"coin_pool_api_url"`
+	OITopAPIURL          string                     `json:"oi_top_api_url"`
+	DynamicCandidatePool DynamicCandidatePoolConfig `json:"dynamic_candidate_pool"`
+	APIServerPort        int                        `json:"api_server_port"`
+	MaxDailyLoss         float64                    `json:"max_daily_loss"`
+	MaxDrawdown          float64                    `json:"max_drawdown"`
+	StopTradingMinutes   int                        `json:"stop_trading_minutes"`
+	Leverage             LeverageConfig             `json:"leverage"` // 杠杆配置
 }
 
 // LoadConfig 从文件加载配置
@@ -95,12 +112,66 @@ func LoadConfig(filename string) (*Config, error) {
 		}
 	}
 
+	config.DynamicCandidatePool.ApplyDefaults()
+
 	// 验证配置
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("配置验证失败: %w", err)
 	}
 
 	return &config, nil
+}
+
+// ApplyDefaults 设置动态候选池默认值。
+func (c *DynamicCandidatePoolConfig) ApplyDefaults() {
+	if c.Enabled == nil {
+		enabled := true
+		c.Enabled = &enabled
+	}
+	if c.RefreshHour <= 0 || c.RefreshHour > 23 {
+		c.RefreshHour = 8
+	}
+	if c.TTLHours <= 0 {
+		c.TTLHours = 24
+	}
+	if c.MinPoolSize <= 0 {
+		c.MinPoolSize = 15
+	}
+	if c.MaxPoolSize <= 0 {
+		c.MaxPoolSize = 30
+	}
+	if c.MaxPoolSize < c.MinPoolSize {
+		c.MaxPoolSize = c.MinPoolSize
+	}
+	if c.PromptCandidateLimit <= 0 {
+		c.PromptCandidateLimit = 8
+	}
+	if c.PromptCandidateLimit > c.MaxPoolSize {
+		c.PromptCandidateLimit = c.MaxPoolSize
+	}
+	if len(c.CoreSymbols) == 0 {
+		c.CoreSymbols = []string{"BTCUSDT", "ETHUSDT"}
+	}
+	if c.MinOIValueUSD <= 0 {
+		c.MinOIValueUSD = 15_000_000
+	}
+	if c.MinQuoteVolume24hUSD <= 0 {
+		c.MinQuoteVolume24hUSD = 20_000_000
+	}
+	if c.CooldownDaysAfterLosses <= 0 {
+		c.CooldownDaysAfterLosses = 2
+	}
+	if c.ExchangeVolumeTopLimit <= 0 {
+		c.ExchangeVolumeTopLimit = 30
+	}
+	if c.SnapshotPath == "" {
+		c.SnapshotPath = "data/dynamic_candidate_pool.json"
+	}
+}
+
+// IsEnabled 返回动态候选池是否启用。
+func (c DynamicCandidatePoolConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
 }
 
 // Validate 验证配置有效性
@@ -192,6 +263,8 @@ func (c *Config) Validate() error {
 	if c.Leverage.AltcoinLeverage > 5 {
 		fmt.Printf("⚠️  警告: 山寨币杠杆设置为%dx，如果使用子账户可能会失败（子账户限制≤5x）\n", c.Leverage.AltcoinLeverage)
 	}
+
+	c.DynamicCandidatePool.ApplyDefaults()
 
 	return nil
 }

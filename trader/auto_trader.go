@@ -624,6 +624,9 @@ func (at *AutoTrader) fillCandidateSnapshots(record *logger.DecisionRecord, ctx 
 			Symbol:           coin.Symbol,
 			Sources:          append([]string(nil), coin.Sources...),
 			Score:            coin.Score,
+			Tier:             coin.Tier,
+			PoolScore:        coin.PoolScore,
+			PoolReasons:      append([]string(nil), coin.PoolReasons...),
 			MarketState:      coin.MarketState,
 			StateConfidence:  coin.StateConfidence,
 			DataQuality:      coin.DataQuality,
@@ -824,31 +827,55 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		}
 	}
 
-	// 3. 获取合并的候选币种池（AI500 + OI Top，去重）
+	// 3. 分析历史表现（最近100个周期，避免长期持仓的交易记录丢失）
+	// 假设每3分钟一个周期，100个周期 = 5小时，足够覆盖大部分交易
+	performance, err := at.decisionLogger.AnalyzePerformance(100)
+	if err != nil {
+		log.Printf("⚠️  分析历史表现失败: %v", err)
+		// 不影响主流程，继续执行（但设置performance为nil以避免传递错误数据）
+		performance = nil
+	}
+
+	// 4. 获取候选币种池（动态候选池优先，失败时回退 AI500 + OI Top）
 	// 无论有没有持仓，都分析相同数量的币种（让AI看到所有好机会）
 	// AI会根据保证金使用率和现有持仓情况，自己决定是否要换仓
 	const ai500Limit = 20 // AI500取前20个评分最高的币种
 
-	// 获取合并后的币种池（AI500 + OI Top）
-	mergedPool, err := pool.GetMergedCoinPool(ai500Limit)
+	positionSymbols := make([]string, 0, len(positionInfos))
+	for _, pos := range positionInfos {
+		positionSymbols = append(positionSymbols, pos.Symbol)
+	}
+
+	mergedPool, err := pool.GetDynamicMergedCoinPool(ai500Limit, positionSymbols, performance)
 	if err != nil {
-		return nil, fmt.Errorf("获取合并币种池失败: %w", err)
+		return nil, fmt.Errorf("获取候选币种池失败: %w", err)
 	}
 
 	// 构建候选币种列表（包含来源信息）
 	var candidateCoins []decision.CandidateCoin
 	for _, symbol := range mergedPool.AllSymbols {
 		sources := mergedPool.SymbolSources[symbol]
-		candidateCoins = append(candidateCoins, decision.CandidateCoin{
+		coin := decision.CandidateCoin{
 			Symbol:  symbol,
-			Sources: sources, // "ai500" 和/或 "oi_top"
-		})
+			Sources: sources,
+		}
+		if detail, ok := mergedPool.DynamicCandidates[symbol]; ok {
+			coin.Tier = detail.Tier
+			coin.PoolScore = detail.Score
+			coin.PoolReasons = append([]string(nil), detail.Reasons...)
+		}
+		candidateCoins = append(candidateCoins, coin)
 	}
 
-	log.Printf("📋 合并币种池: AI500前%d + OI_Top20 = 总计%d个候选币种",
-		ai500Limit, len(candidateCoins))
+	if pool.IsDynamicCandidatePoolEnabled() {
+		log.Printf("📋 候选币种池: 动态候选池(regime=%s) = 总计%d个候选币种",
+			mergedPool.MarketRegime, len(candidateCoins))
+	} else {
+		log.Printf("📋 合并币种池: AI500前%d + OI_Top20 = 总计%d个候选币种",
+			ai500Limit, len(candidateCoins))
+	}
 
-	// 4. 计算总盈亏
+	// 5. 计算总盈亏
 	totalPnL := totalEquity - at.initialBalance
 	totalPnLPct := 0.0
 	if at.initialBalance > 0 {
@@ -860,14 +887,6 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		marginUsedPct = (totalMarginUsed / totalEquity) * 100
 	}
 
-	// 5. 分析历史表现（最近100个周期，避免长期持仓的交易记录丢失）
-	// 假设每3分钟一个周期，100个周期 = 5小时，足够覆盖大部分交易
-	performance, err := at.decisionLogger.AnalyzePerformance(100)
-	if err != nil {
-		log.Printf("⚠️  分析历史表现失败: %v", err)
-		// 不影响主流程，继续执行（但设置performance为nil以避免传递错误数据）
-		performance = nil
-	}
 	baseMaxRiskPerTrade := at.config.MaxRiskPerTrade
 	if baseMaxRiskPerTrade <= 0 {
 		baseMaxRiskPerTrade = DefaultMaxRiskPerTrade

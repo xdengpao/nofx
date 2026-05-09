@@ -16,6 +16,7 @@ const (
 	highADXRiskMultiplier            = 0.5
 	highADXMinConfidence             = 90
 	btcConflictMinConfidence         = 88
+	btcHighVolatilityBollingerPct    = 12.0
 )
 
 // OpenGateInput 是开仓准入评估的输入。
@@ -139,7 +140,7 @@ func applyBTCMarketGate(result *OpenGateResult, ctx *Context) {
 		result.block(fmt.Sprintf("BTC 1小时跌幅 %.2f%%，禁止新开仓", btcData.PriceChange1h))
 		return
 	}
-	if btcData.PriceChange1h <= -3 || btcData.PriceChange4h <= -7 || btcData.BollingerWidth >= 0.12 {
+	if btcData.PriceChange1h <= -3 || btcData.PriceChange4h <= -7 || btcData.BollingerWidth >= btcHighVolatilityBollingerPct {
 		result.penalize("BTC波动或跌幅偏高，新开仓降权")
 		if result.MinConfidence < 85 {
 			result.MinConfidence = 85
