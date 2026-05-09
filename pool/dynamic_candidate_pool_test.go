@@ -175,3 +175,28 @@ func TestDynamicCandidatePool_UsesFreshSnapshotWhenAvailable(t *testing.T) {
 		t.Fatalf("market_regime 未从快照传递: %s", merged.MarketRegime)
 	}
 }
+
+func TestParseBinanceFuturesVolumeTickers_SkipsNonUSDTPairs(t *testing.T) {
+	tickers := parseBinanceFuturesVolumeTickers([]binanceFuturesTicker24h{
+		{Symbol: "ETHUSDC", QuoteVolume: "900"},
+		{Symbol: "SOLUSDC", QuoteVolume: "800"},
+		{Symbol: "BTCUSDT", QuoteVolume: "1000"},
+		{Symbol: " xrpUSDT ", QuoteVolume: "700"},
+		{Symbol: "BADUSDT", QuoteVolume: "0"},
+	}, 10)
+
+	if len(tickers) != 2 {
+		t.Fatalf("只应保留真实 USDT 交易对，实际: %+v", tickers)
+	}
+	if tickers[0].Symbol != "BTCUSDT" || tickers[0].QuoteVolume24hUSD != 1000 {
+		t.Fatalf("BTCUSDT 应按成交额排序在前: %+v", tickers)
+	}
+	if tickers[1].Symbol != "XRPUSDT" || tickers[1].QuoteVolume24hUSD != 700 {
+		t.Fatalf("应规范化并保留 XRPUSDT: %+v", tickers)
+	}
+	for _, ticker := range tickers {
+		if strings.Contains(ticker.Symbol, "USDCUSDT") {
+			t.Fatalf("不应把 USDC 合约误拼成 USDT 合约: %+v", tickers)
+		}
+	}
+}

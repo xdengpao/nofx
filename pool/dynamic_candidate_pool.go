@@ -82,6 +82,11 @@ type volumeTicker struct {
 	QuoteVolume24hUSD float64
 }
 
+type binanceFuturesTicker24h struct {
+	Symbol      string `json:"symbol"`
+	QuoteVolume string `json:"quoteVolume"`
+}
+
 var dynamicCandidatePoolConfig = defaultDynamicCandidatePoolConfig()
 
 var getMarketDataForDynamicPool = market.Get
@@ -462,19 +467,21 @@ func fetchBinanceFuturesVolumeTickers(limit int) ([]volumeTicker, error) {
 	if err != nil {
 		return nil, err
 	}
-	var raw []struct {
-		Symbol      string `json:"symbol"`
-		QuoteVolume string `json:"quoteVolume"`
-	}
+	var raw []binanceFuturesTicker24h
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, err
 	}
+	return parseBinanceFuturesVolumeTickers(raw, limit), nil
+}
+
+func parseBinanceFuturesVolumeTickers(raw []binanceFuturesTicker24h, limit int) []volumeTicker {
 	tickers := make([]volumeTicker, 0, len(raw))
 	for _, item := range raw {
-		symbol := normalizeDynamicSymbol(item.Symbol)
-		if !strings.HasSuffix(symbol, "USDT") {
+		rawSymbol := strings.ToUpper(strings.TrimSpace(item.Symbol))
+		if !strings.HasSuffix(rawSymbol, "USDT") {
 			continue
 		}
+		symbol := normalizeDynamicSymbol(rawSymbol)
 		quoteVolume, _ := strconv.ParseFloat(item.QuoteVolume, 64)
 		if quoteVolume <= 0 {
 			continue
@@ -487,7 +494,7 @@ func fetchBinanceFuturesVolumeTickers(limit int) ([]volumeTicker, error) {
 	if limit > 0 && len(tickers) > limit {
 		tickers = tickers[:limit]
 	}
-	return tickers, nil
+	return tickers
 }
 
 func metricsFromMarketData(data *market.Data, quoteVolume float64, performance *logger.PerformanceAnalysis) CandidateMetrics {
