@@ -433,7 +433,6 @@ func (m *TradePlanManager) UpdatePlanTakeProfit(symbol string, newTP float64) {
 
 func (m *TradePlanManager) UpdatePlanTakeProfitScoped(traderID, symbol, side string, newTP float64) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	var plan *TradePlan
 	for _, key := range m.candidatePlanKeys(traderID, symbol, side) {
@@ -443,6 +442,7 @@ func (m *TradePlanManager) UpdatePlanTakeProfitScoped(traderID, symbol, side str
 		}
 	}
 	if plan == nil {
+		m.mu.Unlock()
 		return
 	}
 
@@ -455,6 +455,33 @@ func (m *TradePlanManager) UpdatePlanTakeProfitScoped(traderID, symbol, side str
 	plan.LastTPAdjustTime = time.Now()
 
 	log.Printf("📈 %s 动态止盈调整: %.4f → %.4f", symbol, oldTP, newTP)
+	m.mu.Unlock()
+
+	m.autoSaveIfEnabled()
+}
+
+func (m *TradePlanManager) MarkTakeProfitSyncedScoped(traderID, symbol, side string, syncedAt time.Time) {
+	m.mu.Lock()
+
+	var plan *TradePlan
+	for _, key := range m.candidatePlanKeys(traderID, symbol, side) {
+		if p, ok := m.plans[key]; ok {
+			plan = p
+			break
+		}
+	}
+	if plan == nil {
+		m.mu.Unlock()
+		return
+	}
+
+	if syncedAt.IsZero() {
+		syncedAt = time.Now()
+	}
+	plan.LastTPSyncTime = syncedAt
+	m.mu.Unlock()
+
+	m.autoSaveIfEnabled()
 }
 
 // MarkTrancheExecuted 标记分批止盈档位已执行
@@ -888,6 +915,18 @@ func OnStopLossUpdated(symbol string, newStopLoss float64) {
 func OnStopLossUpdatedScoped(traderID, symbol, side string, newStopLoss float64) {
 	planManager.UpdatePlanStopLossScoped(traderID, symbol, side, newStopLoss)
 	log.Printf("✅ %s 止损已更新至 %.4f", symbol, newStopLoss)
+}
+
+// OnTakeProfitUpdated 止盈更新成功后调用
+func OnTakeProfitUpdated(symbol string, newTakeProfit float64) {
+	OnTakeProfitUpdatedScoped("", symbol, "", newTakeProfit)
+}
+
+// OnTakeProfitUpdatedScoped 止盈更新成功后调用，带 trader/side 作用域。
+func OnTakeProfitUpdatedScoped(traderID, symbol, side string, newTakeProfit float64) {
+	planManager.UpdatePlanTakeProfitScoped(traderID, symbol, side, newTakeProfit)
+	planManager.MarkTakeProfitSyncedScoped(traderID, symbol, side, time.Now())
+	log.Printf("✅ %s 止盈已更新并同步至 %.4f", symbol, newTakeProfit)
 }
 
 // OnPositionOpened 开仓成功后调用

@@ -5,6 +5,7 @@ package decision
 // 覆盖需求: 3.1, 3.2, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10
 
 import (
+	"math"
 	"nofx/logger"
 	"nofx/market"
 	"strings"
@@ -69,6 +70,138 @@ func newOpenLongDecision(symbol string, price float64) *Decision {
 		TakeProfit:      price * 1.20,
 		Confidence:      80,
 		MinHoldMinutes:  30,
+	}
+}
+
+func TestEvaluateExistingPositions_DynamicTakeProfitProducesUpdateDecision(t *testing.T) {
+	_, cleanup := setupTestPlanManager(t)
+	defer cleanup()
+
+	plan := &TradePlan{
+		TraderID:           "trader-a",
+		Symbol:             "TESTUSDT",
+		Direction:          "long",
+		EntryPrice:         100,
+		StopLoss:           90,
+		CurrentStopLoss:    90,
+		TakeProfit:         120,
+		OriginalTakeProfit: 120,
+		EntryATR:           2,
+		CreatedAt:          time.Now().Add(-2 * time.Hour),
+		Status:             "ACTIVE",
+		MinHoldMinutes:     30,
+	}
+	planManager.SetPlan(plan)
+
+	decisions := evaluateExistingPositions(&Context{
+		TraderID: "trader-a",
+		Exchange: "aster",
+		Positions: []PositionInfo{{
+			Symbol:           "TESTUSDT",
+			Side:             "long",
+			EntryPrice:       100,
+			MarkPrice:        101,
+			Quantity:         1,
+			UnrealizedPnLPct: 1,
+			UpdateTime:       time.Now().Add(-2 * time.Hour).UnixMilli(),
+		}},
+		MarketDataMap: map[string]*market.Data{
+			"TESTUSDT": {
+				CurrentPrice:   101,
+				CurrentADX:     50,
+				CurrentDIPlus:  30,
+				CurrentDIMinus: 10,
+				LongerTermContext: &market.LongerTermData{
+					ATR14: 2,
+				},
+			},
+			"BTCUSDT": newTestMarketData(100000),
+		},
+	})
+
+	if len(decisions) != 1 {
+		t.Fatalf("应产生 1 个动态止盈同步决策，实际=%d: %+v", len(decisions), decisions)
+	}
+	got := decisions[0]
+	if got.Action != "update_take_profit" {
+		t.Fatalf("应产生 update_take_profit，实际=%s", got.Action)
+	}
+	if math.Abs(got.NewTakeProfit-130) > 0.0001 {
+		t.Fatalf("动态止盈应调整到 130，实际=%.4f", got.NewTakeProfit)
+	}
+
+	stored := planManager.GetPlanScoped("trader-a", "TESTUSDT", "long")
+	if stored == nil {
+		t.Fatal("交易计划丢失")
+	}
+	if math.Abs(stored.TakeProfit-120) > 0.0001 {
+		t.Fatalf("交易所更新成功前不应提前改本地 TP，实际=%.4f", stored.TakeProfit)
+	}
+	if !stored.LastTPAdjustTime.IsZero() {
+		t.Fatalf("交易所更新成功前不应写 LastTPAdjustTime，实际=%s", stored.LastTPAdjustTime)
+	}
+}
+
+func TestEvaluateExistingPositions_PendingTakeProfitSyncIsEmittedOnce(t *testing.T) {
+	_, cleanup := setupTestPlanManager(t)
+	defer cleanup()
+
+	adjustedAt := time.Now().Add(-30 * time.Minute)
+	plan := &TradePlan{
+		TraderID:           "trader-a",
+		Symbol:             "SYNCUSDT",
+		Direction:          "long",
+		EntryPrice:         100,
+		StopLoss:           90,
+		CurrentStopLoss:    90,
+		TakeProfit:         130,
+		OriginalTakeProfit: 120,
+		EntryATR:           2,
+		CreatedAt:          time.Now().Add(-2 * time.Hour),
+		Status:             "ACTIVE",
+		MinHoldMinutes:     30,
+		LastTPAdjustTime:   adjustedAt,
+	}
+	planManager.SetPlan(plan)
+
+	ctx := &Context{
+		TraderID: "trader-a",
+		Exchange: "aster",
+		Positions: []PositionInfo{{
+			Symbol:           "SYNCUSDT",
+			Side:             "long",
+			EntryPrice:       100,
+			MarkPrice:        101,
+			Quantity:         1,
+			UnrealizedPnLPct: 1,
+			UpdateTime:       time.Now().Add(-2 * time.Hour).UnixMilli(),
+		}},
+		MarketDataMap: map[string]*market.Data{
+			"SYNCUSDT": {
+				CurrentPrice:   101,
+				CurrentADX:     50,
+				CurrentDIPlus:  30,
+				CurrentDIMinus: 10,
+				LongerTermContext: &market.LongerTermData{
+					ATR14: 2,
+				},
+			},
+			"BTCUSDT": newTestMarketData(100000),
+		},
+	}
+
+	decisions := evaluateExistingPositions(ctx)
+	if len(decisions) != 1 || decisions[0].Action != "update_take_profit" {
+		t.Fatalf("未同步的本地 TP 应补发 update_take_profit，实际=%+v", decisions)
+	}
+	if math.Abs(decisions[0].NewTakeProfit-130) > 0.0001 {
+		t.Fatalf("应按本地计划 TP 同步到 130，实际=%.4f", decisions[0].NewTakeProfit)
+	}
+
+	OnTakeProfitUpdatedScoped("trader-a", "SYNCUSDT", "long", 130)
+	decisions = evaluateExistingPositions(ctx)
+	if len(decisions) != 1 || decisions[0].Action != "hold" {
+		t.Fatalf("止盈同步成功后不应重复发 update_take_profit，实际=%+v", decisions)
 	}
 }
 

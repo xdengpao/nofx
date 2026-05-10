@@ -166,6 +166,7 @@ type TradePlan struct {
 	// 动态止盈追踪
 	OriginalTakeProfit float64   `json:"original_take_profit,omitempty"`
 	LastTPAdjustTime   time.Time `json:"last_tp_adjust_time,omitempty"`
+	LastTPSyncTime     time.Time `json:"last_tp_sync_time,omitempty"`
 
 	// 🆕 新增：连续亏损追踪
 	ConsecutiveLosses int `json:"consecutive_losses,omitempty"`

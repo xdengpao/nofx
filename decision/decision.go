@@ -409,9 +409,25 @@ func evaluateExistingPositions(ctx *Context) []Decision {
 			}
 		}
 
-		// 更新动态止盈
-		if result.NewTakeProfit > 0 {
-			planManager.UpdatePlanTakeProfitScoped(ctx.TraderID, pos.Symbol, pos.Side, result.NewTakeProfit)
+		if result.Action == "hold" {
+			if result.NewTakeProfit > 0 {
+				decisions = append(decisions, Decision{
+					Symbol:        pos.Symbol,
+					Action:        "update_take_profit",
+					NewTakeProfit: result.NewTakeProfit,
+					Reasoning:     fmt.Sprintf("动态止盈调整: %.4f → %.4f", planTakeProfit(plan), result.NewTakeProfit),
+				})
+				continue
+			}
+			if needsTakeProfitSync(plan) {
+				decisions = append(decisions, Decision{
+					Symbol:        pos.Symbol,
+					Action:        "update_take_profit",
+					NewTakeProfit: plan.TakeProfit,
+					Reasoning:     fmt.Sprintf("同步本地止盈计划到交易所: TP=%.4f", plan.TakeProfit),
+				})
+				continue
+			}
 		}
 
 		switch result.Action {
@@ -459,6 +475,20 @@ func evaluateExistingPositions(ctx *Context) []Decision {
 	}
 
 	return decisions
+}
+
+func planTakeProfit(plan *TradePlan) float64 {
+	if plan == nil {
+		return 0
+	}
+	return plan.TakeProfit
+}
+
+func needsTakeProfitSync(plan *TradePlan) bool {
+	if plan == nil || plan.TakeProfit <= 0 || plan.LastTPAdjustTime.IsZero() {
+		return false
+	}
+	return plan.LastTPSyncTime.IsZero() || plan.LastTPAdjustTime.After(plan.LastTPSyncTime)
 }
 
 // ============================================================================
@@ -1940,6 +1970,7 @@ type DecisionExecutor interface {
 	OpenPosition(symbol, side string, leverage int, sizeUSD, stopLoss, takeProfit float64) (*OpenPositionResult, error)
 	ClosePosition(symbol string, percentage float64) error
 	UpdateStopLoss(symbol string, newStopLoss float64) error
+	UpdateTakeProfit(symbol string, newTakeProfit float64) error
 }
 
 // ProcessDecisions 处理决策列表
@@ -1996,6 +2027,12 @@ func ProcessDecisions(decisions []Decision, executor DecisionExecutor, marketDat
 			err = executor.UpdateStopLoss(d.Symbol, d.NewStopLoss)
 			if err == nil {
 				OnStopLossUpdated(d.Symbol, d.NewStopLoss)
+			}
+
+		case "update_take_profit":
+			err = executor.UpdateTakeProfit(d.Symbol, d.NewTakeProfit)
+			if err == nil {
+				OnTakeProfitUpdated(d.Symbol, d.NewTakeProfit)
 			}
 
 		case "hold", "wait":

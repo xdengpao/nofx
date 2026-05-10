@@ -1588,11 +1588,11 @@ func (at *AutoTrader) executeUpdateStopLossWithRecord(d *decision.Decision, acti
 }
 
 // executeUpdateTakeProfitWithRecord 执行调整止盈并记录详细信息
-func (at *AutoTrader) executeUpdateTakeProfitWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
-	log.Printf("  🎯 调整止盈: %s → %.2f", decision.Symbol, decision.NewTakeProfit)
+func (at *AutoTrader) executeUpdateTakeProfitWithRecord(d *decision.Decision, actionRecord *logger.DecisionAction) error {
+	log.Printf("  🎯 调整止盈: %s → %.2f", d.Symbol, d.NewTakeProfit)
 
 	// 获取当前价格
-	marketData, err := getMarketData(decision.Symbol)
+	marketData, err := getMarketData(d.Symbol)
 	if err != nil {
 		return err
 	}
@@ -1615,14 +1615,14 @@ func (at *AutoTrader) executeUpdateTakeProfitWithRecord(decision *decision.Decis
 		if !ok {
 			continue
 		}
-		if symbol == decision.Symbol && posAmt != 0 {
+		if symbol == d.Symbol && posAmt != 0 {
 			targetPosition = pos
 			break
 		}
 	}
 
 	if targetPosition == nil {
-		return fmt.Errorf("持仓不存在: %s", decision.Symbol)
+		return fmt.Errorf("持仓不存在: %s", d.Symbol)
 	}
 
 	// 获取持仓方向和数量
@@ -1638,40 +1638,41 @@ func (at *AutoTrader) executeUpdateTakeProfitWithRecord(decision *decision.Decis
 	}
 
 	// 验证新止盈价格合理性
-	if positionSide == "LONG" && decision.NewTakeProfit <= marketData.CurrentPrice {
-		return fmt.Errorf("多单止盈必须高于当前价格 (当前: %.2f, 新止盈: %.2f)", marketData.CurrentPrice, decision.NewTakeProfit)
+	if positionSide == "LONG" && d.NewTakeProfit <= marketData.CurrentPrice {
+		return fmt.Errorf("多单止盈必须高于当前价格 (当前: %.2f, 新止盈: %.2f)", marketData.CurrentPrice, d.NewTakeProfit)
 	}
-	if positionSide == "SHORT" && decision.NewTakeProfit >= marketData.CurrentPrice {
-		return fmt.Errorf("空单止盈必须低于当前价格 (当前: %.2f, 新止盈: %.2f)", marketData.CurrentPrice, decision.NewTakeProfit)
+	if positionSide == "SHORT" && d.NewTakeProfit >= marketData.CurrentPrice {
+		return fmt.Errorf("空单止盈必须低于当前价格 (当前: %.2f, 新止盈: %.2f)", marketData.CurrentPrice, d.NewTakeProfit)
 	}
 
 	// ⚠️ 防御性检查：检测是否存在双向持仓
-	at.checkDualSidePosition(decision.Symbol, positionSide, positions)
+	at.checkDualSidePosition(d.Symbol, positionSide, positions)
 
 	// ============ P0 修复：记录并恢复止损单 ============
 	// 🔍 Step 1: 查询现有止损单价格
 	entryPrice := targetPosition["entryPrice"].(float64)
-	oldStopLossPrice := at.queryHyperliquidStopLossOrder(decision.Symbol, positionSide, entryPrice)
+	oldStopLossPrice := at.queryHyperliquidStopLossOrder(d.Symbol, positionSide, entryPrice)
 	// ===================================================
 
 	// 🔄 Step 2: 取消旧的止盈单（Hyperliquid 会连止损单一起删）
 	// 注意：如果存在双向持仓，这会删除两个方向的止盈单
-	if err := at.trader.CancelTakeProfitOrders(decision.Symbol); err != nil {
+	if err := at.trader.CancelTakeProfitOrders(d.Symbol); err != nil {
 		log.Printf("  ⚠ 取消旧止盈单失败: %v", err)
 		// 不中断执行，继续设置新止盈
 	}
 
 	// ✅ Step 3: 调用交易所 API 修改止盈
 	quantity := math.Abs(positionAmt)
-	err = at.trader.SetTakeProfit(decision.Symbol, positionSide, quantity, decision.NewTakeProfit)
+	err = at.trader.SetTakeProfit(d.Symbol, positionSide, quantity, d.NewTakeProfit)
 	if err != nil {
 		return fmt.Errorf("修改止盈失败: %w", err)
 	}
 
 	// ✅ Step 4: 恢复原有止损单（防止裸奔）
-	at.restoreStopLossOrder(decision.Symbol, positionSide, quantity, oldStopLossPrice)
+	at.restoreStopLossOrder(d.Symbol, positionSide, quantity, oldStopLossPrice)
 
-	log.Printf("  ✓ 止盈已调整: %.2f (当前价格: %.2f)", decision.NewTakeProfit, marketData.CurrentPrice)
+	decision.OnTakeProfitUpdatedScoped(at.id, d.Symbol, "", d.NewTakeProfit)
+	log.Printf("  ✓ 止盈已调整: %.2f (当前价格: %.2f)", d.NewTakeProfit, marketData.CurrentPrice)
 	return nil
 }
 
