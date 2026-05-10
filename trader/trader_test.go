@@ -619,6 +619,67 @@ func TestEvaluateExecutionPreflight_MinNotionalBlocked(t *testing.T) {
 	}
 }
 
+func TestResolvePositionStartTime_UsesExistingPlanCreatedAt(t *testing.T) {
+	if err := decision.InitPlanManager(t.TempDir()); err != nil {
+		t.Fatalf("初始化计划管理器失败: %v", err)
+	}
+
+	createdAt := time.Now().Add(-2 * time.Hour).Truncate(time.Millisecond)
+	decision.SyncPlansFromPositionsScoped(
+		"trader-a",
+		[]decision.PositionInfo{{
+			Symbol:     "ZECUSDT",
+			Side:       "long",
+			EntryPrice: 100,
+			MarkPrice:  110,
+			Quantity:   1,
+			Leverage:   5,
+			MarginUsed: 20,
+			UpdateTime: createdAt.UnixMilli(),
+		}},
+		map[string]*market.Data{
+			"ZECUSDT": {
+				CurrentPrice: 110,
+				LongerTermContext: &market.LongerTermData{
+					ATR14: 2,
+				},
+			},
+		},
+	)
+
+	at := &AutoTrader{
+		id:                    "trader-a",
+		positionFirstSeenTime: make(map[string]int64),
+	}
+
+	got := at.resolvePositionStartTime("ZECUSDT", "long")
+	if got != createdAt.UnixMilli() {
+		t.Fatalf("已有计划应使用 created_at 作为持仓开始时间，got=%d want=%d", got, createdAt.UnixMilli())
+	}
+	if at.positionFirstSeenTime["ZECUSDT_long"] != createdAt.UnixMilli() {
+		t.Fatalf("应把计划时间写入 positionFirstSeenTime")
+	}
+}
+
+func TestResolvePositionStartTime_KeepsExistingMemoryValue(t *testing.T) {
+	if err := decision.InitPlanManager(t.TempDir()); err != nil {
+		t.Fatalf("初始化计划管理器失败: %v", err)
+	}
+
+	existing := time.Now().Add(-30 * time.Minute).UnixMilli()
+	at := &AutoTrader{
+		id: "trader-a",
+		positionFirstSeenTime: map[string]int64{
+			"ZECUSDT_long": existing,
+		},
+	}
+
+	got := at.resolvePositionStartTime("ZECUSDT", "long")
+	if got != existing {
+		t.Fatalf("内存中已有开始时间时不应覆盖，got=%d want=%d", got, existing)
+	}
+}
+
 func TestExecuteOpenLong_StopLossFailure_MarksHighRisk(t *testing.T) {
 	originalGetter := getMarketData
 	getMarketData = func(symbol string) (*market.Data, error) {

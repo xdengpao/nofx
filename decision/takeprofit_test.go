@@ -5,6 +5,7 @@ package decision
 // 覆盖需求: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8, 4.9, 4.10
 
 import (
+	"math"
 	"nofx/market"
 	"os"
 	"testing"
@@ -471,6 +472,123 @@ func TestTrailingStop_Short_NoUpgrade(t *testing.T) {
 	result := e.Evaluate()
 	if result.Action == "update_stop_loss" && result.NewStopLoss > plan.CurrentStopLoss {
 		t.Errorf("空头移动止损不应上升: 新%.4f > 当前%.4f", result.NewStopLoss, plan.CurrentStopLoss)
+	}
+}
+
+func TestTrailingStop_Long_LargeATRAllowsBreakeven(t *testing.T) {
+	plan := newLongPlan(603.89, 545.46, 910.655)
+	plan.CurrentStopLoss = 577.6480637059689
+	pos := newLongPosition(603.89, 612.7, 7.1, pastTime(120))
+	md := newMarketData(612.7)
+	md.CurrentADX = 25
+	md.LongerTermContext.ATR14 = 23.37129086268741
+	e := &PositionEvaluator{Position: pos, Plan: plan, MarketData: md, Symbol: "ZECUSDT"}
+
+	result := e.evaluateTrailingStop()
+	if result == nil || result.Action != "update_stop_loss" {
+		t.Fatalf("大ATR不应阻止保本止损上移: result=%+v", result)
+	}
+
+	expected := plan.EntryPrice * 1.002
+	if math.Abs(result.NewStopLoss-expected) > 0.0001 {
+		t.Fatalf("应移动到保本附近 %.4f，实际 %.4f", expected, result.NewStopLoss)
+	}
+	if result.NewStopLoss <= plan.CurrentStopLoss {
+		t.Fatalf("多头止损应上移: new=%.4f current=%.4f", result.NewStopLoss, plan.CurrentStopLoss)
+	}
+}
+
+func TestTrailingStop_Long_DoesNotLowerWhenGuardBelowCurrentStop(t *testing.T) {
+	plan := newLongPlan(603.89, 545.46, 910.655)
+	plan.CurrentStopLoss = 606.5
+	pos := newLongPosition(603.89, 612.7, 7.1, pastTime(120))
+	md := newMarketData(612.7)
+	md.CurrentADX = 25
+	md.LongerTermContext.ATR14 = 23.37129086268741
+	e := &PositionEvaluator{Position: pos, Plan: plan, MarketData: md, Symbol: "ZECUSDT"}
+
+	if result := e.evaluateTrailingStop(); result != nil {
+		t.Fatalf("多头已有更高止损时不应下调: %+v", result)
+	}
+}
+
+func TestTrailingStop_Long_TriggerGuardAdjustsOnlyTooCloseTarget(t *testing.T) {
+	plan := newLongPlan(100, 90, 150)
+	plan.CurrentStopLoss = 105
+	pos := newLongPosition(100, 113, 20, pastTime(120))
+	md := newMarketData(113)
+	md.CurrentADX = 35
+	md.LongerTermContext.ATR14 = 20
+	e := &PositionEvaluator{Position: pos, Plan: plan, MarketData: md, Symbol: "TESTUSDT"}
+
+	result := e.evaluateTrailingStop()
+	if result == nil || result.Action != "update_stop_loss" {
+		t.Fatalf("过近目标应按触发保护线调整后更新: result=%+v", result)
+	}
+
+	triggerGuard := math.Max(113*0.005, math.Min(20*0.25, 113*0.012))
+	expected := 113 - triggerGuard
+	if math.Abs(result.NewStopLoss-expected) > 0.0001 {
+		t.Fatalf("应按triggerGuard调整到 %.4f，实际 %.4f", expected, result.NewStopLoss)
+	}
+}
+
+func TestTrailingStop_Short_BreakevenAllowsStopLower(t *testing.T) {
+	plan := newShortPlan(100, 110, 80)
+	plan.CurrentStopLoss = 110
+	pos := newShortPosition(100, 96, 7, pastTime(120))
+	md := newMarketData(96)
+	md.CurrentADX = 25
+	md.LongerTermContext.ATR14 = 8
+	e := &PositionEvaluator{Position: pos, Plan: plan, MarketData: md, Symbol: "TESTUSDT"}
+
+	result := e.evaluateTrailingStop()
+	if result == nil || result.Action != "update_stop_loss" {
+		t.Fatalf("空头达到保本条件应允许止损下移: result=%+v", result)
+	}
+
+	expected := plan.EntryPrice * 0.998
+	if math.Abs(result.NewStopLoss-expected) > 0.0001 {
+		t.Fatalf("空头保本止损应为 %.4f，实际 %.4f", expected, result.NewStopLoss)
+	}
+	if result.NewStopLoss >= plan.CurrentStopLoss || result.NewStopLoss <= md.CurrentPrice {
+		t.Fatalf("空头止损必须下移且高于当前价: new=%.4f currentSL=%.4f price=%.4f", result.NewStopLoss, plan.CurrentStopLoss, md.CurrentPrice)
+	}
+}
+
+func TestTrailingStop_Short_DoesNotRaiseStop(t *testing.T) {
+	plan := newShortPlan(100, 110, 80)
+	plan.CurrentStopLoss = 98
+	pos := newShortPosition(100, 96, 7, pastTime(120))
+	md := newMarketData(96)
+	md.CurrentADX = 25
+	md.LongerTermContext.ATR14 = 8
+	e := &PositionEvaluator{Position: pos, Plan: plan, MarketData: md, Symbol: "TESTUSDT"}
+
+	if result := e.evaluateTrailingStop(); result != nil {
+		t.Fatalf("空头已有更低止损时不应上调: %+v", result)
+	}
+}
+
+func TestTrailingStop_DistancesSplitTriggerGuardAndTrendTolerance(t *testing.T) {
+	e := &PositionEvaluator{}
+	cfg := defaultTrailingConfig
+	atr := 23.37129086268741
+	currentPrice := 612.7
+
+	triggerGuard := e.calculateTriggerGuardDistance(cfg, atr, currentPrice)
+	trendTolerance := e.calculateTrendToleranceDistance(cfg, atr, currentPrice)
+
+	expectedGuard := math.Max(currentPrice*0.005, math.Min(atr*0.25, currentPrice*0.012))
+	expectedTolerance := math.Max(atr*1.2, currentPrice*0.012)
+	if math.Abs(triggerGuard-expectedGuard) > 0.0001 {
+		t.Fatalf("triggerGuard=%.4f want %.4f", triggerGuard, expectedGuard)
+	}
+	if math.Abs(trendTolerance-expectedTolerance) > 0.0001 {
+		t.Fatalf("trendTolerance=%.4f want %.4f", trendTolerance, expectedTolerance)
+	}
+	if triggerGuard >= trendTolerance {
+		t.Fatalf("触发保护距离应小于趋势容忍距离: guard=%.4f tolerance=%.4f", triggerGuard, trendTolerance)
 	}
 }
 

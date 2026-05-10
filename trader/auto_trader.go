@@ -293,6 +293,7 @@ func (at *AutoTrader) syncExistingPositions() error {
 		if lev, ok := pos["leverage"].(float64); ok {
 			leverage = int(lev)
 		}
+		startTime := at.resolvePositionStartTime(symbol, side)
 
 		positionInfos = append(positionInfos, decision.PositionInfo{
 			Symbol:     symbol,
@@ -301,12 +302,8 @@ func (at *AutoTrader) syncExistingPositions() error {
 			MarkPrice:  markPrice,
 			Quantity:   quantity,
 			Leverage:   leverage,
-			UpdateTime: time.Now().UnixMilli(),
+			UpdateTime: startTime,
 		})
-
-		// 记录持仓首次出现时间
-		posKey := symbol + "_" + side
-		at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
 	}
 
 	// 获取市场数据
@@ -783,11 +780,7 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		// 跟踪持仓首次出现时间
 		posKey := symbol + "_" + side
 		currentPositionKeys[posKey] = true
-		if _, exists := at.positionFirstSeenTime[posKey]; !exists {
-			// 新持仓，记录当前时间
-			at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
-		}
-		updateTime := at.positionFirstSeenTime[posKey]
+		updateTime := at.resolvePositionStartTime(symbol, side)
 
 		positionInfos = append(positionInfos, decision.PositionInfo{
 			Symbol:           symbol,
@@ -965,6 +958,26 @@ func (at *AutoTrader) updatePositionSnapshots(positions []decision.PositionInfo)
 	}
 
 	at.lastPositions = newSnapshots
+}
+
+func (at *AutoTrader) resolvePositionStartTime(symbol, side string) int64 {
+	if at.positionFirstSeenTime == nil {
+		at.positionFirstSeenTime = make(map[string]int64)
+	}
+
+	posKey := symbol + "_" + side
+	if startTime, exists := at.positionFirstSeenTime[posKey]; exists && startTime > 0 {
+		return startTime
+	}
+
+	now := time.Now()
+	startTime := now.UnixMilli()
+	if plan := decision.GetPlanByScope(at.id, symbol, side); plan != nil && !plan.CreatedAt.IsZero() && plan.CreatedAt.Before(now) {
+		startTime = plan.CreatedAt.UnixMilli()
+	}
+
+	at.positionFirstSeenTime[posKey] = startTime
+	return startTime
 }
 
 // executeDecisionWithRecord 执行AI决策并记录详细信息

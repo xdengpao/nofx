@@ -30,11 +30,14 @@ type TakeProfitEngineConfig struct {
 
 // TrailingStopConfig 移动止损配置
 type TrailingStopConfig struct {
-	BreakevenThreshold   float64
-	LockProfitThresholds []TrailingStopLevel
-	UseATRMultiplier     bool
-	ATRSafetyMultiplier  float64
-	MinProfitBuffer      float64
+	BreakevenThreshold    float64
+	LockProfitThresholds  []TrailingStopLevel
+	TriggerGuardMinPct    float64
+	TriggerGuardATRMult   float64
+	TriggerGuardMaxPct    float64
+	TrendToleranceATRMult float64
+	TrendToleranceMinPct  float64
+	MinProfitBuffer       float64
 }
 
 // TrailingStopLevel 移动止损档位
@@ -84,9 +87,12 @@ var defaultTrailingConfig = &TrailingStopConfig{
 		{PnLThreshold: 12.0, LockPercent: 0.40, RequireADXAbove: 20},
 		{PnLThreshold: 20.0, LockPercent: 0.60, RequireADXAbove: 15},
 	},
-	UseATRMultiplier:    true,
-	ATRSafetyMultiplier: 1.5,
-	MinProfitBuffer:     2.0,
+	TriggerGuardMinPct:    0.005,
+	TriggerGuardATRMult:   0.25,
+	TriggerGuardMaxPct:    0.012,
+	TrendToleranceATRMult: 1.2,
+	TrendToleranceMinPct:  0.012,
+	MinProfitBuffer:       2.0,
 }
 
 var defaultExitTranches = []DynamicExitTranche{
@@ -761,6 +767,9 @@ func (e *PositionEvaluator) calculateTrailingStopImproved(config *TrailingStopCo
 	if e.Plan == nil || e.MarketData == nil {
 		return 0
 	}
+	if config == nil {
+		config = defaultTrailingConfig
+	}
 
 	pnlPct := e.Position.UnrealizedPnLPct
 	entryPrice := e.Plan.EntryPrice
@@ -769,9 +778,7 @@ func (e *PositionEvaluator) calculateTrailingStopImproved(config *TrailingStopCo
 
 	// 获取ATR用于动态计算
 	atr := e.getATR()
-
-	// 计算最小安全距离
-	minSafetyDistance := math.Max(atr*config.ATRSafetyMultiplier, currentPrice*0.005)
+	triggerGuard := e.calculateTriggerGuardDistance(config, atr, currentPrice)
 
 	var newSL float64
 	var reason string
@@ -818,20 +825,21 @@ func (e *PositionEvaluator) calculateTrailingStopImproved(config *TrailingStopCo
 	if newSL == 0 {
 		return 0
 	}
+	targetSL := newSL
 
-	// 安全距离检查
+	// 触发保护距离只防止止损贴近当前价，不再用趋势容忍距离压制保本/锁利润止损。
 	if e.Plan.Direction == "long" {
-		maxAllowedSL := currentPrice - minSafetyDistance
+		maxAllowedSL := currentPrice - triggerGuard
 		if newSL > maxAllowedSL {
-			log.Printf("⚠️ %s: %s止损%.4f超过安全线%.4f，调整为%.4f",
-				e.Plan.Symbol, reason, newSL, maxAllowedSL, maxAllowedSL)
+			log.Printf("⚠️ %s: %s目标止损%.4f距离当前价过近，触发保护线%.4f(triggerGuard=%.4f)，调整为%.4f",
+				e.Plan.Symbol, reason, newSL, maxAllowedSL, triggerGuard, maxAllowedSL)
 			newSL = maxAllowedSL
 		}
 	} else {
-		minAllowedSL := currentPrice + minSafetyDistance
+		minAllowedSL := currentPrice + triggerGuard
 		if newSL < minAllowedSL {
-			log.Printf("⚠️ %s: %s止损%.4f低于安全线%.4f，调整为%.4f",
-				e.Plan.Symbol, reason, newSL, minAllowedSL, minAllowedSL)
+			log.Printf("⚠️ %s: %s目标止损%.4f距离当前价过近，触发保护线%.4f(triggerGuard=%.4f)，调整为%.4f",
+				e.Plan.Symbol, reason, newSL, minAllowedSL, triggerGuard, minAllowedSL)
 			newSL = minAllowedSL
 		}
 	}
@@ -840,18 +848,60 @@ func (e *PositionEvaluator) calculateTrailingStopImproved(config *TrailingStopCo
 	effectiveSL := e.getEffectiveStopLoss()
 	if e.Plan.Direction == "long" {
 		if newSL <= effectiveSL {
+			log.Printf("⚠️ %s: 拒绝移动止损，目标%.4f/调整后%.4f 未高于当前止损%.4f (triggerGuard=%.4f)",
+				e.Plan.Symbol, targetSL, newSL, effectiveSL, triggerGuard)
 			return 0
 		}
 	} else {
 		if newSL >= effectiveSL {
+			log.Printf("⚠️ %s: 拒绝移动止损，目标%.4f/调整后%.4f 未低于当前止损%.4f (triggerGuard=%.4f)",
+				e.Plan.Symbol, targetSL, newSL, effectiveSL, triggerGuard)
 			return 0
 		}
 	}
 
-	log.Printf("📈 %s: %s，新止损=%.4f (ATR=%.4f, ADX=%.1f)",
-		e.Plan.Symbol, reason, newSL, atr, adx)
+	log.Printf("📈 %s: %s，目标止损=%.4f，新止损=%.4f (ATR=%.4f, triggerGuard=%.4f, ADX=%.1f)",
+		e.Plan.Symbol, reason, targetSL, newSL, atr, triggerGuard, adx)
 
 	return newSL
+}
+
+func (e *PositionEvaluator) calculateTriggerGuardDistance(config *TrailingStopConfig, atr, currentPrice float64) float64 {
+	if config == nil {
+		config = defaultTrailingConfig
+	}
+
+	minPct := config.TriggerGuardMinPct
+	if minPct <= 0 {
+		minPct = 0.005
+	}
+	atrMult := config.TriggerGuardATRMult
+	if atrMult <= 0 {
+		atrMult = 0.25
+	}
+	maxPct := config.TriggerGuardMaxPct
+	if maxPct <= 0 {
+		maxPct = 0.012
+	}
+
+	return math.Max(currentPrice*minPct, math.Min(atr*atrMult, currentPrice*maxPct))
+}
+
+func (e *PositionEvaluator) calculateTrendToleranceDistance(config *TrailingStopConfig, atr, currentPrice float64) float64 {
+	if config == nil {
+		config = defaultTrailingConfig
+	}
+
+	atrMult := config.TrendToleranceATRMult
+	if atrMult <= 0 {
+		atrMult = 1.2
+	}
+	minPct := config.TrendToleranceMinPct
+	if minPct <= 0 {
+		minPct = 0.012
+	}
+
+	return math.Max(atr*atrMult, currentPrice*minPct)
 }
 
 // ============================================================================
