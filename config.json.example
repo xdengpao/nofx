@@ -91,6 +91,25 @@
     "exchange_volume_top_limit": 30,
     "snapshot_path": "data/dynamic_candidate_pool.json"
   },
+  "trading_frequency": {
+    // 推荐首次上线使用 balanced：AI新机会分析间隔12分钟，prompt候选10个，高ADX/RR/rolling放宽仅report-only。
+    "mode": "balanced"
+
+    // 可选 safe：
+    // "mode": "safe"
+
+    // 可选 active：
+    // "mode": "active",
+    // "analysis_interval_minutes": 9,
+    // "prompt_candidate_limit": 12,
+    // "daily_open_limit": 4,
+    // "rollback_window_hours": 24,
+    // "rollback_min_profit_factor": 0.8,
+    // "rollback_max_drawdown_pct": 2.0
+    //
+    // 注意：active触发运行时回退到safe开仓行为时，不会动态缩小候选池prompt_candidate_limit；
+    // 如需改变候选数量，请修改配置并重启服务。
+  },
   "api_server_port": 8080,
   "max_daily_loss": 10.0,
   "max_drawdown": 20.0,

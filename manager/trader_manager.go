@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"nofx/config"
+	"nofx/decision"
 	"nofx/trader"
 	"sync"
 	"time"
@@ -51,6 +52,17 @@ func (tm *TraderManager) SetTrackerInterval(interval time.Duration) {
 
 // AddTrader 添加一个trader
 func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig) error {
+	return tm.AddTraderWithFrequency(cfg, coinPoolURL, maxDailyLoss, maxDrawdown, stopTradingMinutes, leverage, config.TradingFrequencyProfile{
+		Legacy:                  true,
+		Mode:                    config.TradingFrequencyModeLegacy,
+		EffectiveMode:           config.TradingFrequencyModeLegacy,
+		AnalysisIntervalMinutes: trader.DefaultAnalysisInterval,
+		PromptCandidateLimit:    8,
+	})
+}
+
+// AddTraderWithFrequency 添加一个带开仓频率策略的trader。
+func (tm *TraderManager) AddTraderWithFrequency(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig, frequency config.TradingFrequencyProfile) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
@@ -88,7 +100,8 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
 		StopTradingTime:       time.Duration(stopTradingMinutes) * time.Minute,
 		MaxRiskPerTrade:       trader.DefaultMaxRiskPerTrade,
 		TotalRiskBudget:       trader.DefaultTotalRiskBudget,
-		AnalysisIntervalMin:   trader.DefaultAnalysisInterval,
+		AnalysisIntervalMin:   frequency.AnalysisIntervalMinutes,
+		FrequencyPolicy:       decisionFrequencyPolicy(frequency),
 	}
 
 	// 创建trader实例
@@ -107,6 +120,34 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
 	}
 	log.Printf("✓ Trader '%s' (%s) 已添加", cfg.Name, cfg.AIModel)
 	return nil
+}
+
+func decisionFrequencyPolicy(profile config.TradingFrequencyProfile) decision.FrequencyPolicy {
+	mode := profile.Mode
+	if mode == "" {
+		mode = config.TradingFrequencyModeLegacy
+	}
+	effectiveMode := profile.EffectiveMode
+	if effectiveMode == "" {
+		effectiveMode = mode
+	}
+	interval := profile.AnalysisIntervalMinutes
+	if interval <= 0 {
+		interval = trader.DefaultAnalysisInterval
+	}
+	return decision.FrequencyPolicy{
+		Mode:                    mode,
+		EffectiveMode:           effectiveMode,
+		AnalysisIntervalMin:     interval,
+		PromptCandidateLimit:    profile.PromptCandidateLimit,
+		DailyOpenLimit:          profile.DailyOpenLimit,
+		RollbackWindowHours:     profile.RollbackWindowHours,
+		RollbackMinProfitFactor: profile.RollbackMinProfitFactor,
+		RollbackMaxDrawdownPct:  profile.RollbackMaxDrawdownPct,
+		HighADXReportOnly:       profile.HighADXReportOnly,
+		RRReportOnly:            profile.RRReportOnly,
+		RollingGateReportOnly:   profile.RollingGateReportOnly,
+	}
 }
 
 // GetOrderTracker 获取指定trader的订单追踪器

@@ -14,7 +14,7 @@ func TestBuildReplayReport_OpenRejectionAndPnL(t *testing.T) {
 			Timestamp: now,
 			Decisions: []DecisionAction{
 				{Action: "open_long", Symbol: "BTCUSDT", Quantity: 1, Price: 100, Leverage: 5, RiskUSD: 20, Success: true, Timestamp: now},
-				{Action: "open_rejected", Symbol: "ETHUSDT", Success: false, GateState: "block", GateReasons: []string{"BTC闪崩"}, Timestamp: now},
+				{Action: "open_rejected", Symbol: "ETHUSDT", Success: false, GateState: "block", GateReasons: []string{"ADX偏高"}, Timestamp: now},
 			},
 		},
 		{
@@ -29,7 +29,7 @@ func TestBuildReplayReport_OpenRejectionAndPnL(t *testing.T) {
 	if report.OpenAttempts != 1 {
 		t.Fatalf("开仓次数错误: %+v", report)
 	}
-	if report.RejectedOpenCount != 1 || report.RejectionReasons["BTC闪崩"] != 1 {
+	if report.RejectedOpenCount != 1 || report.RejectionReasons["ADX偏高"] != 1 {
 		t.Fatalf("拒绝原因统计错误: %+v", report)
 	}
 	if report.TheoreticalPnL != 10 {
@@ -37,6 +37,66 @@ func TestBuildReplayReport_OpenRejectionAndPnL(t *testing.T) {
 	}
 	if !report.ReportOnly || !report.DryRun {
 		t.Fatalf("replay模式标记错误: %+v", report)
+	}
+	if report.ReportOnlySimulationSources["text_inferred"] != 1 {
+		t.Fatalf("旧日志拒绝应标注text_inferred模拟来源: %+v", report.ReportOnlySimulationSources)
+	}
+	if report.ReportOnlySimulationSymbols["ETHUSDT"] != 1 {
+		t.Fatalf("应统计report-only symbol分布: %+v", report.ReportOnlySimulationSymbols)
+	}
+}
+
+func TestBuildReplayReport_UsesStructuredSimulationSource(t *testing.T) {
+	now := time.Date(2026, 5, 6, 14, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{{
+		Timestamp: now,
+		Decisions: []DecisionAction{{
+			Action:    "open_rejected",
+			Symbol:    "BCHUSDT",
+			Success:   false,
+			Error:     "ADX偏高",
+			Timestamp: now,
+			Simulations: []OpenFrequencySimulationSnapshot{{
+				Scenario:   "high_adx_active_candidate",
+				Source:     "structured",
+				WouldAllow: true,
+			}},
+		}},
+	}}
+
+	report := BuildReplayReport(records, true, true)
+	if report.ReportOnlySimulationCount != 1 {
+		t.Fatalf("应统计结构化simulation: %+v", report)
+	}
+	if report.ReportOnlySimulationSources["structured"] != 1 {
+		t.Fatalf("结构化来源统计错误: %+v", report.ReportOnlySimulationSources)
+	}
+	if report.ReportOnlySimulationSymbols["BCHUSDT"] != 1 {
+		t.Fatalf("结构化symbol分布统计错误: %+v", report.ReportOnlySimulationSymbols)
+	}
+}
+
+func TestFrequencyHelpers(t *testing.T) {
+	now := time.Date(2026, 5, 6, 14, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{{
+		Timestamp: now,
+		RiskState: &RiskStateSnapshot{TraderID: "trader-a"},
+		Decisions: []DecisionAction{
+			{Action: "open_long", Symbol: "BTCUSDT", Success: true, Timestamp: now.Add(-time.Hour)},
+			{Action: "open_short", Symbol: "ETHUSDT", Success: false, Timestamp: now.Add(-time.Hour)},
+		},
+	}}
+
+	if got := CountSuccessfulOpens(records, now.Add(-2*time.Hour), "trader-a"); got != 1 {
+		t.Fatalf("成功开仓计数错误: %d", got)
+	}
+
+	stats := BuildRecentClosedTradeStats([]TradeOutcome{
+		{Symbol: "BTCUSDT", PnL: 2, CloseTime: now.Add(-90 * time.Minute)},
+		{Symbol: "ETHUSDT", PnL: -4, CloseTime: now.Add(-30 * time.Minute)},
+	}, now.Add(-2*time.Hour))
+	if stats.ClosedTrades != 2 || stats.ProfitFactor != 0.5 || stats.MaxDrawdownUSD != 4 {
+		t.Fatalf("闭合交易统计错误: %+v", stats)
 	}
 }
 

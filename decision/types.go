@@ -187,22 +187,28 @@ type TradePlanManager struct {
 
 // Decision AI的交易决策
 type Decision struct {
-	Symbol                string  `json:"symbol"`
-	Action                string  `json:"action"`
-	Leverage              int     `json:"leverage,omitempty"`
-	PositionSizeUSD       float64 `json:"position_size_usd,omitempty"`
-	StopLoss              float64 `json:"stop_loss,omitempty"`
-	TakeProfit            float64 `json:"take_profit,omitempty"`
-	NewStopLoss           float64 `json:"new_stop_loss,omitempty"`
-	NewTakeProfit         float64 `json:"new_take_profit,omitempty"`
-	ClosePercentage       float64 `json:"close_percentage,omitempty"`
-	Confidence            int     `json:"confidence,omitempty"`
-	RiskUSD               float64 `json:"risk_usd,omitempty"`
-	Reasoning             string  `json:"reasoning"`
-	InvalidationPrice     float64 `json:"invalidation_price,omitempty"`
-	InvalidationCondition string  `json:"invalidation_condition,omitempty"`
-	MinHoldMinutes        int     `json:"min_hold_minutes,omitempty"`
-	TrancheIndex          int     `json:"tranche_index,omitempty"`
+	Symbol                   string  `json:"symbol"`
+	Action                   string  `json:"action"`
+	Leverage                 int     `json:"leverage,omitempty"`
+	PositionSizeUSD          float64 `json:"position_size_usd,omitempty"`
+	RequestedPositionSizeUSD float64 `json:"requested_position_size_usd,omitempty"`
+	AdjustedPositionSizeUSD  float64 `json:"adjusted_position_size_usd,omitempty"`
+	SizingAdjusted           bool    `json:"sizing_adjusted,omitempty"`
+	SizingReason             string  `json:"sizing_reason,omitempty"`
+	StopDistancePct          float64 `json:"stop_distance_pct,omitempty"`
+	EffectiveRiskPct         float64 `json:"effective_risk_pct,omitempty"`
+	StopLoss                 float64 `json:"stop_loss,omitempty"`
+	TakeProfit               float64 `json:"take_profit,omitempty"`
+	NewStopLoss              float64 `json:"new_stop_loss,omitempty"`
+	NewTakeProfit            float64 `json:"new_take_profit,omitempty"`
+	ClosePercentage          float64 `json:"close_percentage,omitempty"`
+	Confidence               int     `json:"confidence,omitempty"`
+	RiskUSD                  float64 `json:"risk_usd,omitempty"`
+	Reasoning                string  `json:"reasoning"`
+	InvalidationPrice        float64 `json:"invalidation_price,omitempty"`
+	InvalidationCondition    string  `json:"invalidation_condition,omitempty"`
+	MinHoldMinutes           int     `json:"min_hold_minutes,omitempty"`
+	TrancheIndex             int     `json:"tranche_index,omitempty"`
 }
 
 // FullDecision AI的完整决策
@@ -219,12 +225,52 @@ type FullDecision struct {
 
 // OpenRejection 记录开仓建议被确定性风控拒绝的原因。
 type OpenRejection struct {
-	Symbol          string         `json:"symbol"`
-	Action          string         `json:"action"`
-	Reason          string         `json:"reason"`
-	GateState       string         `json:"gate_state,omitempty"`
-	GateReasons     []string       `json:"gate_reasons,omitempty"`
-	GateDiagnostics map[string]any `json:"gate_diagnostics,omitempty"`
+	Symbol          string                    `json:"symbol"`
+	Action          string                    `json:"action"`
+	Reason          string                    `json:"reason"`
+	GateState       string                    `json:"gate_state,omitempty"`
+	GateReasons     []string                  `json:"gate_reasons,omitempty"`
+	GateDiagnostics map[string]any            `json:"gate_diagnostics,omitempty"`
+	Simulations     []OpenFrequencySimulation `json:"simulations,omitempty"`
+}
+
+// OpenFrequencySimulation 记录软风控放宽的只观测模拟结果。
+type OpenFrequencySimulation struct {
+	Scenario        string         `json:"scenario"`
+	Source          string         `json:"source,omitempty"` // structured, text_inferred
+	WouldAllow      bool           `json:"would_allow"`
+	Reason          string         `json:"reason,omitempty"`
+	OriginalState   string         `json:"original_state,omitempty"`
+	SimulatedState  string         `json:"simulated_state,omitempty"`
+	MinConfidence   int            `json:"min_confidence,omitempty"`
+	EffectiveRisk   float64        `json:"effective_risk,omitempty"`
+	AdjustedSizeUSD float64        `json:"adjusted_size_usd,omitempty"`
+	Diagnostics     map[string]any `json:"diagnostics,omitempty"`
+}
+
+// FrequencyPolicy 是开仓频率相关的运行时策略。
+type FrequencyPolicy struct {
+	Mode                    string  `json:"mode"`
+	EffectiveMode           string  `json:"effective_mode,omitempty"`
+	AnalysisIntervalMin     int     `json:"analysis_interval_min"`
+	PromptCandidateLimit    int     `json:"prompt_candidate_limit"`
+	DailyOpenLimit          int     `json:"daily_open_limit,omitempty"`
+	RollbackWindowHours     int     `json:"rollback_window_hours,omitempty"`
+	RollbackMinProfitFactor float64 `json:"rollback_min_profit_factor,omitempty"`
+	RollbackMaxDrawdownPct  float64 `json:"rollback_max_drawdown_pct,omitempty"`
+	HighADXReportOnly       bool    `json:"high_adx_report_only"`
+	RRReportOnly            bool    `json:"rr_report_only"`
+	RollingGateReportOnly   bool    `json:"rolling_gate_report_only"`
+}
+
+// FrequencyState 是开仓频率策略的可观测运行时状态。
+type FrequencyState struct {
+	OpenCount24h       int     `json:"open_count_24h"`
+	ClosedTrades24h    int     `json:"closed_trades_24h"`
+	ProfitFactor24h    float64 `json:"profit_factor_24h"`
+	Drawdown24hPct     float64 `json:"drawdown_24h_pct"`
+	AutoRollbackActive bool    `json:"auto_rollback_active"`
+	AutoRollbackReason string  `json:"auto_rollback_reason,omitempty"`
 }
 
 // EvaluationResult 评估结果

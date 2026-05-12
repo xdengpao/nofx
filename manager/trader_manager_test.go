@@ -2,6 +2,7 @@ package manager
 
 import (
 	"nofx/config"
+	"nofx/decision"
 	"nofx/trader"
 	"sort"
 	"sync"
@@ -94,6 +95,37 @@ func TestAddTrader_DuplicateID(t *testing.T) {
 	err = tm.AddTrader(cfg, "", 10.0, 20.0, 30, defaultLeverage)
 	if err == nil {
 		t.Error("重复添加同一 ID 应返回错误")
+	}
+}
+
+func TestAddTraderWithFrequency_PassesPolicy(t *testing.T) {
+	tm := NewTraderManager()
+	defer tm.StopOrderTracking()
+
+	cfg := makeTestTraderConfig("freq-trader", "Frequency Trader")
+	profile := config.TradingFrequencyProfile{
+		Mode:                    config.TradingFrequencyModeBalanced,
+		EffectiveMode:           config.TradingFrequencyModeBalanced,
+		AnalysisIntervalMinutes: 12,
+		PromptCandidateLimit:    10,
+		HighADXReportOnly:       true,
+		RRReportOnly:            true,
+		RollingGateReportOnly:   true,
+	}
+	if err := tm.AddTraderWithFrequency(cfg, "", 10.0, 20.0, 30, defaultLeverage, profile); err != nil {
+		t.Fatalf("添加带frequency policy的trader失败: %v", err)
+	}
+	at, err := tm.GetTrader("freq-trader")
+	if err != nil {
+		t.Fatalf("获取trader失败: %v", err)
+	}
+	status := at.GetStatus()
+	policy, ok := status["frequency_policy"].(decision.FrequencyPolicy)
+	if !ok {
+		t.Fatalf("status应输出frequency_policy: %+v", status)
+	}
+	if policy.Mode != config.TradingFrequencyModeBalanced || policy.AnalysisIntervalMin != 12 || policy.PromptCandidateLimit != 10 {
+		t.Fatalf("frequency_policy派生错误: %+v", policy)
 	}
 }
 

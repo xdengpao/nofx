@@ -46,6 +46,8 @@ type Context struct {
 	LastAIError              string                             `json:"-"`
 	ConsecutiveAIFails       int                                `json:"-"`
 	AnalysisIntervalMin      int                                `json:"-"`
+	FrequencyPolicy          *FrequencyPolicy                   `json:"-"`
+	FrequencyState           *FrequencyState                    `json:"-"`
 }
 
 const defaultMaxAccountDrawdownPct = 20.0
@@ -220,10 +222,11 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 	}
 
 	allDecisions := mergeDecisions(positionDecisions, aiDecisions)
-	var finalRejections []string
+	var finalRejections []OpenRejection
 	allDecisions, finalRejections = enforceFinalDecisionLimits(allDecisions, ctx)
 	if len(finalRejections) > 0 {
-		reason := "最终风控拦截: " + strings.Join(finalRejections, "; ")
+		openRejections = append(openRejections, finalRejections...)
+		reason := "最终风控拦截: " + strings.Join(openRejectionReasons(finalRejections), "; ")
 		log.Printf("⚠️ %s", reason)
 		if strings.TrimSpace(cotTrace) == "" {
 			cotTrace = reason
@@ -250,6 +253,20 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 	}, nil
 }
 
+func openRejectionReasons(rejections []OpenRejection) []string {
+	reasons := make([]string, 0, len(rejections))
+	for _, rejection := range rejections {
+		reason := strings.TrimSpace(rejection.Reason)
+		if reason == "" {
+			reason = strings.Join(rejection.GateReasons, "; ")
+		}
+		if reason != "" {
+			reasons = append(reasons, reason)
+		}
+	}
+	return reasons
+}
+
 func buildOpenRejection(d Decision, ctx *Context, reason string) OpenRejection {
 	rejection := OpenRejection{
 		Symbol: d.Symbol,
@@ -272,10 +289,138 @@ func buildOpenRejection(d Decision, ctx *Context, reason string) OpenRejection {
 	rejection.GateState = gate.State
 	rejection.GateReasons = append(rejection.GateReasons, gate.Reasons...)
 	rejection.GateDiagnostics = copyDiagnostics(gate.Diagnostics)
+	rejection.Simulations = buildOpenFrequencySimulations(d, ctx, marketData, gate, reason)
 	if len(rejection.GateReasons) == 0 && strings.TrimSpace(reason) != "" {
 		rejection.GateReasons = append(rejection.GateReasons, reason)
 	}
 	return rejection
+}
+
+func buildOpenFrequencySimulations(d Decision, ctx *Context, marketData *market.Data, gate OpenGateResult, reason string) []OpenFrequencySimulation {
+	if ctx == nil || ctx.FrequencyPolicy == nil {
+		return nil
+	}
+	policy := ctx.FrequencyPolicy
+	var simulations []OpenFrequencySimulation
+
+	if policy.HighADXReportOnly && marketData != nil && d.Action == "open_long" && isHighBetaAltcoin(d.Symbol) &&
+		marketData.CurrentADX > elevatedADX && marketData.CurrentADX <= extremeADX {
+		hasHardBTCBlock := reasonContainsAny(gate.Reasons, "BTC 1h/4h 明显转弱", "禁止新开高 beta")
+		wouldAllow := d.Confidence >= 85 && !hasHardBTCBlock
+		simulations = append(simulations, OpenFrequencySimulation{
+			Scenario:        "high_adx_active_candidate",
+			Source:          "structured",
+			WouldAllow:      wouldAllow,
+			Reason:          fmt.Sprintf("%s ADX %.1f active report-only", d.Symbol, marketData.CurrentADX),
+			OriginalState:   gate.State,
+			SimulatedState:  boolState(wouldAllow),
+			MinConfidence:   85,
+			EffectiveRisk:   gate.EffectiveRisk * highADXRiskMultiplier,
+			AdjustedSizeUSD: d.PositionSizeUSD * highADXRiskMultiplier,
+			Diagnostics: map[string]any{
+				"adx":        marketData.CurrentADX,
+				"confidence": d.Confidence,
+			},
+		})
+	}
+
+	if policy.RRReportOnly && marketData != nil {
+		if rr, ok := calculateNetRR(d, marketData); ok && rr >= 2.0 && rr < 2.5 {
+			wouldAllow := gate.Allowed && !reasonContainsAny(gate.Reasons, "风险回报比")
+			simulations = append(simulations, OpenFrequencySimulation{
+				Scenario:        "rr_threshold_candidate",
+				Source:          "structured",
+				WouldAllow:      wouldAllow,
+				Reason:          fmt.Sprintf("净RR %.2f 位于 report-only 区间[2.0,2.5)", rr),
+				OriginalState:   gate.State,
+				SimulatedState:  boolState(wouldAllow),
+				EffectiveRisk:   gate.EffectiveRisk,
+				AdjustedSizeUSD: gate.AdjustedSizeUSD,
+				Diagnostics: map[string]any{
+					"net_rr":    rr,
+					"threshold": 2.0,
+				},
+			})
+		}
+	}
+
+	if policy.RollingGateReportOnly && hasRollingGateSignal(gate, reason) {
+		wouldAllow := gate.State != "block"
+		diagnostics := copyDiagnostics(gate.Diagnostics)
+		if diagnostics == nil {
+			diagnostics = map[string]any{}
+		}
+		diagnostics["rolling_sample_policy"] = "sample_insufficient_uses_risk_only"
+		simulations = append(simulations, OpenFrequencySimulation{
+			Scenario:        "rolling_risk_only_candidate",
+			Source:          "structured",
+			WouldAllow:      wouldAllow,
+			Reason:          "rolling gate report-only: 只降仓，不额外提高置信度",
+			OriginalState:   gate.State,
+			SimulatedState:  boolState(wouldAllow),
+			EffectiveRisk:   gate.EffectiveRisk,
+			AdjustedSizeUSD: gate.AdjustedSizeUSD,
+			Diagnostics:     diagnostics,
+		})
+	}
+
+	return simulations
+}
+
+func calculateNetRR(d Decision, marketData *market.Data) (float64, bool) {
+	if marketData == nil || marketData.CurrentPrice <= 0 || d.StopLoss <= 0 || d.TakeProfit <= 0 {
+		return 0, false
+	}
+	currentPrice := marketData.CurrentPrice
+	var riskPct, rewardPct float64
+	switch d.Action {
+	case "open_long":
+		if d.StopLoss >= currentPrice || d.TakeProfit <= currentPrice {
+			return 0, false
+		}
+		riskPct = (currentPrice - d.StopLoss) / currentPrice * 100
+		rewardPct = (d.TakeProfit - currentPrice) / currentPrice * 100
+	case "open_short":
+		if d.StopLoss <= currentPrice || d.TakeProfit >= currentPrice {
+			return 0, false
+		}
+		riskPct = (d.StopLoss - currentPrice) / currentPrice * 100
+		rewardPct = (currentPrice - d.TakeProfit) / currentPrice * 100
+	default:
+		return 0, false
+	}
+	if riskPct <= 0 {
+		return 0, false
+	}
+	return (rewardPct - 0.2) / riskPct, true
+}
+
+func hasRollingGateSignal(gate OpenGateResult, reason string) bool {
+	if reasonContainsAny(gate.Reasons, "rolling", "历史滚动", "最近", "PF") {
+		return true
+	}
+	return strings.Contains(strings.ToLower(reason), "rolling") ||
+		strings.Contains(reason, "历史滚动") ||
+		strings.Contains(reason, "最近") ||
+		strings.Contains(reason, "PF")
+}
+
+func reasonContainsAny(reasons []string, needles ...string) bool {
+	for _, reason := range reasons {
+		for _, needle := range needles {
+			if strings.Contains(strings.ToLower(reason), strings.ToLower(needle)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func boolState(allowed bool) string {
+	if allowed {
+		return "allow"
+	}
+	return "block"
 }
 
 func copyDiagnostics(source map[string]any) map[string]any {
@@ -310,6 +455,14 @@ func initializeDefaults(ctx *Context) {
 	}
 	if ctx.AnalysisIntervalMin == 0 {
 		ctx.AnalysisIntervalMin = 15
+	}
+	if ctx.FrequencyPolicy != nil {
+		if ctx.FrequencyPolicy.AnalysisIntervalMin > 0 {
+			ctx.AnalysisIntervalMin = ctx.FrequencyPolicy.AnalysisIntervalMin
+		}
+		if ctx.FrequencyPolicy.EffectiveMode == "" {
+			ctx.FrequencyPolicy.EffectiveMode = ctx.FrequencyPolicy.Mode
+		}
 	}
 	if ctx.MaxAccountDrawdownPct == 0 {
 		ctx.MaxAccountDrawdownPct = configuredMaxAccountDrawdownPct
@@ -496,6 +649,13 @@ func needsTakeProfitSync(plan *TradePlan) bool {
 // ============================================================================
 
 func shouldCallAIForNewOpportunities(ctx *Context) bool {
+	if ctx.FrequencyPolicy != nil && ctx.FrequencyPolicy.DailyOpenLimit > 0 && ctx.FrequencyState != nil &&
+		ctx.FrequencyState.OpenCount24h >= ctx.FrequencyPolicy.DailyOpenLimit {
+		log.Printf("📊 24小时新增开仓已达上限(%d/%d)，跳过新机会搜索",
+			ctx.FrequencyState.OpenCount24h, ctx.FrequencyPolicy.DailyOpenLimit)
+		return false
+	}
+
 	if !ctx.AIBackoffUntil.IsZero() && time.Now().Before(ctx.AIBackoffUntil) {
 		remaining := time.Until(ctx.AIBackoffUntil).Minutes()
 		log.Printf("📊 AI调用退避中，剩余%.1f分钟，跳过新机会搜索", remaining)
@@ -525,6 +685,12 @@ func shouldCallAIForNewOpportunities(ctx *Context) bool {
 }
 
 func describeAISkipReason(ctx *Context) string {
+	if ctx.FrequencyPolicy != nil && ctx.FrequencyPolicy.DailyOpenLimit > 0 && ctx.FrequencyState != nil &&
+		ctx.FrequencyState.OpenCount24h >= ctx.FrequencyPolicy.DailyOpenLimit {
+		return fmt.Sprintf("24小时新增开仓已达上限(%d/%d)，跳过本周期新机会搜索",
+			ctx.FrequencyState.OpenCount24h, ctx.FrequencyPolicy.DailyOpenLimit)
+	}
+
 	if !ctx.AIBackoffUntil.IsZero() && time.Now().Before(ctx.AIBackoffUntil) {
 		return fmt.Sprintf("AI调用退避中，剩余%.1f分钟，跳过本周期新机会搜索", time.Until(ctx.AIBackoffUntil).Minutes())
 	}
@@ -648,6 +814,10 @@ func validateOpenDecision(d *Decision, ctx *Context) error {
 	if d.PositionSizeUSD <= 0 {
 		return fmt.Errorf("仓位大小必须>0")
 	}
+	originalRequestedSize := d.PositionSizeUSD
+	if d.RequestedPositionSizeUSD <= 0 {
+		d.RequestedPositionSizeUSD = originalRequestedSize
+	}
 
 	maxPositionValue := ctx.Account.AvailableBalance * float64(maxLeverage) * 0.9
 	if d.PositionSizeUSD > maxPositionValue {
@@ -704,7 +874,18 @@ func validateOpenDecision(d *Decision, ctx *Context) error {
 		RequestedPositionSizeUSD: d.PositionSizeUSD,
 		MinOrderValueUSDT:        defaultMinOrderValueUSDT,
 	})
+	d.StopDistancePct = sizing.StopDistancePct
+	d.EffectiveRiskPct = sizing.RiskPct
 	if d.PositionSizeUSD > sizing.MaxPositionSizeUSD*1.01 && sizing.MaxPositionSizeUSD > 0 {
+		if sizing.PositionSizeUSD >= defaultMinOrderValueUSDT {
+			log.Printf("⚠️ 单笔风险超限，自动缩仓: %.2f → %.2f USD", d.PositionSizeUSD, sizing.PositionSizeUSD)
+			d.AdjustedPositionSizeUSD = sizing.PositionSizeUSD
+			d.PositionSizeUSD = sizing.PositionSizeUSD
+			d.RiskUSD = sizing.RiskUSD
+			d.SizingAdjusted = true
+			d.SizingReason = "单笔风险超限，已缩小到最大可执行仓位"
+			return nil
+		}
 		return fmt.Errorf("单笔风险(%.2f USD)超过上限(%.2f USD)", d.PositionSizeUSD*(riskPct/100), ctx.Account.TotalEquity*gate.EffectiveRisk)
 	}
 	if !sizing.Executable && sizing.PositionSizeUSD < defaultMinOrderValueUSDT {
@@ -712,6 +893,7 @@ func validateOpenDecision(d *Decision, ctx *Context) error {
 	}
 
 	d.RiskUSD = sizing.RiskUSD
+	d.AdjustedPositionSizeUSD = sizing.PositionSizeUSD
 	return nil
 }
 
@@ -791,7 +973,7 @@ func validateFinalDecisions(decisions []Decision, ctx *Context) error {
 	return nil
 }
 
-func enforceFinalDecisionLimits(decisions []Decision, ctx *Context) ([]Decision, []string) {
+func enforceFinalDecisionLimits(decisions []Decision, ctx *Context) ([]Decision, []OpenRejection) {
 	if ctx == nil {
 		return decisions, nil
 	}
@@ -802,15 +984,43 @@ func enforceFinalDecisionLimits(decisions []Decision, ctx *Context) ([]Decision,
 	}
 
 	var result []Decision
-	var rejections []string
+	var rejections []OpenRejection
 	keptOpens := 0
+	dailyOpenRemaining := 0
+	if ctx.FrequencyPolicy != nil && ctx.FrequencyPolicy.DailyOpenLimit > 0 {
+		openCount := 0
+		if ctx.FrequencyState != nil {
+			openCount = ctx.FrequencyState.OpenCount24h
+		}
+		dailyOpenRemaining = ctx.FrequencyPolicy.DailyOpenLimit - openCount
+		if dailyOpenRemaining < 0 {
+			dailyOpenRemaining = 0
+		}
+	}
 	for _, d := range decisions {
 		if d.Action != "open_long" && d.Action != "open_short" {
 			result = append(result, d)
 			continue
 		}
 		if keptOpens >= availableSlots {
-			rejections = append(rejections, fmt.Sprintf("%s %s 因持仓上限3个被拒绝", d.Symbol, d.Action))
+			rejections = append(rejections, OpenRejection{
+				Symbol: d.Symbol,
+				Action: d.Action,
+				Reason: fmt.Sprintf("%s %s 因持仓上限3个被拒绝", d.Symbol, d.Action),
+			})
+			continue
+		}
+		if ctx.FrequencyPolicy != nil && ctx.FrequencyPolicy.DailyOpenLimit > 0 && keptOpens >= dailyOpenRemaining {
+			openCount := 0
+			if ctx.FrequencyState != nil {
+				openCount = ctx.FrequencyState.OpenCount24h
+			}
+			rejections = append(rejections, OpenRejection{
+				Symbol: d.Symbol,
+				Action: d.Action,
+				Reason: fmt.Sprintf("%s %s 因24小时新增开仓上限%d笔被拒绝(当前%d笔)",
+					d.Symbol, d.Action, ctx.FrequencyPolicy.DailyOpenLimit, openCount+keptOpens),
+			})
 			continue
 		}
 		result = append(result, d)
@@ -818,7 +1028,7 @@ func enforceFinalDecisionLimits(decisions []Decision, ctx *Context) ([]Decision,
 	}
 
 	if len(result) == 0 && len(rejections) > 0 {
-		result = append(result, waitDecision("最终风控拦截: "+strings.Join(rejections, "; ")))
+		result = append(result, waitDecision("最终风控拦截: "+strings.Join(openRejectionReasons(rejections), "; ")))
 	}
 
 	return result, rejections

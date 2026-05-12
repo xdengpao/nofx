@@ -172,6 +172,103 @@ func TestLoadConfig_DynamicCandidatePoolCanBeDisabled(t *testing.T) {
 	}
 }
 
+func TestNormalizeTradingFrequency_LegacyPreservesExistingDefaults(t *testing.T) {
+	cfg := validConfig()
+	cfg.DynamicCandidatePool.ApplyDefaults()
+
+	profile, err := cfg.NormalizeTradingFrequency()
+	if err != nil {
+		t.Fatalf("legacy配置不应失败: %v", err)
+	}
+	if !profile.Legacy || profile.Mode != TradingFrequencyModeLegacy {
+		t.Fatalf("legacy mode错误: %+v", profile)
+	}
+	if profile.AnalysisIntervalMinutes != 15 {
+		t.Fatalf("legacy分析间隔应保持15，实际=%d", profile.AnalysisIntervalMinutes)
+	}
+	if profile.PromptCandidateLimit != 8 {
+		t.Fatalf("legacy候选数应保持动态池默认8，实际=%d", profile.PromptCandidateLimit)
+	}
+}
+
+func TestNormalizeTradingFrequency_DefaultBlockDerivesBalanced(t *testing.T) {
+	cfg := validConfig()
+	cfg.DynamicCandidatePool.ApplyDefaults()
+	cfg.TradingFrequency = &TradingFrequencyConfig{}
+
+	profile, err := cfg.NormalizeTradingFrequency()
+	if err != nil {
+		t.Fatalf("balanced默认不应失败: %v", err)
+	}
+	if profile.Legacy || profile.Mode != TradingFrequencyModeBalanced {
+		t.Fatalf("应派生balanced: %+v", profile)
+	}
+	if profile.AnalysisIntervalMinutes != 12 || profile.PromptCandidateLimit != 10 {
+		t.Fatalf("balanced派生值错误: %+v", profile)
+	}
+	if !profile.HighADXReportOnly || !profile.RRReportOnly || !profile.RollingGateReportOnly {
+		t.Fatalf("balanced应默认开启report-only: %+v", profile)
+	}
+}
+
+func TestNormalizeTradingFrequency_ActiveDefaultsAndOverrides(t *testing.T) {
+	cfg := validConfig()
+	cfg.DynamicCandidatePool.ApplyDefaults()
+	cfg.TradingFrequency = &TradingFrequencyConfig{
+		Mode:                    TradingFrequencyModeActive,
+		AnalysisIntervalMinutes: 9,
+		PromptCandidateLimit:    12,
+		DailyOpenLimit:          5,
+	}
+
+	profile, err := cfg.NormalizeTradingFrequency()
+	if err != nil {
+		t.Fatalf("active配置不应失败: %v", err)
+	}
+	if profile.Mode != TradingFrequencyModeActive || profile.AnalysisIntervalMinutes != 9 || profile.PromptCandidateLimit != 12 {
+		t.Fatalf("active派生值错误: %+v", profile)
+	}
+	if profile.DailyOpenLimit != 5 {
+		t.Fatalf("daily open override未生效: %+v", profile)
+	}
+}
+
+func TestNormalizeTradingFrequency_InvalidValues(t *testing.T) {
+	tests := []struct {
+		name string
+		tf   TradingFrequencyConfig
+	}{
+		{name: "bad mode", tf: TradingFrequencyConfig{Mode: "fast"}},
+		{name: "low interval", tf: TradingFrequencyConfig{Mode: TradingFrequencyModeBalanced, AnalysisIntervalMinutes: 3}},
+		{name: "low prompt", tf: TradingFrequencyConfig{Mode: TradingFrequencyModeBalanced, PromptCandidateLimit: 7}},
+		{name: "high prompt", tf: TradingFrequencyConfig{Mode: TradingFrequencyModeBalanced, PromptCandidateLimit: 99}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.DynamicCandidatePool.ApplyDefaults()
+			cfg.TradingFrequency = &tt.tf
+			if _, err := cfg.NormalizeTradingFrequency(); err == nil {
+				t.Fatalf("非法配置应失败: %+v", tt.tf)
+			}
+		})
+	}
+}
+
+func TestLoadConfig_TradingFrequencyOverridesDynamicPromptLimit(t *testing.T) {
+	cfg := validConfig()
+	cfg.TradingFrequency = &TradingFrequencyConfig{Mode: TradingFrequencyModeBalanced}
+	path := writeConfigFile(t, cfg)
+
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	if loaded.DynamicCandidatePool.PromptCandidateLimit != 10 {
+		t.Fatalf("balanced应覆盖动态候选池prompt limit为10，实际=%d", loaded.DynamicCandidatePool.PromptCandidateLimit)
+	}
+}
+
 // ============================================================================
 // 需求 1.9: 杠杆默认值
 // ============================================================================

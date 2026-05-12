@@ -451,6 +451,9 @@ cp config.json.example config.json
   "use_default_coins": true,
   "coin_pool_api_url": "",
   "oi_top_api_url": "",
+  "trading_frequency": {
+    "mode": "balanced"
+  },
   "api_server_port": 8080
 }
 ```
@@ -468,6 +471,7 @@ cp config.json.example config.json
 - `initial_balance`: Set to your actual Binance futures account balance
 - Used to calculate profit/loss percentage
 - Example: If you have 500 USDT, set `"initial_balance": 500.0`
+- `trading_frequency.mode`: Keep `balanced` for first rollout. It uses a 12-minute new-opportunity interval and 10 prompt candidates. `active` adds a 24h open cap and runtime rollback; rollback does not change the candidate pool prompt limit until you edit config and restart.
 
 **✅ Configuration Checklist:**
 

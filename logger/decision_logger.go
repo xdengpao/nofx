@@ -33,18 +33,45 @@ type DecisionRecord struct {
 
 // RiskStateSnapshot 记录本周期可观测风险状态，保持旧日志兼容。
 type RiskStateSnapshot struct {
-	TraderID                 string           `json:"trader_id,omitempty"`
-	Exchange                 string           `json:"exchange,omitempty"`
-	MaxRiskPerTrade          float64          `json:"max_risk_per_trade,omitempty"`
-	EffectiveMaxRiskPerTrade float64          `json:"effective_max_risk_per_trade,omitempty"`
-	TotalRiskBudget          float64          `json:"total_risk_budget,omitempty"`
-	RemainingRiskBudget      float64          `json:"remaining_risk_budget,omitempty"`
-	MaxDailyLossPct          float64          `json:"max_daily_loss_pct,omitempty"`
-	MaxAccountDrawdownPct    float64          `json:"max_account_drawdown_pct,omitempty"`
-	AIBackoffUntil           string           `json:"ai_backoff_until,omitempty"`
-	ConsecutiveAIFails       int              `json:"consecutive_ai_fails,omitempty"`
-	OpenGateReasons          []string         `json:"open_gate_reasons,omitempty"`
-	OpenGateDiagnostics      []map[string]any `json:"open_gate_diagnostics,omitempty"`
+	TraderID                 string                   `json:"trader_id,omitempty"`
+	Exchange                 string                   `json:"exchange,omitempty"`
+	MaxRiskPerTrade          float64                  `json:"max_risk_per_trade,omitempty"`
+	EffectiveMaxRiskPerTrade float64                  `json:"effective_max_risk_per_trade,omitempty"`
+	TotalRiskBudget          float64                  `json:"total_risk_budget,omitempty"`
+	RemainingRiskBudget      float64                  `json:"remaining_risk_budget,omitempty"`
+	MaxDailyLossPct          float64                  `json:"max_daily_loss_pct,omitempty"`
+	MaxAccountDrawdownPct    float64                  `json:"max_account_drawdown_pct,omitempty"`
+	AIBackoffUntil           string                   `json:"ai_backoff_until,omitempty"`
+	ConsecutiveAIFails       int                      `json:"consecutive_ai_fails,omitempty"`
+	OpenGateReasons          []string                 `json:"open_gate_reasons,omitempty"`
+	OpenGateDiagnostics      []map[string]any         `json:"open_gate_diagnostics,omitempty"`
+	FrequencyPolicy          *FrequencyPolicySnapshot `json:"frequency_policy,omitempty"`
+	FrequencyState           *FrequencyStateSnapshot  `json:"frequency_state,omitempty"`
+}
+
+// FrequencyPolicySnapshot 是日志层的开仓频率策略快照，避免 logger 依赖 decision 包。
+type FrequencyPolicySnapshot struct {
+	Mode                    string  `json:"mode"`
+	EffectiveMode           string  `json:"effective_mode,omitempty"`
+	AnalysisIntervalMin     int     `json:"analysis_interval_min"`
+	PromptCandidateLimit    int     `json:"prompt_candidate_limit"`
+	DailyOpenLimit          int     `json:"daily_open_limit,omitempty"`
+	RollbackWindowHours     int     `json:"rollback_window_hours,omitempty"`
+	RollbackMinProfitFactor float64 `json:"rollback_min_profit_factor,omitempty"`
+	RollbackMaxDrawdownPct  float64 `json:"rollback_max_drawdown_pct,omitempty"`
+	HighADXReportOnly       bool    `json:"high_adx_report_only"`
+	RRReportOnly            bool    `json:"rr_report_only"`
+	RollingGateReportOnly   bool    `json:"rolling_gate_report_only"`
+}
+
+// FrequencyStateSnapshot 是日志层的开仓频率运行时状态快照。
+type FrequencyStateSnapshot struct {
+	OpenCount24h       int     `json:"open_count_24h"`
+	ClosedTrades24h    int     `json:"closed_trades_24h"`
+	ProfitFactor24h    float64 `json:"profit_factor_24h"`
+	Drawdown24hPct     float64 `json:"drawdown_24h_pct"`
+	AutoRollbackActive bool    `json:"auto_rollback_active"`
+	AutoRollbackReason string  `json:"auto_rollback_reason,omitempty"`
 }
 
 // AccountSnapshot 账户状态快照
@@ -97,17 +124,38 @@ type DecisionAction struct {
 	Error     string    `json:"error"`     // 错误信息
 	Reasoning string    `json:"reasoning,omitempty"`
 
-	RiskUSD              float64        `json:"risk_usd,omitempty"`
-	GateState            string         `json:"gate_state,omitempty"`
-	GateReasons          []string       `json:"gate_reasons,omitempty"`
-	GateDiagnostics      map[string]any `json:"gate_diagnostics,omitempty"`
-	ExecutionRisk        string         `json:"execution_risk,omitempty"`
-	StopLossSet          *bool          `json:"stop_loss_set,omitempty"`
-	TakeProfitSet        *bool          `json:"take_profit_set,omitempty"`
-	ProtectionError      string         `json:"protection_error,omitempty"`
-	HighRisk             bool           `json:"high_risk,omitempty"`
-	HighRiskReason       string         `json:"high_risk_reason,omitempty"`
-	RemainingPositionUSD float64        `json:"remaining_position_usd,omitempty"`
+	RiskUSD                  float64                           `json:"risk_usd,omitempty"`
+	RequestedPositionSizeUSD float64                           `json:"requested_position_size_usd,omitempty"`
+	AdjustedPositionSizeUSD  float64                           `json:"adjusted_position_size_usd,omitempty"`
+	SizingAdjusted           bool                              `json:"sizing_adjusted,omitempty"`
+	SizingReason             string                            `json:"sizing_reason,omitempty"`
+	StopDistancePct          float64                           `json:"stop_distance_pct,omitempty"`
+	EffectiveRiskPct         float64                           `json:"effective_risk_pct,omitempty"`
+	GateState                string                            `json:"gate_state,omitempty"`
+	GateReasons              []string                          `json:"gate_reasons,omitempty"`
+	GateDiagnostics          map[string]any                    `json:"gate_diagnostics,omitempty"`
+	Simulations              []OpenFrequencySimulationSnapshot `json:"simulations,omitempty"`
+	ExecutionRisk            string                            `json:"execution_risk,omitempty"`
+	StopLossSet              *bool                             `json:"stop_loss_set,omitempty"`
+	TakeProfitSet            *bool                             `json:"take_profit_set,omitempty"`
+	ProtectionError          string                            `json:"protection_error,omitempty"`
+	HighRisk                 bool                              `json:"high_risk,omitempty"`
+	HighRiskReason           string                            `json:"high_risk_reason,omitempty"`
+	RemainingPositionUSD     float64                           `json:"remaining_position_usd,omitempty"`
+}
+
+// OpenFrequencySimulationSnapshot 是日志层的 report-only 开仓频率模拟结果。
+type OpenFrequencySimulationSnapshot struct {
+	Scenario        string         `json:"scenario"`
+	Source          string         `json:"source,omitempty"`
+	WouldAllow      bool           `json:"would_allow"`
+	Reason          string         `json:"reason,omitempty"`
+	OriginalState   string         `json:"original_state,omitempty"`
+	SimulatedState  string         `json:"simulated_state,omitempty"`
+	MinConfidence   int            `json:"min_confidence,omitempty"`
+	EffectiveRisk   float64        `json:"effective_risk,omitempty"`
+	AdjustedSizeUSD float64        `json:"adjusted_size_usd,omitempty"`
+	Diagnostics     map[string]any `json:"diagnostics,omitempty"`
 }
 
 // DecisionLogger 决策日志记录器
@@ -340,6 +388,16 @@ type TradeOutcome struct {
 	CloseReason   string    `json:"close_reason,omitempty"`
 }
 
+// RecentClosedTradeStats 汇总指定窗口内闭合交易表现。
+type RecentClosedTradeStats struct {
+	ClosedTrades   int     `json:"closed_trades"`
+	GrossProfit    float64 `json:"gross_profit"`
+	GrossLoss      float64 `json:"gross_loss"`
+	NetPnL         float64 `json:"net_pn_l"`
+	ProfitFactor   float64 `json:"profit_factor"`
+	MaxDrawdownUSD float64 `json:"max_drawdown_usd"`
+}
+
 // UnmatchedAction 表示无法配对为完整交易的执行动作。
 type UnmatchedAction struct {
 	Timestamp time.Time `json:"timestamp"`
@@ -536,6 +594,73 @@ func BuildTradeOutcomes(records []*DecisionRecord) ([]TradeOutcome, []UnmatchedA
 	}
 
 	return outcomes, unmatched
+}
+
+// CountSuccessfulOpens 统计窗口内成功新增开仓数。
+func CountSuccessfulOpens(records []*DecisionRecord, since time.Time, traderID string) int {
+	count := 0
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		if traderID != "" && !recordMatchesTrader(record, traderID) {
+			continue
+		}
+		for _, action := range record.Decisions {
+			if !isOpenAction(action.Action) || !action.Success {
+				continue
+			}
+			actionTime := action.Timestamp
+			if actionTime.IsZero() {
+				actionTime = record.Timestamp
+			}
+			if !since.IsZero() && actionTime.Before(since) {
+				continue
+			}
+			count++
+		}
+	}
+	return count
+}
+
+// BuildRecentClosedTradeStats 统计窗口内闭合交易的 PF 和最大权益回撤。
+func BuildRecentClosedTradeStats(outcomes []TradeOutcome, since time.Time) RecentClosedTradeStats {
+	filtered := make([]TradeOutcome, 0, len(outcomes))
+	for _, outcome := range outcomes {
+		if !since.IsZero() && outcome.CloseTime.Before(since) {
+			continue
+		}
+		filtered = append(filtered, outcome)
+	}
+	sort.SliceStable(filtered, func(i, j int) bool {
+		return filtered[i].CloseTime.Before(filtered[j].CloseTime)
+	})
+
+	var stats RecentClosedTradeStats
+	var curve, peak float64
+	for _, outcome := range filtered {
+		stats.ClosedTrades++
+		stats.NetPnL += outcome.PnL
+		if outcome.PnL > 0 {
+			stats.GrossProfit += outcome.PnL
+		} else if outcome.PnL < 0 {
+			stats.GrossLoss += -outcome.PnL
+		}
+		curve += outcome.PnL
+		if curve > peak {
+			peak = curve
+		}
+		drawdown := peak - curve
+		if drawdown > stats.MaxDrawdownUSD {
+			stats.MaxDrawdownUSD = drawdown
+		}
+	}
+	if stats.GrossLoss > 0 {
+		stats.ProfitFactor = stats.GrossProfit / stats.GrossLoss
+	} else if stats.GrossProfit > 0 {
+		stats.ProfitFactor = 999
+	}
+	return stats
 }
 
 var historicallyWeakSymbols = map[string]string{

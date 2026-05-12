@@ -311,6 +311,9 @@ func TestEnforceFinalDecisionLimits_DropsExcessOpens(t *testing.T) {
 	if len(rejected) != 1 {
 		t.Fatalf("持仓满仓时应拒绝新增开仓，rejected=%v", rejected)
 	}
+	if !strings.Contains(rejected[0].Reason, "持仓上限") {
+		t.Fatalf("拒绝原因应结构化记录持仓上限: %+v", rejected[0])
+	}
 	if len(filtered) != 1 || filtered[0].Action != "hold" {
 		t.Fatalf("应保留非开仓决策并丢弃新增开仓: %+v", filtered)
 	}
@@ -329,6 +332,84 @@ func TestEnforceFinalDecisionLimits_OnlyRejectedOpenBecomesWait(t *testing.T) {
 	}
 	if len(filtered) != 1 || filtered[0].Action != "wait" {
 		t.Fatalf("只有被拒绝开仓时应输出wait: %+v", filtered)
+	}
+}
+
+func TestValidateOpenDecision_AutoShrinksOversizedRisk(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Account.TotalEquity = 1000
+	ctx.Account.AvailableBalance = 1000
+	ctx.MarketDataMap["BTCUSDT"] = newTestMarketData(100)
+
+	d := newOpenLongDecision("BTCUSDT", 100)
+	d.PositionSizeUSD = 1000
+	d.StopLoss = 98
+	d.TakeProfit = 110
+
+	if err := validateOpenDecision(d, ctx); err != nil {
+		t.Fatalf("可缩仓的风险超限不应拒绝: %v", err)
+	}
+	if !d.SizingAdjusted {
+		t.Fatalf("应标记自动缩仓: %+v", d)
+	}
+	if d.PositionSizeUSD >= d.RequestedPositionSizeUSD {
+		t.Fatalf("仓位应缩小: requested=%.4f adjusted=%.4f", d.RequestedPositionSizeUSD, d.PositionSizeUSD)
+	}
+	if d.AdjustedPositionSizeUSD != d.PositionSizeUSD || d.RiskUSD <= 0 || d.StopDistancePct <= 0 || d.EffectiveRiskPct <= 0 {
+		t.Fatalf("缩仓审计字段不完整: %+v", d)
+	}
+}
+
+func TestEnforceFinalDecisionLimits_DailyOpenCapStructuredRejection(t *testing.T) {
+	ctx := newTestContext()
+	ctx.FrequencyPolicy = &FrequencyPolicy{Mode: "active", EffectiveMode: "active", DailyOpenLimit: 1}
+	ctx.FrequencyState = &FrequencyState{OpenCount24h: 1}
+
+	filtered, rejected := enforceFinalDecisionLimits([]Decision{
+		{Symbol: "ETHUSDT", Action: "open_long", Reasoning: "新机会"},
+	}, ctx)
+
+	if len(rejected) != 1 {
+		t.Fatalf("达到每日开仓上限时应拒绝: %+v", rejected)
+	}
+	if rejected[0].Symbol != "ETHUSDT" || !strings.Contains(rejected[0].Reason, "24小时新增开仓上限") {
+		t.Fatalf("daily cap应结构化为OpenRejection: %+v", rejected[0])
+	}
+	if len(filtered) != 1 || filtered[0].Action != "wait" {
+		t.Fatalf("只有daily cap拒绝时应输出wait: %+v", filtered)
+	}
+}
+
+func TestBuildOpenRejection_ReportOnlySimulations(t *testing.T) {
+	ctx := newTestContext()
+	ctx.FrequencyPolicy = &FrequencyPolicy{
+		Mode:                  "balanced",
+		EffectiveMode:         "balanced",
+		HighADXReportOnly:     true,
+		RRReportOnly:          true,
+		RollingGateReportOnly: true,
+	}
+	ctx.MarketDataMap["BCHUSDT"] = newTestMarketData(100)
+	ctx.MarketDataMap["BCHUSDT"].CurrentADX = 55
+
+	d := newOpenLongDecision("BCHUSDT", 100)
+	d.Confidence = 85
+	d.StopLoss = 95
+	d.TakeProfit = 110.5
+
+	rejection := buildOpenRejection(*d, ctx, "BCHUSDT open_long 被风控过滤: 风险回报比过低")
+	if len(rejection.Simulations) == 0 {
+		t.Fatalf("report-only应生成模拟结果: %+v", rejection)
+	}
+	seen := map[string]bool{}
+	for _, sim := range rejection.Simulations {
+		seen[sim.Scenario] = true
+		if sim.Source != "structured" {
+			t.Fatalf("live simulation应标注structured: %+v", sim)
+		}
+	}
+	if !seen["high_adx_active_candidate"] || !seen["rr_threshold_candidate"] {
+		t.Fatalf("缺少预期模拟场景: %+v", rejection.Simulations)
 	}
 }
 
@@ -1567,10 +1648,10 @@ func TestProperty21_SingleTradeRiskLimit(t *testing.T) {
 	parameters.Rng.Seed(42)
 	properties := gopter.NewProperties(parameters)
 
-	// 属性 21a: 当持仓风险 > 账户净值 × MaxRiskPerTrade 时，应返回错误
+	// 属性 21a: 当持仓风险 > 账户净值 × MaxRiskPerTrade 时，应拒绝或自动缩仓到风险上限内
 	// positionRiskUSD = positionSizeUSD × stopDistancePct
 	// 当 positionRiskUSD > equity × 0.02 时，validateOpenDecision 应返回错误
-	properties.Property("持仓风险超过账户净值2%时应返回错误", prop.ForAll(
+	properties.Property("持仓风险超过账户净值2%时应拒绝或自动缩仓", prop.ForAll(
 		func(priceNorm float64, equityNorm float64, riskExcessNorm float64, actionIdx int) bool {
 			// 价格: 1000 ~ 50000
 			price := 1000.0 + priceNorm*49000.0
@@ -1630,8 +1711,12 @@ func TestProperty21_SingleTradeRiskLimit(t *testing.T) {
 			}
 
 			err := validateOpenDecision(d, ctx)
-			// 风险超限时必须返回错误
-			return err != nil
+			if err != nil {
+				return true
+			}
+			return d.SizingAdjusted &&
+				d.PositionSizeUSD <= d.RequestedPositionSizeUSD &&
+				d.RiskUSD <= maxRiskUSD*1.01
 		},
 		gen.Float64Range(0, 1),
 		gen.Float64Range(0, 1),

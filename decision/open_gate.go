@@ -106,6 +106,19 @@ func applyRollingPerformanceGate(result *OpenGateResult, d *Decision, ctx *Conte
 		if reason == "" {
 			reason = fmt.Sprintf("%s rolling performance gate", g.Scope)
 		}
+		result.addDiagnostics("rolling_"+g.Scope+"_"+g.Key, map[string]any{
+			"scope":           g.Scope,
+			"key":             g.Key,
+			"state":           g.State,
+			"trade_count":     g.TradeCount,
+			"total_pn_l":      g.TotalPnL,
+			"win_rate":        g.WinRate,
+			"profit_factor":   g.ProfitFactor,
+			"min_confidence":  g.MinConfidence,
+			"risk_multiplier": g.RiskMultiplier,
+			"cooldown_until":  g.CooldownUntil,
+			"reason":          reason,
+		})
 		if g.State == "block" && (g.CooldownUntil.IsZero() || time.Now().Before(g.CooldownUntil)) {
 			result.block(reason)
 			return

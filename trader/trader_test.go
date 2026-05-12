@@ -941,6 +941,12 @@ func TestBuildTradingContext_InjectsAIStateRiskAndExecutionQuality(t *testing.T)
 	if ctx.AnalysisIntervalMin != 9 {
 		t.Fatalf("AnalysisIntervalMin 未注入: got=%d", ctx.AnalysisIntervalMin)
 	}
+	if ctx.FrequencyPolicy == nil || ctx.FrequencyPolicy.AnalysisIntervalMin != 9 {
+		t.Fatalf("FrequencyPolicy 未注入: %+v", ctx.FrequencyPolicy)
+	}
+	if ctx.FrequencyState == nil {
+		t.Fatal("FrequencyState 应注入")
+	}
 	if !ctx.LastAnalysisTime.Equal(lastAnalysis) || !ctx.LastAIAttemptTime.Equal(lastAttempt) || !ctx.LastAISuccessTime.Equal(lastSuccess) {
 		t.Fatalf("AI时间状态未正确注入")
 	}

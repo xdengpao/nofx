@@ -183,6 +183,11 @@ func ensureDataDir(dataDir string) error {
 
 // initializeModules 初始化各个模块
 func initializeModules(cfg *config.Config) error {
+	frequencyProfile, err := cfg.NormalizeTradingFrequency()
+	if err != nil {
+		return err
+	}
+
 	// 1. 设置币种池
 	pool.SetDefaultCoins(cfg.DefaultCoins)
 	pool.SetUseDefaultCoins(cfg.UseDefaultCoins)
@@ -201,13 +206,17 @@ func initializeModules(cfg *config.Config) error {
 		log.Printf("✓ 已配置OI Top API")
 	}
 
+	promptCandidateLimit := cfg.DynamicCandidatePool.PromptCandidateLimit
+	if !frequencyProfile.Legacy {
+		promptCandidateLimit = frequencyProfile.PromptCandidateLimit
+	}
 	pool.SetDynamicCandidatePoolConfig(pool.DynamicCandidatePoolConfig{
 		Enabled:                 cfg.DynamicCandidatePool.IsEnabled(),
 		RefreshHour:             cfg.DynamicCandidatePool.RefreshHour,
 		TTLHours:                cfg.DynamicCandidatePool.TTLHours,
 		MinPoolSize:             cfg.DynamicCandidatePool.MinPoolSize,
 		MaxPoolSize:             cfg.DynamicCandidatePool.MaxPoolSize,
-		PromptCandidateLimit:    cfg.DynamicCandidatePool.PromptCandidateLimit,
+		PromptCandidateLimit:    promptCandidateLimit,
 		CoreSymbols:             cfg.DynamicCandidatePool.CoreSymbols,
 		MinOIValueUSD:           cfg.DynamicCandidatePool.MinOIValueUSD,
 		MinQuoteVolume24hUSD:    cfg.DynamicCandidatePool.MinQuoteVolume24hUSD,
@@ -221,7 +230,7 @@ func initializeModules(cfg *config.Config) error {
 		MaxRiskPerTrade:       0.02,
 		TotalRiskBudget:       0.08,
 		MaxAccountDrawdownPct: cfg.MaxDrawdown,
-		AnalysisIntervalMin:   15,
+		AnalysisIntervalMin:   frequencyProfile.AnalysisIntervalMinutes,
 		BTCETHLeverage:        cfg.Leverage.BTCETHLeverage,
 		AltcoinLeverage:       cfg.Leverage.AltcoinLeverage,
 		DataDir:               DefaultDataDir,
@@ -239,6 +248,10 @@ func initializeModules(cfg *config.Config) error {
 // setupTraderManager 设置并配置TraderManager
 func setupTraderManager(cfg *config.Config) (*manager.TraderManager, error) {
 	traderManager := manager.NewTraderManager()
+	frequencyProfile, err := cfg.NormalizeTradingFrequency()
+	if err != nil {
+		return nil, err
+	}
 
 	// 设置自动平仓回调
 	traderManager.SetAutoCloseCallback(handleAutoClose)
@@ -253,13 +266,14 @@ func setupTraderManager(cfg *config.Config) (*manager.TraderManager, error) {
 		log.Printf("📦 [%d/%d] 初始化 %s (%s模型)...",
 			i+1, len(cfg.Traders), traderCfg.Name, strings.ToUpper(traderCfg.AIModel))
 
-		err := traderManager.AddTrader(
+		err := traderManager.AddTraderWithFrequency(
 			traderCfg,
 			cfg.CoinPoolAPIURL,
 			cfg.MaxDailyLoss,
 			cfg.MaxDrawdown,
 			cfg.StopTradingMinutes,
 			cfg.Leverage,
+			frequencyProfile,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("添加trader '%s' 失败: %w", traderCfg.Name, err)

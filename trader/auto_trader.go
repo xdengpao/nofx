@@ -68,6 +68,7 @@ type AutoTraderConfig struct {
 	TotalRiskBudget      float64       // 总风险预算
 	AnalysisIntervalMin  int           // AI新机会分析间隔
 	EnableEmergencyClose bool          // 止损保护无法建立时是否紧急平仓
+	FrequencyPolicy      decision.FrequencyPolicy
 }
 
 const (
@@ -147,6 +148,21 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 	if config.AnalysisIntervalMin <= 0 {
 		config.AnalysisIntervalMin = DefaultAnalysisInterval
 	}
+	if config.FrequencyPolicy.Mode == "" {
+		config.FrequencyPolicy = decision.FrequencyPolicy{
+			Mode:                 "legacy",
+			EffectiveMode:        "legacy",
+			AnalysisIntervalMin:  config.AnalysisIntervalMin,
+			PromptCandidateLimit: 8,
+		}
+	}
+	if config.FrequencyPolicy.EffectiveMode == "" {
+		config.FrequencyPolicy.EffectiveMode = config.FrequencyPolicy.Mode
+	}
+	if config.FrequencyPolicy.AnalysisIntervalMin <= 0 {
+		config.FrequencyPolicy.AnalysisIntervalMin = config.AnalysisIntervalMin
+	}
+	config.AnalysisIntervalMin = config.FrequencyPolicy.AnalysisIntervalMin
 
 	mcpClient := mcp.New()
 
@@ -484,6 +500,7 @@ func (at *AutoTrader) runCycle() error {
 			Success:   false,
 			Reasoning: d.Reasoning,
 		}
+		applyDecisionSizingToActionRecord(&d, &actionRecord)
 
 		if err := at.executeDecisionWithRecord(&d, &actionRecord); err != nil {
 			log.Printf("❌ 执行决策失败 (%s %s): %v", d.Symbol, d.Action, err)
@@ -505,6 +522,19 @@ func (at *AutoTrader) runCycle() error {
 	}
 
 	return nil
+}
+
+func applyDecisionSizingToActionRecord(d *decision.Decision, actionRecord *logger.DecisionAction) {
+	if d == nil || actionRecord == nil {
+		return
+	}
+	actionRecord.RiskUSD = d.RiskUSD
+	actionRecord.RequestedPositionSizeUSD = d.RequestedPositionSizeUSD
+	actionRecord.AdjustedPositionSizeUSD = d.AdjustedPositionSizeUSD
+	actionRecord.SizingAdjusted = d.SizingAdjusted
+	actionRecord.SizingReason = d.SizingReason
+	actionRecord.StopDistancePct = d.StopDistancePct
+	actionRecord.EffectiveRiskPct = d.EffectiveRiskPct
 }
 
 func (at *AutoTrader) applyAICallState(fullDecision *decision.FullDecision) {
@@ -556,6 +586,7 @@ func (at *AutoTrader) appendOpenRejectionsToRecord(record *logger.DecisionRecord
 			GateState:       rejection.GateState,
 			GateReasons:     append([]string(nil), rejection.GateReasons...),
 			GateDiagnostics: copyGateDiagnostics(rejection.GateDiagnostics),
+			Simulations:     copyOpenFrequencySimulations(rejection.Simulations),
 		})
 		record.ExecutionLog = append(record.ExecutionLog,
 			fmt.Sprintf("⚠ %s %s 被开仓门控拒绝: %s", rejection.Symbol, rejection.Action, reason))
@@ -581,6 +612,8 @@ func (at *AutoTrader) buildRiskStateSnapshot(ctx *decision.Context, rejections [
 		MaxDailyLossPct:          ctx.MaxDailyLossPct,
 		MaxAccountDrawdownPct:    ctx.MaxAccountDrawdownPct,
 		ConsecutiveAIFails:       ctx.ConsecutiveAIFails,
+		FrequencyPolicy:          copyFrequencyPolicySnapshot(ctx.FrequencyPolicy),
+		FrequencyState:           copyFrequencyStateSnapshot(ctx.FrequencyState),
 	}
 	if !ctx.AIBackoffUntil.IsZero() {
 		snapshot.AIBackoffUntil = ctx.AIBackoffUntil.Format(time.RFC3339)
@@ -596,6 +629,61 @@ func (at *AutoTrader) buildRiskStateSnapshot(ctx *decision.Context, rejections [
 		snapshot.OpenGateReasons = append(snapshot.OpenGateReasons, rejection.GateReasons...)
 	}
 	return snapshot
+}
+
+func copyOpenFrequencySimulations(source []decision.OpenFrequencySimulation) []logger.OpenFrequencySimulationSnapshot {
+	if len(source) == 0 {
+		return nil
+	}
+	copied := make([]logger.OpenFrequencySimulationSnapshot, 0, len(source))
+	for _, sim := range source {
+		copied = append(copied, logger.OpenFrequencySimulationSnapshot{
+			Scenario:        sim.Scenario,
+			Source:          sim.Source,
+			WouldAllow:      sim.WouldAllow,
+			Reason:          sim.Reason,
+			OriginalState:   sim.OriginalState,
+			SimulatedState:  sim.SimulatedState,
+			MinConfidence:   sim.MinConfidence,
+			EffectiveRisk:   sim.EffectiveRisk,
+			AdjustedSizeUSD: sim.AdjustedSizeUSD,
+			Diagnostics:     copyGateDiagnostics(sim.Diagnostics),
+		})
+	}
+	return copied
+}
+
+func copyFrequencyPolicySnapshot(policy *decision.FrequencyPolicy) *logger.FrequencyPolicySnapshot {
+	if policy == nil {
+		return nil
+	}
+	return &logger.FrequencyPolicySnapshot{
+		Mode:                    policy.Mode,
+		EffectiveMode:           policy.EffectiveMode,
+		AnalysisIntervalMin:     policy.AnalysisIntervalMin,
+		PromptCandidateLimit:    policy.PromptCandidateLimit,
+		DailyOpenLimit:          policy.DailyOpenLimit,
+		RollbackWindowHours:     policy.RollbackWindowHours,
+		RollbackMinProfitFactor: policy.RollbackMinProfitFactor,
+		RollbackMaxDrawdownPct:  policy.RollbackMaxDrawdownPct,
+		HighADXReportOnly:       policy.HighADXReportOnly,
+		RRReportOnly:            policy.RRReportOnly,
+		RollingGateReportOnly:   policy.RollingGateReportOnly,
+	}
+}
+
+func copyFrequencyStateSnapshot(state *decision.FrequencyState) *logger.FrequencyStateSnapshot {
+	if state == nil {
+		return nil
+	}
+	return &logger.FrequencyStateSnapshot{
+		OpenCount24h:       state.OpenCount24h,
+		ClosedTrades24h:    state.ClosedTrades24h,
+		ProfitFactor24h:    state.ProfitFactor24h,
+		Drawdown24hPct:     state.Drawdown24hPct,
+		AutoRollbackActive: state.AutoRollbackActive,
+		AutoRollbackReason: state.AutoRollbackReason,
+	}
 }
 
 func copyGateDiagnostics(source map[string]any) map[string]any {
@@ -828,6 +916,9 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		// 不影响主流程，继续执行（但设置performance为nil以避免传递错误数据）
 		performance = nil
 	}
+	frequencyRecords := at.loadRecentDecisionRecords(500)
+	frequencyState := at.buildFrequencyState(frequencyRecords, totalEquity)
+	frequencyPolicy := at.effectiveFrequencyPolicy(frequencyState)
 
 	// 4. 获取候选币种池（动态候选池优先，失败时回退 AI500 + OI Top）
 	// 无论有没有持仓，都分析相同数量的币种（让AI看到所有好机会）
@@ -917,7 +1008,9 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		AIBackoffUntil:           at.aiBackoffUntil,
 		LastAIError:              at.lastAIError,
 		ConsecutiveAIFails:       at.consecutiveAIFails,
-		AnalysisIntervalMin:      at.config.AnalysisIntervalMin,
+		AnalysisIntervalMin:      frequencyPolicy.AnalysisIntervalMin,
+		FrequencyPolicy:          &frequencyPolicy,
+		FrequencyState:           &frequencyState,
 		Account: decision.AccountInfo{
 			TotalEquity:      totalEquity,
 			AvailableBalance: availableBalance,
@@ -940,6 +1033,82 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	ctx.CircuitBreaker = decision.GetCircuitBreakerState()
 
 	return ctx, nil
+}
+
+func (at *AutoTrader) loadRecentDecisionRecords(limit int) []*logger.DecisionRecord {
+	if at == nil || at.decisionLogger == nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 500
+	}
+	records, err := at.decisionLogger.GetLatestRecords(limit)
+	if err != nil {
+		log.Printf("⚠️ 读取开仓频率状态日志失败: %v", err)
+		return nil
+	}
+	return records
+}
+
+func (at *AutoTrader) buildFrequencyState(records []*logger.DecisionRecord, accountEquity float64) decision.FrequencyState {
+	policy := at.config.FrequencyPolicy
+	windowHours := policy.RollbackWindowHours
+	if windowHours <= 0 {
+		windowHours = 24
+	}
+	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
+	outcomes, _ := logger.BuildTradeOutcomes(records)
+	stats := logger.BuildRecentClosedTradeStats(outcomes, since)
+	state := decision.FrequencyState{
+		OpenCount24h:    logger.CountSuccessfulOpens(records, since, ""),
+		ClosedTrades24h: stats.ClosedTrades,
+		ProfitFactor24h: stats.ProfitFactor,
+	}
+	if accountEquity > 0 {
+		state.Drawdown24hPct = stats.MaxDrawdownUSD / accountEquity * 100
+	}
+
+	if policy.Mode == "active" {
+		minPF := policy.RollbackMinProfitFactor
+		if minPF <= 0 {
+			minPF = 0.8
+		}
+		maxDD := policy.RollbackMaxDrawdownPct
+		if maxDD <= 0 {
+			maxDD = 2.0
+		}
+		if stats.ClosedTrades >= 2 && stats.ProfitFactor < minPF {
+			state.AutoRollbackActive = true
+			state.AutoRollbackReason = fmt.Sprintf("最近%d小时闭合交易PF %.2f < %.2f，运行时回退到safe开仓行为",
+				windowHours, stats.ProfitFactor, minPF)
+		} else if state.Drawdown24hPct >= maxDD {
+			state.AutoRollbackActive = true
+			state.AutoRollbackReason = fmt.Sprintf("最近%d小时回撤 %.2f%% >= %.2f%%，运行时回退到safe开仓行为",
+				windowHours, state.Drawdown24hPct, maxDD)
+		}
+	}
+	return state
+}
+
+func (at *AutoTrader) effectiveFrequencyPolicy(state decision.FrequencyState) decision.FrequencyPolicy {
+	policy := at.config.FrequencyPolicy
+	if policy.Mode == "" {
+		policy.Mode = "legacy"
+	}
+	if policy.EffectiveMode == "" {
+		policy.EffectiveMode = policy.Mode
+	}
+	if policy.AnalysisIntervalMin <= 0 {
+		policy.AnalysisIntervalMin = at.config.AnalysisIntervalMin
+	}
+	if policy.AnalysisIntervalMin <= 0 {
+		policy.AnalysisIntervalMin = DefaultAnalysisInterval
+	}
+	if state.AutoRollbackActive && policy.Mode == "active" {
+		policy.EffectiveMode = "safe"
+		policy.AnalysisIntervalMin = DefaultAnalysisInterval
+	}
+	return policy
 }
 
 // 🆕 新增：更新持仓快照
@@ -1968,21 +2137,25 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
 	if at.config.UseQwen {
 		aiProvider = "Qwen"
 	}
+	frequencyState := at.buildFrequencyState(at.loadRecentDecisionRecords(500), 0)
+	frequencyPolicy := at.effectiveFrequencyPolicy(frequencyState)
 
 	return map[string]interface{}{
-		"trader_id":       at.id,
-		"trader_name":     at.name,
-		"ai_model":        at.aiModel,
-		"exchange":        at.exchange,
-		"is_running":      at.isRunning,
-		"start_time":      at.startTime.Format(time.RFC3339),
-		"runtime_minutes": int(time.Since(at.startTime).Minutes()),
-		"call_count":      at.callCount,
-		"initial_balance": at.initialBalance,
-		"scan_interval":   at.config.ScanInterval.String(),
-		"stop_until":      at.stopUntil.Format(time.RFC3339),
-		"last_reset_time": at.lastResetTime.Format(time.RFC3339),
-		"ai_provider":     aiProvider,
+		"trader_id":        at.id,
+		"trader_name":      at.name,
+		"ai_model":         at.aiModel,
+		"exchange":         at.exchange,
+		"is_running":       at.isRunning,
+		"start_time":       at.startTime.Format(time.RFC3339),
+		"runtime_minutes":  int(time.Since(at.startTime).Minutes()),
+		"call_count":       at.callCount,
+		"initial_balance":  at.initialBalance,
+		"scan_interval":    at.config.ScanInterval.String(),
+		"stop_until":       at.stopUntil.Format(time.RFC3339),
+		"last_reset_time":  at.lastResetTime.Format(time.RFC3339),
+		"ai_provider":      aiProvider,
+		"frequency_policy": frequencyPolicy,
+		"frequency_state":  frequencyState,
 	}
 }
 
