@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func TestEvaluateOpenGate_RollingBlock(t *testing.T) {
+func TestEvaluateOpenGate_IgnoresRollingSymbolGate(t *testing.T) {
 	ctx := newTestContext()
 	ctx.PerformanceGates = &logger.RollingPerformanceSnapshot{
 		SymbolGates: map[string]logger.PerformanceGate{
@@ -27,12 +27,12 @@ func TestEvaluateOpenGate_RollingBlock(t *testing.T) {
 		Context:    ctx,
 		MarketData: newTestMarketData(100),
 	})
-	if result.Allowed {
-		t.Fatalf("rolling block 应拒绝开仓: %+v", result)
+	if !result.Allowed {
+		t.Fatalf("新策略 open gate 不应再用旧历史 symbol gate 阻止开仓: %+v", result)
 	}
 }
 
-func TestEvaluateOpenGate_GlobalRollingBlock(t *testing.T) {
+func TestEvaluateOpenGate_IgnoresRollingGlobalGate(t *testing.T) {
 	ctx := newTestContext()
 	ctx.PerformanceGates = &logger.RollingPerformanceSnapshot{
 		GlobalGate: logger.PerformanceGate{
@@ -51,24 +51,19 @@ func TestEvaluateOpenGate_GlobalRollingBlock(t *testing.T) {
 		Context:    ctx,
 		MarketData: newTestMarketData(100),
 	})
-	if result.Allowed {
-		t.Fatalf("global rolling block 应拒绝开仓: %+v", result)
+	if !result.Allowed {
+		t.Fatalf("新策略 open gate 不应再用旧历史 global gate 阻止开仓: %+v", result)
 	}
 }
 
-func TestBuildOpenRejection_IncludesGateDetails(t *testing.T) {
+func TestBuildOpenRejection_UsesMarketGateDetails(t *testing.T) {
 	ctx := newTestContext()
-	ctx.MarketDataMap["ETHUSDT"] = newTestMarketData(100)
-	ctx.PerformanceGates = &logger.RollingPerformanceSnapshot{
-		GlobalGate: logger.PerformanceGate{
-			Key:           "ALL",
-			Scope:         "global",
-			State:         "block",
-			CooldownUntil: time.Now().Add(time.Hour),
-			Reason:        "全局负期望暂停",
-		},
-		SymbolGates: map[string]logger.PerformanceGate{},
-		SideGates:   map[string]logger.PerformanceGate{},
+	ctx.MarketDataMap["ETHUSDT"] = &market.Data{
+		Symbol:         "ETHUSDT",
+		CurrentPrice:   100,
+		CurrentADX:     30,
+		CurrentDIPlus:  10,
+		CurrentDIMinus: 25,
 	}
 
 	rejection := buildOpenRejection(
@@ -76,11 +71,11 @@ func TestBuildOpenRejection_IncludesGateDetails(t *testing.T) {
 		ctx,
 		"ETHUSDT open_long 被风控过滤",
 	)
-	if rejection.GateState != "block" {
-		t.Fatalf("应记录 gate state: %+v", rejection)
+	if rejection.GateState != "penalize" {
+		t.Fatalf("应记录行情 gate state: %+v", rejection)
 	}
-	if len(rejection.GateReasons) == 0 || rejection.GateReasons[0] != "全局负期望暂停" {
-		t.Fatalf("应记录 gate reason: %+v", rejection)
+	if len(rejection.GateReasons) == 0 || rejection.GateReasons[0] != "标的处于下行结构，多单属于逆势" {
+		t.Fatalf("应记录行情 gate reason: %+v", rejection)
 	}
 }
 
@@ -91,8 +86,8 @@ func TestEvaluateOpenGate_ShortConfidenceRequirement(t *testing.T) {
 		Context:    ctx,
 		MarketData: newTestMarketData(100),
 	})
-	if !result.Allowed || result.MinConfidence < 90 {
-		t.Fatalf("short侧应允许但要求更高置信度: %+v", result)
+	if !result.Allowed || result.MinConfidence != counterTrendMinConfidence {
+		t.Fatalf("逆势空单应允许但要求更高置信度: %+v", result)
 	}
 }
 
@@ -146,8 +141,8 @@ func TestEvaluateOpenGate_BTCNormalBollingerWidthDoesNotPenalize(t *testing.T) {
 		Context:    ctx,
 		MarketData: newTestMarketData(100),
 	})
-	if !result.Allowed || result.State != "allow" || result.MinConfidence != 0 {
-		t.Fatalf("3.5%% 布林带宽度不应触发 BTC 高波动降权: %+v", result)
+	if !result.Allowed || result.State != "allow" || result.MinConfidence != longBaseMinConfidence {
+		t.Fatalf("3.5%% 布林带宽度只应保留多单基础门槛: %+v", result)
 	}
 }
 

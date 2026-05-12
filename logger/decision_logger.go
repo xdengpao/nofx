@@ -663,13 +663,6 @@ func BuildRecentClosedTradeStats(outcomes []TradeOutcome, since time.Time) Recen
 	return stats
 }
 
-var historicallyWeakSymbols = map[string]string{
-	"BCHUSDT":   "历史滚动表现偏弱，开仓需降权",
-	"ASTERUSDT": "历史滚动表现偏弱，开仓需降权",
-	"LTCUSDT":   "历史滚动表现偏弱，开仓需降权",
-	"XRPUSDT":   "历史滚动表现偏弱，开仓需降权",
-}
-
 // BuildRollingPerformance 基于闭合交易生成 symbol/side 门控和动态风险建议。
 func BuildRollingPerformance(outcomes []TradeOutcome, now time.Time) *RollingPerformanceSnapshot {
 	snapshot := &RollingPerformanceSnapshot{
@@ -708,9 +701,6 @@ func BuildRollingPerformance(outcomes []TradeOutcome, now time.Time) *RollingPer
 		if outcome.Symbol != "" {
 			symbols[outcome.Symbol] = struct{}{}
 		}
-	}
-	for symbol := range historicallyWeakSymbols {
-		symbols[symbol] = struct{}{}
 	}
 	for symbol := range symbols {
 		trades := filterTrades(outcomes, func(outcome TradeOutcome) bool {
@@ -834,12 +824,6 @@ func buildSymbolGate(symbol string, trades []TradeOutcome, now time.Time) Perfor
 		gate.Reason = "最近5笔PF低于0.8且总PnL为负"
 		return gate
 	}
-	if reason, ok := historicallyWeakSymbols[symbol]; ok {
-		gate.State = "penalize"
-		gate.MinConfidence = 85
-		gate.RiskMultiplier = 0.5
-		gate.Reason = reason
-	}
 	return gate
 }
 
@@ -862,12 +846,6 @@ func buildSideGate(side string, trades []TradeOutcome) PerformanceGate {
 		gate.RiskMultiplier = 0.5
 		gate.Reason = "最近20笔同方向PF低于0.8"
 		return gate
-	}
-	if side == "short" {
-		gate.State = "penalize"
-		gate.MinConfidence = 90
-		gate.RiskMultiplier = 0.5
-		gate.Reason = "历史空单侧亏损贡献较大，默认降权"
 	}
 	return gate
 }

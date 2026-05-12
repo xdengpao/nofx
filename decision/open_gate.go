@@ -14,6 +14,12 @@ const (
 	extremeADX                       = 60.0
 	elevatedADX                      = 50.0
 	highADXRiskMultiplier            = 0.5
+	longBaseMinConfidence            = 78
+	shortBaseMinConfidence           = 82
+	rangeLongMinConfidence           = 82
+	rangeShortMinConfidence          = 85
+	counterTrendMinConfidence        = 88
+	btcVolatilityMinConfidence       = 85
 	highADXMinConfidence             = 90
 	btcConflictMinConfidence         = 88
 	btcHighVolatilityBollingerPct    = 12.0
@@ -40,7 +46,7 @@ type OpenGateResult struct {
 	Diagnostics     map[string]any `json:"diagnostics,omitempty"`
 }
 
-// EvaluateOpenGate 汇总 rolling、市场状态、相关性、执行质量和 AI backoff gate。
+// EvaluateOpenGate 汇总当前行情、相关性、执行质量和 AI backoff gate。
 func EvaluateOpenGate(input OpenGateInput) OpenGateResult {
 	result := OpenGateResult{
 		Allowed:       true,
@@ -64,13 +70,12 @@ func EvaluateOpenGate(input OpenGateInput) OpenGateResult {
 		result.block(fmt.Sprintf("AI调用退避中，直到 %s", ctx.AIBackoffUntil.Format(time.RFC3339)))
 	}
 
-	applyRollingPerformanceGate(&result, input.Decision, ctx)
+	applyDirectionalConfidenceGate(&result, input.Decision, input.MarketData)
 	applyBTCMarketGate(&result, ctx)
 	applyBTCMultiTimeframeGate(&result, input.Decision, ctx)
 	applySameSideExposureGate(&result, input.Decision, ctx)
 	applyCorrelationConcentrationGate(&result, input.Decision, ctx)
 	applyHighADXChaseGate(&result, input.Decision, input.MarketData)
-	applyShortSideGate(&result, input.Decision)
 	applyExecutionQualityGate(&result, input.ExecutionQuality)
 
 	if result.AdjustedSizeUSD <= 0 {
@@ -88,6 +93,45 @@ func baseOpenGateRisk(ctx *Context) float64 {
 		maxRisk = 0.02
 	}
 	return maxRisk
+}
+
+func applyDirectionalConfidenceGate(result *OpenGateResult, d *Decision, data *market.Data) {
+	if d == nil {
+		return
+	}
+	switch d.Action {
+	case "open_long":
+		result.requireMinConfidence(longBaseMinConfidence, "多单基础置信度要求")
+	case "open_short":
+		result.requireMinConfidence(shortBaseMinConfidence, "空单基础置信度要求")
+	default:
+		return
+	}
+	if data == nil {
+		return
+	}
+
+	state, _ := market.GetMarketState(data)
+	switch d.Action {
+	case "open_long":
+		switch state {
+		case "RANGING", "SQUEEZE":
+			result.penalize("标的处于震荡/波动收缩，多单需更高置信度")
+			result.requireMinConfidence(rangeLongMinConfidence, "震荡区间多单置信度要求")
+		case "WEAK_DOWNTREND", "STRONG_DOWNTREND":
+			result.penalize("标的处于下行结构，多单属于逆势")
+			result.requireMinConfidence(counterTrendMinConfidence, "逆势多单置信度要求")
+		}
+	case "open_short":
+		switch state {
+		case "RANGING", "SQUEEZE":
+			result.penalize("标的处于震荡/波动收缩，空单需更高置信度")
+			result.requireMinConfidence(rangeShortMinConfidence, "震荡区间空单置信度要求")
+		case "WEAK_UPTREND", "STRONG_UPTREND":
+			result.penalize("标的处于上行结构，空单属于逆势")
+			result.requireMinConfidence(counterTrendMinConfidence, "逆势空单置信度要求")
+		}
+	}
 }
 
 func applyRollingPerformanceGate(result *OpenGateResult, d *Decision, ctx *Context) {
@@ -155,9 +199,7 @@ func applyBTCMarketGate(result *OpenGateResult, ctx *Context) {
 	}
 	if btcData.PriceChange1h <= -3 || btcData.PriceChange4h <= -7 || btcData.BollingerWidth >= btcHighVolatilityBollingerPct {
 		result.penalize("BTC波动或跌幅偏高，新开仓降权")
-		if result.MinConfidence < 85 {
-			result.MinConfidence = 85
-		}
+		result.requireMinConfidence(btcVolatilityMinConfidence, "BTC波动环境置信度要求")
 		result.EffectiveRisk *= 0.5
 	}
 }
@@ -177,17 +219,13 @@ func applyBTCMultiTimeframeGate(result *OpenGateResult, d *Decision, ctx *Contex
 	}
 	if isBearishStructure(btcData) {
 		result.penalizeWithDiagnostics("BTC 1h/4h 存在转弱信号，高 beta 山寨多单降权", "btc", diagnostics)
-		if result.MinConfidence < btcConflictMinConfidence {
-			result.MinConfidence = btcConflictMinConfidence
-		}
+		result.requireMinConfidence(btcConflictMinConfidence, "BTC转弱时高 beta 多单置信度要求")
 		result.EffectiveRisk *= 0.5
 		return
 	}
 	if hasBTCMultiTimeframeConflict(btcData) {
 		result.penalizeWithDiagnostics("BTC 15m 与 1h/4h 趋势冲突，高 beta 山寨多单降权", "btc", diagnostics)
-		if result.MinConfidence < btcConflictMinConfidence {
-			result.MinConfidence = btcConflictMinConfidence
-		}
+		result.requireMinConfidence(btcConflictMinConfidence, "BTC多周期冲突时高 beta 多单置信度要求")
 		result.EffectiveRisk *= 0.5
 	}
 }
@@ -268,20 +306,8 @@ func applyHighADXChaseGate(result *OpenGateResult, d *Decision, data *market.Dat
 	}
 	if data.CurrentADX > elevatedADX {
 		result.penalize(fmt.Sprintf("%s ADX %.1f 偏高，按趋势末端追入风险降权", d.Symbol, data.CurrentADX))
-		if result.MinConfidence < highADXMinConfidence {
-			result.MinConfidence = highADXMinConfidence
-		}
+		result.requireMinConfidence(highADXMinConfidence, "高ADX追入置信度要求")
 		result.EffectiveRisk *= highADXRiskMultiplier
-	}
-}
-
-func applyShortSideGate(result *OpenGateResult, d *Decision) {
-	if d.Action != "open_short" {
-		return
-	}
-	result.penalize("short侧默认更严格，要求更高置信度")
-	if result.MinConfidence < 90 {
-		result.MinConfidence = 90
 	}
 }
 
@@ -328,6 +354,15 @@ func (result *OpenGateResult) penalize(reason string) {
 func (result *OpenGateResult) penalizeWithDiagnostics(reason, key string, diagnostics map[string]any) {
 	result.penalize(reason)
 	result.addDiagnostics(key, diagnostics)
+}
+
+func (result *OpenGateResult) requireMinConfidence(min int, reason string) {
+	if min > result.MinConfidence {
+		result.MinConfidence = min
+	}
+	if reason != "" {
+		result.Warnings = appendUniqueReason(result.Warnings, reason)
+	}
 }
 
 func (result *OpenGateResult) addDiagnostics(key string, diagnostics map[string]any) {

@@ -245,7 +245,7 @@ func TestBuildUserPrompt_PrioritizesCoreSymbolsWhenBTCGateActive(t *testing.T) {
 	}
 }
 
-func TestValidateOpenDecision_RollingGateRequiresHigherConfidence(t *testing.T) {
+func TestValidateOpenDecision_IgnoresRollingGateConfidenceForFreshStrategy(t *testing.T) {
 	ctx := newTestContext()
 	ctx.MarketDataMap["BCHUSDT"] = newTestMarketData(100)
 	ctx.PerformanceGates = &logger.RollingPerformanceSnapshot{
@@ -264,17 +264,12 @@ func TestValidateOpenDecision_RollingGateRequiresHigherConfidence(t *testing.T) 
 
 	d := newOpenLongDecision("BCHUSDT", 100)
 	d.Confidence = 80
-	if err := validateOpenDecision(d, ctx); err == nil {
-		t.Fatal("rolling gate 降权后低置信度开仓应失败")
-	}
-
-	d.Confidence = 90
 	if err := validateOpenDecision(d, ctx); err != nil {
-		t.Fatalf("达到门槛的开仓不应被 gate 阻止: %v", err)
+		t.Fatalf("新策略不应再用旧 rolling gate 抬高置信度: %v", err)
 	}
 }
 
-func TestValidateOpenDecision_RollingGateBlocksSymbol(t *testing.T) {
+func TestValidateOpenDecision_IgnoresRollingGateBlockForFreshStrategy(t *testing.T) {
 	ctx := newTestContext()
 	ctx.MarketDataMap["BCHUSDT"] = newTestMarketData(100)
 	ctx.PerformanceGates = &logger.RollingPerformanceSnapshot{
@@ -293,8 +288,8 @@ func TestValidateOpenDecision_RollingGateBlocksSymbol(t *testing.T) {
 
 	d := newOpenLongDecision("BCHUSDT", 100)
 	d.Confidence = 95
-	if err := validateOpenDecision(d, ctx); err == nil {
-		t.Fatal("rolling gate block 状态应阻止开仓")
+	if err := validateOpenDecision(d, ctx); err != nil {
+		t.Fatalf("新策略不应再用旧 rolling gate 阻止开仓: %v", err)
 	}
 }
 

@@ -779,7 +779,7 @@ func validateOpenDecision(d *Decision, ctx *Context) error {
 		return fmt.Errorf("open gate阻止开仓: %s", strings.Join(gate.Reasons, "; "))
 	}
 	if gate.MinConfidence > 0 && d.Confidence > 0 && d.Confidence < gate.MinConfidence {
-		return fmt.Errorf("open gate要求更高置信度: %d < %d (%s)", d.Confidence, gate.MinConfidence, strings.Join(gate.Reasons, "; "))
+		return fmt.Errorf("open gate要求更高置信度: %d < %d (%s)", d.Confidence, gate.MinConfidence, openGateConfidenceReason(gate))
 	}
 
 	// 开仓前失效条件检查
@@ -895,6 +895,16 @@ func validateOpenDecision(d *Decision, ctx *Context) error {
 	d.RiskUSD = sizing.RiskUSD
 	d.AdjustedPositionSizeUSD = sizing.PositionSizeUSD
 	return nil
+}
+
+func openGateConfidenceReason(gate OpenGateResult) string {
+	reasons := make([]string, 0, len(gate.Reasons)+len(gate.Warnings))
+	reasons = append(reasons, gate.Reasons...)
+	reasons = append(reasons, gate.Warnings...)
+	if len(reasons) == 0 {
+		return "当前开仓置信度低于方向/行情门槛"
+	}
+	return strings.Join(reasons, "; ")
 }
 
 type openGateLimit struct {
