@@ -174,11 +174,12 @@ type TradePlan struct {
 
 // TradePlanManager 交易计划管理器
 type TradePlanManager struct {
-	plans       map[string]*TradePlan
-	mu          sync.RWMutex
-	filePath    string
-	autoSave    bool
-	lastSaveErr error
+	plans              map[string]*TradePlan
+	positionStartTimes map[string]int64
+	mu                 sync.RWMutex
+	filePath           string
+	autoSave           bool
+	lastSaveErr        error
 }
 
 // ============================================================================
@@ -334,12 +335,13 @@ type ClosedTradeRecord struct {
 
 // PersistentData 持久化数据结构
 type PersistentData struct {
-	Plans          map[string]*TradePlan `json:"plans"`
-	Statistics     *TradeStatistics      `json:"statistics"`
-	Returns        []float64             `json:"returns"`
-	ClosedTrades   []ClosedTradeRecord   `json:"closed_trades"`
-	CircuitBreaker *CircuitBreakerState  `json:"circuit_breaker,omitempty"`
-	UpdatedAt      time.Time             `json:"updated_at"`
+	Plans              map[string]*TradePlan `json:"plans"`
+	PositionStartTimes map[string]int64      `json:"position_start_times,omitempty"`
+	Statistics         *TradeStatistics      `json:"statistics"`
+	Returns            []float64             `json:"returns"`
+	ClosedTrades       []ClosedTradeRecord   `json:"closed_trades"`
+	CircuitBreaker     *CircuitBreakerState  `json:"circuit_breaker,omitempty"`
+	UpdatedAt          time.Time             `json:"updated_at"`
 }
 
 // ============================================================================

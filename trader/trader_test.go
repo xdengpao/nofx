@@ -661,6 +661,47 @@ func TestResolvePositionStartTime_UsesExistingPlanCreatedAt(t *testing.T) {
 	}
 }
 
+func TestResolvePositionStartTime_DoesNotOverridePlanWithFallbacks(t *testing.T) {
+	if err := decision.InitPlanManager(t.TempDir()); err != nil {
+		t.Fatalf("初始化计划管理器失败: %v", err)
+	}
+
+	createdAt := time.Now().Add(-30 * time.Minute).Truncate(time.Millisecond)
+	decision.SyncPlansFromPositionsScoped(
+		"trader-a",
+		[]decision.PositionInfo{{
+			Symbol:     "ZECUSDT",
+			Side:       "long",
+			EntryPrice: 100,
+			MarkPrice:  110,
+			Quantity:   1,
+			Leverage:   5,
+			MarginUsed: 20,
+			UpdateTime: createdAt.UnixMilli(),
+		}},
+		map[string]*market.Data{
+			"ZECUSDT": {
+				CurrentPrice: 110,
+				LongerTermContext: &market.LongerTermData{
+					ATR14: 2,
+				},
+			},
+		},
+	)
+	olderFallback := createdAt.Add(-2 * time.Hour).UnixMilli()
+	decision.SetPositionStartTimeScoped("trader-a", "ZECUSDT", "long", olderFallback)
+
+	at := &AutoTrader{
+		id:                    "trader-a",
+		positionFirstSeenTime: make(map[string]int64),
+	}
+
+	got := at.resolvePositionStartTime("ZECUSDT", "long", olderFallback)
+	if got != createdAt.UnixMilli() {
+		t.Fatalf("有效交易计划应优先于持久化/交易所兜底时间，got=%d want=%d", got, createdAt.UnixMilli())
+	}
+}
+
 func TestResolvePositionStartTime_KeepsExistingMemoryValue(t *testing.T) {
 	if err := decision.InitPlanManager(t.TempDir()); err != nil {
 		t.Fatalf("初始化计划管理器失败: %v", err)
@@ -677,6 +718,72 @@ func TestResolvePositionStartTime_KeepsExistingMemoryValue(t *testing.T) {
 	got := at.resolvePositionStartTime("ZECUSDT", "long")
 	if got != existing {
 		t.Fatalf("内存中已有开始时间时不应覆盖，got=%d want=%d", got, existing)
+	}
+}
+
+func TestResolvePositionStartTime_UsesPersistedStartWithoutPlan(t *testing.T) {
+	if err := decision.InitPlanManager(t.TempDir()); err != nil {
+		t.Fatalf("初始化计划管理器失败: %v", err)
+	}
+
+	start := time.Now().Add(-90 * time.Minute).Truncate(time.Millisecond).UnixMilli()
+	decision.SetPositionStartTimeScoped("trader-a", "ZECUSDT", "short", start)
+
+	at := &AutoTrader{
+		id:                    "trader-a",
+		positionFirstSeenTime: make(map[string]int64),
+	}
+
+	got := at.resolvePositionStartTime("ZECUSDT", "short")
+	if got != start {
+		t.Fatalf("缺少交易计划时应使用持久化持仓开始时间，got=%d want=%d", got, start)
+	}
+	if at.positionFirstSeenTime["ZECUSDT_short"] != start {
+		t.Fatalf("应把持久化时间写入 positionFirstSeenTime")
+	}
+}
+
+func TestResolvePositionStartTime_UsesExchangeTimestampFallback(t *testing.T) {
+	if err := decision.InitPlanManager(t.TempDir()); err != nil {
+		t.Fatalf("初始化计划管理器失败: %v", err)
+	}
+
+	exchangeStart := time.Now().Add(-75 * time.Minute).Truncate(time.Millisecond).UnixMilli()
+	at := &AutoTrader{
+		id:                    "trader-a",
+		positionFirstSeenTime: make(map[string]int64),
+	}
+
+	got := at.resolvePositionStartTime("ZECUSDT", "long", exchangeStart)
+	if got != exchangeStart {
+		t.Fatalf("缺少本地记录时应使用交易所持仓时间，got=%d want=%d", got, exchangeStart)
+	}
+	if persisted := decision.GetPositionStartTimeScoped("trader-a", "ZECUSDT", "long"); persisted != exchangeStart {
+		t.Fatalf("交易所持仓时间应被持久化，got=%d want=%d", persisted, exchangeStart)
+	}
+}
+
+func TestPositionStartTimeRemovedOnClose(t *testing.T) {
+	if err := decision.InitPlanManager(t.TempDir()); err != nil {
+		t.Fatalf("初始化计划管理器失败: %v", err)
+	}
+
+	start := time.Now().Add(-45 * time.Minute).UnixMilli()
+	decision.SetPositionStartTimeScoped("trader-a", "ZECUSDT", "short", start)
+	decision.OnPositionClosedScoped("trader-a", "ZECUSDT", "short", 100, 1.2, 0.5, "test close")
+
+	if got := decision.GetPositionStartTimeScoped("trader-a", "ZECUSDT", "short"); got != 0 {
+		t.Fatalf("平仓后应删除持久化持仓开始时间，got=%d", got)
+	}
+}
+
+func TestNormalizePositionTimestampMillis(t *testing.T) {
+	got, ok := normalizePositionTimestampMillis("1710000000")
+	if !ok {
+		t.Fatal("秒级字符串时间戳应可解析")
+	}
+	if got != 1710000000000 {
+		t.Fatalf("秒级时间戳应转换为毫秒，got=%d", got)
 	}
 }
 

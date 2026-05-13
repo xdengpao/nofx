@@ -378,6 +378,23 @@ func TestTradePlanManager_ScopedPlanKeys(t *testing.T) {
 	}
 }
 
+func TestPositionStartTime_PersistsAndReloads(t *testing.T) {
+	dir, cleanup := setupTestPlanManager(t)
+	defer cleanup()
+
+	start := time.Now().Add(-2 * time.Hour).Truncate(time.Millisecond).UnixMilli()
+	SetPositionStartTimeScoped("trader-a", "BCHUSDT", "short", start)
+
+	if err := InitPlanManager(dir); err != nil {
+		t.Fatalf("重新初始化失败: %v", err)
+	}
+
+	got := GetPositionStartTimeScoped("trader-a", "BCHUSDT", "short")
+	if got != start {
+		t.Fatalf("持仓开始时间应持久化并可重载，got=%d want=%d", got, start)
+	}
+}
+
 func TestPersistence_LoadFromFile_RestoresStatistics(t *testing.T) {
 	dir, cleanup := setupTestPlanManager(t)
 	defer cleanup()

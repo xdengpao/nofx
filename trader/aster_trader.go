@@ -717,7 +717,7 @@ func (t *AsterTrader) GetPositions() ([]map[string]interface{}, error) {
 		}
 
 		// 返回与Binance相同的字段名
-		result = append(result, map[string]interface{}{
+		positionMap := map[string]interface{}{
 			"symbol":           pos["symbol"],
 			"side":             side,
 			"positionAmt":      posAmt,
@@ -726,7 +726,12 @@ func (t *AsterTrader) GetPositions() ([]map[string]interface{}, error) {
 			"unRealizedProfit": unRealizedProfit,
 			"leverage":         leverageVal,
 			"liquidationPrice": liquidationPrice,
-		})
+		}
+		if updateTime, ok := normalizePositionTimestampMillis(pos["updateTime"]); ok {
+			positionMap["updateTime"] = updateTime
+		}
+
+		result = append(result, positionMap)
 	}
 
 	return result, nil

@@ -10,6 +10,7 @@ import (
 	"nofx/market"
 	"nofx/mcp"
 	"nofx/pool"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -309,7 +310,7 @@ func (at *AutoTrader) syncExistingPositions() error {
 		if lev, ok := pos["leverage"].(float64); ok {
 			leverage = int(lev)
 		}
-		startTime := at.resolvePositionStartTime(symbol, side)
+		startTime := at.resolvePositionStartTime(symbol, side, extractPositionTimestampMillis(pos))
 
 		positionInfos = append(positionInfos, decision.PositionInfo{
 			Symbol:     symbol,
@@ -870,7 +871,7 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		// 跟踪持仓首次出现时间
 		posKey := symbol + "_" + side
 		currentPositionKeys[posKey] = true
-		updateTime := at.resolvePositionStartTime(symbol, side)
+		updateTime := at.resolvePositionStartTime(symbol, side, extractPositionTimestampMillis(pos))
 
 		positionInfos = append(positionInfos, decision.PositionInfo{
 			Symbol:           symbol,
@@ -1128,7 +1129,7 @@ func (at *AutoTrader) updatePositionSnapshots(positions []decision.PositionInfo)
 	at.lastPositions = newSnapshots
 }
 
-func (at *AutoTrader) resolvePositionStartTime(symbol, side string) int64 {
+func (at *AutoTrader) resolvePositionStartTime(symbol, side string, exchangeStartTimes ...int64) int64 {
 	if at.positionFirstSeenTime == nil {
 		at.positionFirstSeenTime = make(map[string]int64)
 	}
@@ -1139,13 +1140,93 @@ func (at *AutoTrader) resolvePositionStartTime(symbol, side string) int64 {
 	}
 
 	now := time.Now()
-	startTime := now.UnixMilli()
+	nowMs := now.UnixMilli()
+	startTime := nowMs
+	source := "current_time"
+	hasPlanStart := false
 	if plan := decision.GetPlanByScope(at.id, symbol, side); plan != nil && !plan.CreatedAt.IsZero() && plan.CreatedAt.Before(now) {
 		startTime = plan.CreatedAt.UnixMilli()
+		source = "trade_plan"
+		hasPlanStart = true
+	}
+	if !hasPlanStart {
+		if persisted := decision.GetPositionStartTimeScoped(at.id, symbol, side); persisted > 0 && persisted <= nowMs {
+			startTime = persisted
+			source = "persisted_position_start"
+		}
+		for _, exchangeStartTime := range exchangeStartTimes {
+			if exchangeStartTime <= 0 || exchangeStartTime > nowMs {
+				continue
+			}
+			if startTime == nowMs || exchangeStartTime < startTime {
+				startTime = exchangeStartTime
+				source = "exchange_position_time"
+			}
+		}
 	}
 
 	at.positionFirstSeenTime[posKey] = startTime
+	decision.SetPositionStartTimeScoped(at.id, symbol, side, startTime)
+	if source != "trade_plan" {
+		log.Printf("📌 持仓开始时间恢复: %s %s source=%s time=%s",
+			symbol, side, source, time.UnixMilli(startTime).Format(time.RFC3339))
+	}
 	return startTime
+}
+
+func extractPositionTimestampMillis(pos map[string]interface{}) int64 {
+	for _, key := range []string{"openTime", "entryTime", "positionTime", "createTime", "updateTime"} {
+		if ts, ok := normalizePositionTimestampMillis(pos[key]); ok {
+			return ts
+		}
+	}
+	return 0
+}
+
+func normalizePositionTimestampMillis(value interface{}) (int64, bool) {
+	var ts int64
+	switch v := value.(type) {
+	case int64:
+		ts = v
+	case int:
+		ts = int64(v)
+	case float64:
+		ts = int64(v)
+	case json.Number:
+		parsed, err := v.Int64()
+		if err != nil {
+			return 0, false
+		}
+		ts = parsed
+	case string:
+		if v == "" {
+			return 0, false
+		}
+		parsed, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			floatParsed, floatErr := strconv.ParseFloat(v, 64)
+			if floatErr != nil {
+				return 0, false
+			}
+			parsed = int64(floatParsed)
+		}
+		ts = parsed
+	default:
+		return 0, false
+	}
+	if ts <= 0 {
+		return 0, false
+	}
+
+	switch {
+	case ts > 1_000_000_000_000_000:
+		ts = ts / 1_000_000
+	case ts > 10_000_000_000_000:
+		ts = ts / 1_000
+	case ts < 10_000_000_000:
+		ts = ts * 1_000
+	}
+	return ts, true
 }
 
 // executeDecisionWithRecord 执行AI决策并记录详细信息

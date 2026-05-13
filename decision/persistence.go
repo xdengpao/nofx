@@ -50,9 +50,10 @@ func InitPlanManager(dataDir string) error {
 	filePath := filepath.Join(dataDir, plansFileName)
 
 	planManager = &TradePlanManager{
-		plans:    make(map[string]*TradePlan),
-		filePath: filePath,
-		autoSave: true,
+		plans:              make(map[string]*TradePlan),
+		positionStartTimes: make(map[string]int64),
+		filePath:           filePath,
+		autoSave:           true,
 	}
 
 	InitConditionParser()
@@ -106,6 +107,12 @@ func (m *TradePlanManager) loadFromFile() error {
 				log.Printf("📦 已备份旧交易计划: %s", backupPath)
 			}
 		}
+	}
+	if persistentData.PositionStartTimes != nil {
+		m.positionStartTimes = persistentData.PositionStartTimes
+	}
+	if m.positionStartTimes == nil {
+		m.positionStartTimes = make(map[string]int64)
 	}
 
 	if persistentData.Statistics != nil {
@@ -184,6 +191,52 @@ func (m *TradePlanManager) candidatePlanKeys(traderID, symbol, side string) []st
 	return result
 }
 
+func makePositionStartKey(traderID, symbol, side string) string {
+	if traderID != "" && symbol != "" && side != "" {
+		return traderID + ":" + symbol + ":" + side
+	}
+	if symbol != "" && side != "" {
+		return symbol + ":" + side
+	}
+	return symbol
+}
+
+func (m *TradePlanManager) candidatePositionStartKeys(traderID, symbol, side string) []string {
+	keys := []string{}
+	if traderID != "" && symbol != "" && side != "" {
+		keys = append(keys, makePositionStartKey(traderID, symbol, side))
+	}
+	if traderID != "" && symbol != "" && side == "" {
+		keys = append(keys,
+			makePositionStartKey(traderID, symbol, "long"),
+			makePositionStartKey(traderID, symbol, "short"),
+		)
+	}
+	if symbol != "" && side != "" {
+		keys = append(keys, makePositionStartKey("", symbol, side))
+	}
+	if symbol != "" && side == "" {
+		keys = append(keys,
+			makePositionStartKey("", symbol, "long"),
+			makePositionStartKey("", symbol, "short"),
+		)
+	}
+	if symbol != "" {
+		keys = append(keys, symbol)
+	}
+
+	seen := make(map[string]bool)
+	result := make([]string, 0, len(keys))
+	for _, key := range keys {
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, key)
+	}
+	return result
+}
+
 func (m *TradePlanManager) migrateLegacyScopedPlanKeys() bool {
 	migrated := false
 	for key, plan := range m.plans {
@@ -210,6 +263,10 @@ func (m *TradePlanManager) saveToFile() error {
 	for k, v := range m.plans {
 		plansCopy[k] = v
 	}
+	positionStartTimesCopy := make(map[string]int64)
+	for k, v := range m.positionStartTimes {
+		positionStartTimesCopy[k] = v
+	}
 	m.mu.RUnlock()
 
 	tradeStatsLock.RLock()
@@ -227,12 +284,13 @@ func (m *TradePlanManager) saveToFile() error {
 	closedTradesLock.RUnlock()
 
 	persistentData := PersistentData{
-		Plans:          plansCopy,
-		Statistics:     &statsCopy,
-		Returns:        returnsCopy,
-		ClosedTrades:   closedTradesCopy,
-		CircuitBreaker: GetCircuitBreakerState(),
-		UpdatedAt:      time.Now(),
+		Plans:              plansCopy,
+		PositionStartTimes: positionStartTimesCopy,
+		Statistics:         &statsCopy,
+		Returns:            returnsCopy,
+		ClosedTrades:       closedTradesCopy,
+		CircuitBreaker:     GetCircuitBreakerState(),
+		UpdatedAt:          time.Now(),
 	}
 
 	data, err := json.MarshalIndent(persistentData, "", "  ")
@@ -260,6 +318,43 @@ func (m *TradePlanManager) autoSaveIfEnabled() {
 		m.lastSaveErr = err
 		log.Printf("⚠️ 自动保存失败: %v", err)
 	}
+}
+
+func (m *TradePlanManager) GetPositionStartTimeScoped(traderID, symbol, side string) int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, key := range m.candidatePositionStartKeys(traderID, symbol, side) {
+		if startTime, exists := m.positionStartTimes[key]; exists && startTime > 0 {
+			return startTime
+		}
+	}
+	return 0
+}
+
+func (m *TradePlanManager) SetPositionStartTimeScoped(traderID, symbol, side string, startTime int64) {
+	if startTime <= 0 || symbol == "" {
+		return
+	}
+
+	m.mu.Lock()
+	if m.positionStartTimes == nil {
+		m.positionStartTimes = make(map[string]int64)
+	}
+	m.positionStartTimes[makePositionStartKey(traderID, symbol, side)] = startTime
+	m.mu.Unlock()
+
+	m.autoSaveIfEnabled()
+}
+
+func (m *TradePlanManager) RemovePositionStartTimeScoped(traderID, symbol, side string) {
+	m.mu.Lock()
+	for _, key := range m.candidatePositionStartKeys(traderID, symbol, side) {
+		delete(m.positionStartTimes, key)
+	}
+	m.mu.Unlock()
+
+	m.autoSaveIfEnabled()
 }
 
 // GetPlan 获取交易计划（返回深拷贝）
@@ -573,6 +668,27 @@ func GetAllPlans() []*TradePlan {
 	return plans
 }
 
+func GetPositionStartTimeScoped(traderID, symbol, side string) int64 {
+	if planManager == nil {
+		return 0
+	}
+	return planManager.GetPositionStartTimeScoped(traderID, symbol, side)
+}
+
+func SetPositionStartTimeScoped(traderID, symbol, side string, startTime int64) {
+	if planManager == nil {
+		return
+	}
+	planManager.SetPositionStartTimeScoped(traderID, symbol, side, startTime)
+}
+
+func RemovePositionStartTimeScoped(traderID, symbol, side string) {
+	if planManager == nil {
+		return
+	}
+	planManager.RemovePositionStartTimeScoped(traderID, symbol, side)
+}
+
 // ============================================================================
 // 夏普比率计算
 // ============================================================================
@@ -864,6 +980,7 @@ func OnPositionClosedScoped(traderID, symbol, side string, exitPrice float64, pn
 	AddReturn(pnlPercent)
 
 	planManager.RemovePlanScoped(traderID, symbol, side)
+	RemovePositionStartTimeScoped(traderID, symbol, side)
 
 	log.Printf("✅ 平仓成功: %s 盈亏%.2f%% (峰值%.2f%%), 原因: %s",
 		symbol, pnlPercent, record.PeakPnLPercent, reason)
@@ -883,6 +1000,7 @@ func OnPositionClosedSimpleScoped(traderID, symbol, side string, reason string) 
 	}
 
 	planManager.RemovePlanScoped(traderID, symbol, side)
+	RemovePositionStartTimeScoped(traderID, symbol, side)
 	log.Printf("✅ 平仓成功，交易计划已移除: %s (峰值盈利: %.2f%%, 原因: %s)",
 		symbol, peakPnL, reason)
 }
@@ -943,6 +1061,7 @@ func OnPositionOpenedScoped(traderID string, decision *Decision, actualEntryPric
 	plan := CreateTradePlanFromDecision(decision, actualEntryPrice)
 	plan.TraderID = traderID
 	planManager.SetPlan(plan)
+	SetPositionStartTimeScoped(traderID, plan.Symbol, plan.Direction, plan.CreatedAt.UnixMilli())
 
 	if actualQuantity > 0 {
 		planManager.UpdatePlanScoped(traderID, decision.Symbol, plan.Direction, func(p *TradePlan) {
