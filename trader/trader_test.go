@@ -812,6 +812,117 @@ func TestDetectAutoClosedPositions_DedupesPreviouslyClaimedEvent(t *testing.T) {
 	}
 }
 
+func TestDetectAutoClosedPositions_ReconcilesMissingShortPosition(t *testing.T) {
+	originalGetter := getMarketData
+	getMarketData = func(symbol string) (*market.Data, error) {
+		return &market.Data{Symbol: symbol, CurrentPrice: 96}, nil
+	}
+	t.Cleanup(func() { getMarketData = originalGetter })
+	if err := decision.InitPlanManager(t.TempDir()); err != nil {
+		t.Fatalf("初始化计划管理器失败: %v", err)
+	}
+
+	decision.SyncPlansFromPositionsScoped(
+		"trader-a",
+		[]decision.PositionInfo{{
+			Symbol:     "ETHUSDT",
+			Side:       "short",
+			EntryPrice: 100,
+			MarkPrice:  90,
+			Quantity:   2,
+			Leverage:   5,
+			MarginUsed: 40,
+			UpdateTime: time.Now().Add(-time.Hour).UnixMilli(),
+			StopLoss:   95,
+			TakeProfit: 80,
+		}},
+		map[string]*market.Data{
+			"ETHUSDT": {CurrentPrice: 90},
+		},
+	)
+
+	at := &AutoTrader{
+		id: "trader-a",
+		lastPositions: map[string]*PositionSnapshot{
+			"ETHUSDT_short": {
+				Symbol:     "ETHUSDT",
+				Side:       "short",
+				Quantity:   2,
+				EntryPrice: 100,
+				Leverage:   5,
+			},
+		},
+	}
+
+	actions := at.detectAutoClosedPositions(nil)
+	if len(actions) != 1 {
+		t.Fatalf("应生成 1 条自动平仓动作，实际=%d: %+v", len(actions), actions)
+	}
+	action := actions[0]
+	if action.Action != "auto_close_short" || action.Symbol != "ETHUSDT" || !action.Success {
+		t.Fatalf("自动平仓动作不正确: %+v", action)
+	}
+	if action.Price != 96 || action.Quantity != 2 || action.Leverage != 5 {
+		t.Fatalf("自动平仓价格/数量/杠杆不正确: %+v", action)
+	}
+	if action.Reasoning != "STOP_LOSS" {
+		t.Fatalf("应按保护止损识别关闭原因，实际=%q", action.Reasoning)
+	}
+	if plan := decision.GetPlanByScope("trader-a", "ETHUSDT", "short"); plan != nil {
+		t.Fatalf("自动平仓后应移除交易计划: %+v", plan)
+	}
+}
+
+func TestReconcileStaleTradePlans_RemovesPlanWithoutCurrentPosition(t *testing.T) {
+	originalGetter := getMarketData
+	getMarketData = func(symbol string) (*market.Data, error) {
+		return &market.Data{Symbol: symbol, CurrentPrice: 96}, nil
+	}
+	t.Cleanup(func() { getMarketData = originalGetter })
+	if err := decision.InitPlanManager(t.TempDir()); err != nil {
+		t.Fatalf("初始化计划管理器失败: %v", err)
+	}
+
+	decision.SyncPlansFromPositionsScoped(
+		"trader-a",
+		[]decision.PositionInfo{{
+			Symbol:     "ETHUSDT",
+			Side:       "short",
+			EntryPrice: 100,
+			MarkPrice:  90,
+			Quantity:   2,
+			Leverage:   5,
+			MarginUsed: 40,
+			UpdateTime: time.Now().Add(-time.Hour).UnixMilli(),
+			StopLoss:   95,
+			TakeProfit: 80,
+		}},
+		map[string]*market.Data{
+			"ETHUSDT": {CurrentPrice: 90},
+		},
+	)
+
+	at := &AutoTrader{id: "trader-a"}
+
+	actions := at.reconcileStaleTradePlans(nil)
+	if len(actions) != 1 {
+		t.Fatalf("应生成 1 条 stale plan 自动平仓动作，实际=%d: %+v", len(actions), actions)
+	}
+	action := actions[0]
+	if action.Action != "auto_close_short" || action.Symbol != "ETHUSDT" || !action.Success {
+		t.Fatalf("自动平仓动作不正确: %+v", action)
+	}
+	if action.Price != 95 {
+		t.Fatalf("应使用保护止损价作为退出价，实际=%.4f", action.Price)
+	}
+	if action.Reasoning != "STOP_LOSS" {
+		t.Fatalf("应识别为止损触发，实际=%q", action.Reasoning)
+	}
+	if plan := decision.GetPlanByScope("trader-a", "ETHUSDT", "short"); plan != nil {
+		t.Fatalf("stale plan 自动平仓后应移除交易计划: %+v", plan)
+	}
+}
+
 func TestAutoTraderApplyAICallState_SuccessUpdatesLastAnalysis(t *testing.T) {
 	at := &AutoTrader{
 		config:             AutoTraderConfig{ScanInterval: 2 * time.Minute},

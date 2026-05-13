@@ -391,12 +391,14 @@ func (at *AutoTrader) runCycle() error {
 
 	// 3.1 检测自动平仓（止损/止盈触发）
 	autoClosedActions := at.detectAutoClosedPositions(ctx.Positions)
+	autoClosedActions = append(autoClosedActions, at.reconcileStaleTradePlans(ctx.Positions)...)
 	for _, action := range autoClosedActions {
 		log.Printf("[AUTO-CLOSE] 检测到自动平仓: %s %s (价格: %.4f)", action.Symbol, action.Action, action.Price)
 		record.Decisions = append(record.Decisions, action)
 		record.ExecutionLog = append(record.ExecutionLog,
 			fmt.Sprintf("[AUTO-CLOSE] 自动平仓: %s %s (止损/止盈触发)", action.Symbol, action.Action))
 	}
+	at.updatePositionSnapshots(ctx.Positions)
 
 	// 保存账户状态快照
 	record.AccountState = logger.AccountSnapshot{
@@ -1026,9 +1028,6 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		PerformanceGates: performanceGates,
 		ExecutionQuality: executionQuality,
 	}
-	// 🆕 在返回前更新持仓快照（用于下一周期检测自动平仓）
-	at.updatePositionSnapshots(positionInfos)
-
 	// 注入全局熔断状态，确保每个周期的 Context 包含当前熔断状态
 	ctx.CircuitBreaker = decision.GetCircuitBreakerState()
 
@@ -2368,6 +2367,8 @@ func (at *AutoTrader) detectAutoClosedPositions(currentPositions []decision.Posi
 				closePrice = lastPos.EntryPrice
 			}
 
+			pnlUSD, pnlPercent := autoClosePnL(lastPos.Side, lastPos.EntryPrice, closePrice, lastPos.Quantity, lastPos.Leverage)
+
 			// 确定是平多仓还是平空仓
 			action := "auto_close_long"
 			if lastPos.Side == "short" {
@@ -2387,7 +2388,9 @@ func (at *AutoTrader) detectAutoClosedPositions(currentPositions []decision.Posi
 				EntryPrice:  lastPos.EntryPrice,
 				Quantity:    lastPos.Quantity,
 				Leverage:    lastPos.Leverage,
-				CloseReason: "AUTO_CLOSE_DETECTED",
+				RealizedPnL: pnlUSD,
+				PnLPercent:  pnlPercent,
+				CloseReason: at.inferAutoCloseReason(lastPos.Symbol, lastPos.Side, closePrice),
 				CloseTime:   time.Now(),
 			}, false)
 			autoClosedAction.Action = action
@@ -2399,4 +2402,125 @@ func (at *AutoTrader) detectAutoClosedPositions(currentPositions []decision.Posi
 	}
 
 	return autoClosedActions
+}
+
+func (at *AutoTrader) reconcileStaleTradePlans(currentPositions []decision.PositionInfo) []logger.DecisionAction {
+	currentPosMap := make(map[string]bool)
+	for _, pos := range currentPositions {
+		currentPosMap[pos.Symbol+"_"+pos.Side] = true
+	}
+
+	var actions []logger.DecisionAction
+	for _, plan := range decision.GetAllPlans() {
+		if plan == nil || (plan.TraderID != "" && plan.TraderID != at.id) {
+			continue
+		}
+		if plan.Status != "" && !strings.EqualFold(plan.Status, "ACTIVE") {
+			continue
+		}
+
+		side := plan.Direction
+		if side == "" {
+			continue
+		}
+		if currentPosMap[plan.Symbol+"_"+side] {
+			continue
+		}
+		if !at.claimAutoCloseEvent(plan.Symbol, side, 0, time.Now()) {
+			continue
+		}
+
+		marketPrice := 0.0
+		if marketData, err := getMarketData(plan.Symbol); err == nil {
+			marketPrice = marketData.CurrentPrice
+		}
+		closePrice, closeReason := planAutoClosePriceAndReason(plan, marketPrice)
+
+		entryPrice := plan.ActualEntry
+		if entryPrice <= 0 {
+			entryPrice = plan.EntryPrice
+		}
+		quantity := plan.ActualQuantity
+		if quantity <= 0 && entryPrice > 0 {
+			quantity = plan.PositionSizeUSD / entryPrice
+		}
+		pnlUSD, pnlPercent := autoClosePnL(side, entryPrice, closePrice, quantity, plan.Leverage)
+
+		action := at.handleAutoCloseEvent(autoCloseEvent{
+			Symbol:      plan.Symbol,
+			Side:        side,
+			EntryPrice:  entryPrice,
+			ExitPrice:   closePrice,
+			Quantity:    quantity,
+			Leverage:    plan.Leverage,
+			RealizedPnL: pnlUSD,
+			PnLPercent:  pnlPercent,
+			CloseReason: closeReason,
+			CloseTime:   time.Now(),
+		}, false)
+		actions = append(actions, action)
+		log.Printf("[AUTO-CLOSE] 清理无持仓交易计划: %s %s reason=%s exit=%.4f", plan.Symbol, side, closeReason, closePrice)
+	}
+
+	return actions
+}
+
+func planAutoClosePriceAndReason(plan *decision.TradePlan, marketPrice float64) (float64, string) {
+	closePrice := marketPrice
+	if closePrice <= 0 {
+		closePrice = plan.EntryPrice
+	}
+
+	stopLoss := plan.CurrentStopLoss
+	if stopLoss <= 0 {
+		stopLoss = plan.StopLoss
+	}
+
+	if plan.Direction == "long" {
+		if stopLoss > 0 && marketPrice > 0 && marketPrice <= stopLoss {
+			return stopLoss, "STOP_LOSS"
+		}
+		if plan.TakeProfit > 0 && marketPrice > 0 && marketPrice >= plan.TakeProfit {
+			return plan.TakeProfit, "TAKE_PROFIT"
+		}
+	} else {
+		if stopLoss > 0 && marketPrice > 0 && marketPrice >= stopLoss {
+			return stopLoss, "STOP_LOSS"
+		}
+		if plan.TakeProfit > 0 && marketPrice > 0 && marketPrice <= plan.TakeProfit {
+			return plan.TakeProfit, "TAKE_PROFIT"
+		}
+	}
+
+	return closePrice, "AUTO_CLOSE_DETECTED"
+}
+
+func (at *AutoTrader) inferAutoCloseReason(symbol, side string, closePrice float64) string {
+	plan := decision.GetPlanByScope(at.id, symbol, side)
+	if plan == nil || closePrice <= 0 {
+		return "AUTO_CLOSE_DETECTED"
+	}
+
+	stopLoss := plan.CurrentStopLoss
+	if stopLoss <= 0 {
+		stopLoss = plan.StopLoss
+	}
+
+	if side == "long" {
+		if stopLoss > 0 && closePrice <= stopLoss {
+			return "STOP_LOSS"
+		}
+		if plan.TakeProfit > 0 && closePrice >= plan.TakeProfit {
+			return "TAKE_PROFIT"
+		}
+	} else {
+		if stopLoss > 0 && closePrice >= stopLoss {
+			return "STOP_LOSS"
+		}
+		if plan.TakeProfit > 0 && closePrice <= plan.TakeProfit {
+			return "TAKE_PROFIT"
+		}
+	}
+
+	return "AUTO_CLOSE_DETECTED"
 }

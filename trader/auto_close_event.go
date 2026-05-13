@@ -74,16 +74,15 @@ func (at *AutoTrader) handleAutoCloseEvent(event autoCloseEvent, writeStandalone
 		Reasoning: event.CloseReason,
 	}
 
-	if event.RealizedPnL != 0 || event.PnLPercent != 0 {
-		decision.OnPositionClosedScoped(
-			at.id,
-			event.Symbol,
-			event.Side,
-			event.ExitPrice,
-			event.PnLPercent,
-			event.RealizedPnL,
-			event.CloseReason,
-		)
+	if event.ExitPrice > 0 && event.EntryPrice > 0 && event.Quantity > 0 {
+		pnlUSD, pnlPercent := autoClosePnL(event.Side, event.EntryPrice, event.ExitPrice, event.Quantity, event.Leverage)
+		if event.RealizedPnL != 0 {
+			pnlUSD = event.RealizedPnL
+		}
+		if event.PnLPercent != 0 {
+			pnlPercent = event.PnLPercent
+		}
+		decision.OnPositionClosedScoped(at.id, event.Symbol, event.Side, event.ExitPrice, pnlPercent, pnlUSD, event.CloseReason)
 	} else {
 		decision.OnPositionClosedSimpleScoped(at.id, event.Symbol, event.Side, event.CloseReason)
 	}
@@ -96,6 +95,24 @@ func (at *AutoTrader) handleAutoCloseEvent(event autoCloseEvent, writeStandalone
 		at.logAutoClosedAction(actionRecord, event)
 	}
 	return actionRecord
+}
+
+func autoClosePnL(side string, entryPrice, exitPrice, quantity float64, leverage int) (float64, float64) {
+	if leverage <= 0 {
+		leverage = 1
+	}
+
+	pnlUSD := quantity * (exitPrice - entryPrice)
+	if side == "short" {
+		pnlUSD = quantity * (entryPrice - exitPrice)
+	}
+
+	margin := quantity * entryPrice / float64(leverage)
+	pnlPercent := 0.0
+	if margin > 0 {
+		pnlPercent = pnlUSD / margin * 100
+	}
+	return pnlUSD, pnlPercent
 }
 
 func (at *AutoTrader) logAutoClosedAction(actionRecord logger.DecisionAction, event autoCloseEvent) {
