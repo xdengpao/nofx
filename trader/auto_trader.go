@@ -2275,11 +2275,23 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 
 		marginUsed := (quantity * markPrice) / float64(leverage)
 
+		stopLossPrice := 0.0
+		takeProfitPrice := 0.0
+		if plan := decision.GetPlanByScope(at.id, symbol, side); plan != nil && (plan.Status == "" || strings.EqualFold(plan.Status, "ACTIVE")) {
+			stopLossPrice = plan.CurrentStopLoss
+			if stopLossPrice <= 0 {
+				stopLossPrice = plan.StopLoss
+			}
+			takeProfitPrice = plan.TakeProfit
+		}
+
 		result = append(result, map[string]interface{}{
 			"symbol":             symbol,
 			"side":               side,
 			"entry_price":        entryPrice,
 			"mark_price":         markPrice,
+			"stop_loss_price":    stopLossPrice,
+			"take_profit_price":  takeProfitPrice,
 			"quantity":           quantity,
 			"leverage":           leverage,
 			"unrealized_pnl":     unrealizedPnl,

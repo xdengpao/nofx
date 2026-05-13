@@ -33,6 +33,8 @@ export interface Position {
   side: string;
   entry_price: number;
   mark_price: number;
+  stop_loss_price?: number;
+  take_profit_price?: number;
   quantity: number;
   leverage: number;
   unrealized_pnl: number;
@@ -51,6 +53,7 @@ export interface DecisionAction {
   timestamp: string;
   success: boolean;
   error?: string;
+  reasoning?: string;
 }
 
 export interface AccountSnapshot {

@@ -10,6 +10,7 @@ import type {
   SystemStatus,
   AccountInfo,
   Position,
+  DecisionAction,
   DecisionRecord,
   Statistics,
   TraderInfo,
@@ -321,6 +322,50 @@ function App() {
   );
 }
 
+type DecisionJsonAction = {
+  action?: string;
+  symbol?: string;
+  new_take_profit?: number;
+  new_stop_loss?: number;
+};
+
+function parseDecisionJsonActions(decisionJson: string): DecisionJsonAction[] {
+  if (!decisionJson) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(decisionJson);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseTargetPriceFromReasoning(reasoning?: string): number | undefined {
+  const match = reasoning?.match(/[→>]\s*([0-9]+(?:\.[0-9]+)?)/);
+  return match ? Number(match[1]) : undefined;
+}
+
+function getActionTargetPrice(action: DecisionAction, requestedActions: DecisionJsonAction[]) {
+  if (action.action !== 'update_take_profit' && action.action !== 'update_stop_loss') {
+    return undefined;
+  }
+
+  const requested = requestedActions.find((item) => item.symbol === action.symbol && item.action === action.action);
+  const value = action.action === 'update_take_profit'
+    ? requested?.new_take_profit ?? parseTargetPriceFromReasoning(action.reasoning)
+    : requested?.new_stop_loss ?? parseTargetPriceFromReasoning(action.reasoning);
+
+  return value && Number.isFinite(value)
+    ? { label: action.action === 'update_take_profit' ? 'TP' : 'SL', value }
+    : undefined;
+}
+
+function formatOptionalPrice(value?: number) {
+  return value && value > 0 ? value.toFixed(4) : '--';
+}
+
 // Trader Details Page Component
 function TraderDetailsPage({
   selectedTrader,
@@ -458,6 +503,8 @@ function TraderDetailsPage({
                   <th className="pb-3 font-semibold text-gray-400">{t('side', language)}</th>
                   <th className="pb-3 font-semibold text-gray-400">{t('entryPrice', language)}</th>
                   <th className="pb-3 font-semibold text-gray-400">{t('markPrice', language)}</th>
+                  <th className="pb-3 font-semibold text-gray-400">{t('stopLoss', language)}</th>
+                  <th className="pb-3 font-semibold text-gray-400">{t('takeProfit', language)}</th>
                   <th className="pb-3 font-semibold text-gray-400">{t('quantity', language)}</th>
                   <th className="pb-3 font-semibold text-gray-400">{t('positionValue', language)}</th>
                   <th className="pb-3 font-semibold text-gray-400">{t('leverage', language)}</th>
@@ -482,6 +529,12 @@ function TraderDetailsPage({
                     </td>
                     <td className="py-3 font-mono" style={{ color: '#EAECEF' }}>{pos.entry_price.toFixed(4)}</td>
                     <td className="py-3 font-mono" style={{ color: '#EAECEF' }}>{pos.mark_price.toFixed(4)}</td>
+                    <td className="py-3 font-mono" style={{ color: pos.stop_loss_price && pos.stop_loss_price > 0 ? '#F6465D' : '#848E9C' }}>
+                      {formatOptionalPrice(pos.stop_loss_price)}
+                    </td>
+                    <td className="py-3 font-mono" style={{ color: pos.take_profit_price && pos.take_profit_price > 0 ? '#0ECB81' : '#848E9C' }}>
+                      {formatOptionalPrice(pos.take_profit_price)}
+                    </td>
                     <td className="py-3 font-mono" style={{ color: '#EAECEF' }}>{pos.quantity.toFixed(4)}</td>
                     <td className="py-3 font-mono font-bold" style={{ color: '#EAECEF' }}>
                       {(pos.quantity * pos.mark_price).toFixed(2)} USDT
@@ -598,6 +651,7 @@ function StatCard({
 function DecisionCard({ decision, language }: { decision: DecisionRecord; language: Language }) {
   const [showInputPrompt, setShowInputPrompt] = useState(false);
   const [showCoT, setShowCoT] = useState(false);
+  const requestedActions = parseDecisionJsonActions(decision.decision_json);
 
   return (
     <div className="rounded p-5 transition-all duration-300 hover:translate-y-[-2px]" style={{ border: '1px solid #2B3139', background: '#1E2329', boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)' }}>
@@ -661,28 +715,41 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
       {/* Decisions Actions */}
       {decision.decisions && decision.decisions.length > 0 && (
         <div className="space-y-2 mb-3">
-          {decision.decisions.map((action, j) => (
-            <div key={j} className="flex items-center gap-2 text-sm rounded px-3 py-2" style={{ background: '#0B0E11' }}>
-              <span className="font-mono font-bold" style={{ color: '#EAECEF' }}>{action.symbol}</span>
-              <span
-                className="px-2 py-0.5 rounded text-xs font-bold"
-                style={action.action.includes('open')
-                  ? { background: 'rgba(96, 165, 250, 0.1)', color: '#60a5fa' }
-                  : { background: 'rgba(240, 185, 11, 0.1)', color: '#F0B90B' }
-                }
-              >
-                {action.action}
-              </span>
-              {action.leverage > 0 && <span style={{ color: '#F0B90B' }}>{action.leverage}x</span>}
-              {action.price > 0 && (
-                <span className="font-mono text-xs" style={{ color: '#848E9C' }}>@{action.price.toFixed(4)}</span>
-              )}
-              <span style={{ color: action.success ? '#0ECB81' : '#F6465D' }}>
-                {action.success ? '✓' : '✗'}
-              </span>
-              {action.error && <span className="text-xs ml-2" style={{ color: '#F6465D' }}>{action.error}</span>}
-            </div>
-          ))}
+          {decision.decisions.map((action, j) => {
+            const targetPrice = getActionTargetPrice(action, requestedActions);
+
+            return (
+              <div key={j} className="flex flex-wrap items-center gap-2 text-sm rounded px-3 py-2" style={{ background: '#0B0E11' }}>
+                <span className="font-mono font-bold" style={{ color: '#EAECEF' }}>{action.symbol}</span>
+                <span
+                  className="px-2 py-0.5 rounded text-xs font-bold"
+                  style={action.action.includes('open')
+                    ? { background: 'rgba(96, 165, 250, 0.1)', color: '#60a5fa' }
+                    : { background: 'rgba(240, 185, 11, 0.1)', color: '#F0B90B' }
+                  }
+                >
+                  {action.action}
+                </span>
+                {action.leverage > 0 && <span style={{ color: '#F0B90B' }}>{action.leverage}x</span>}
+                {targetPrice ? (
+                  <>
+                    <span className="font-mono text-xs" style={{ color: '#F0B90B' }}>{targetPrice.label} {targetPrice.value.toFixed(4)}</span>
+                    {action.price > 0 && (
+                      <span className="font-mono text-xs" style={{ color: '#848E9C' }}>MKT {action.price.toFixed(4)}</span>
+                    )}
+                  </>
+                ) : (
+                  action.price > 0 && (
+                    <span className="font-mono text-xs" style={{ color: '#848E9C' }}>@{action.price.toFixed(4)}</span>
+                  )
+                )}
+                <span style={{ color: action.success ? '#0ECB81' : '#F6465D' }}>
+                  {action.success ? '✓' : '✗'}
+                </span>
+                {action.error && <span className="text-xs ml-2" style={{ color: '#F6465D' }}>{action.error}</span>}
+              </div>
+            );
+          })}
         </div>
       )}
 
