@@ -161,18 +161,19 @@ func (e *PositionEvaluator) Evaluate() *EvaluationResult {
 	}
 
 	// 第二优先级：固定止盈检查
-	if e.Plan != nil && e.Plan.TakeProfit > 0 {
-		if e.Plan.Direction == "long" && currentPrice >= e.Plan.TakeProfit {
+	if e.Plan != nil {
+		fullTP := e.getFullTakeProfitTarget()
+		if e.Plan.Direction == "long" && fullTP > 0 && currentPrice >= fullTP {
 			return &EvaluationResult{
 				Action:     "close",
-				Reason:     fmt.Sprintf("🎯 触发止盈: 当前价%.4f >= 止盈价%.4f", currentPrice, e.Plan.TakeProfit),
+				Reason:     fmt.Sprintf("🎯 触发止盈: 当前价%.4f >= 止盈价%.4f", currentPrice, fullTP),
 				IsHardStop: true,
 			}
 		}
-		if e.Plan.Direction == "short" && currentPrice <= e.Plan.TakeProfit {
+		if e.Plan.Direction == "short" && fullTP > 0 && currentPrice <= fullTP {
 			return &EvaluationResult{
 				Action:     "close",
-				Reason:     fmt.Sprintf("🎯 触发止盈: 当前价%.4f <= 止盈价%.4f", currentPrice, e.Plan.TakeProfit),
+				Reason:     fmt.Sprintf("🎯 触发止盈: 当前价%.4f <= 止盈价%.4f", currentPrice, fullTP),
 				IsHardStop: true,
 			}
 		}
@@ -277,13 +278,44 @@ func (e *PositionEvaluator) calculateCurrentRR() float64 {
 		return 0
 	}
 
-	riskDistance := math.Abs(e.Plan.EntryPrice - e.Plan.StopLoss)
+	riskDistance := e.getInitialRiskDistance()
 	if riskDistance == 0 {
 		return 0
 	}
 
 	currentDistance := math.Abs(e.MarketData.CurrentPrice - e.Plan.EntryPrice)
 	return currentDistance / riskDistance
+}
+
+func (e *PositionEvaluator) peakRMultiple() float64 {
+	if e.Plan == nil {
+		return 0
+	}
+	riskDistance := e.getInitialRiskDistance()
+	if riskDistance <= 0 || e.Plan.PeakPrice <= 0 {
+		return 0
+	}
+	return math.Abs(e.Plan.PeakPrice-e.Plan.EntryPrice) / riskDistance
+}
+
+func (e *PositionEvaluator) getInitialRiskDistance() float64 {
+	if e.Plan == nil {
+		return 0
+	}
+	if e.Plan.InitialRiskDistance > 0 {
+		return e.Plan.InitialRiskDistance
+	}
+	return math.Abs(e.Plan.EntryPrice - e.Plan.StopLoss)
+}
+
+func (e *PositionEvaluator) getFullTakeProfitTarget() float64 {
+	if e.Plan == nil {
+		return 0
+	}
+	if e.Plan.ExchangeFullTakeProfit > 0 {
+		return e.Plan.ExchangeFullTakeProfit
+	}
+	return e.Plan.TakeProfit
 }
 
 func (e *PositionEvaluator) getATR() float64 {
@@ -713,7 +745,7 @@ func (e *PositionEvaluator) calculateStopLossForTranche(moveStopTo string) float
 	}
 
 	entryPrice := e.Plan.EntryPrice
-	riskDistance := math.Abs(entryPrice - e.Plan.StopLoss)
+	riskDistance := e.getInitialRiskDistance()
 
 	switch moveStopTo {
 	case "breakeven":

@@ -3,6 +3,7 @@ package decision
 import (
 	"fmt"
 	"log"
+	"math"
 	"nofx/logger"
 	"nofx/market"
 	"nofx/mcp"
@@ -49,6 +50,7 @@ type Context struct {
 	FrequencyPolicy          *FrequencyPolicy                   `json:"-"`
 	FrequencyState           *FrequencyState                    `json:"-"`
 	LossMode                 *LossModeState                     `json:"-"`
+	StrategyRiskPolicy       *StrategyRiskPolicy                `json:"-"`
 }
 
 const defaultMaxAccountDrawdownPct = 20.0
@@ -281,11 +283,17 @@ func buildOpenRejection(d Decision, ctx *Context, reason string) OpenRejection {
 	if marketData == nil {
 		return rejection
 	}
+	var strategyProfile InstrumentProfile
+	if ctx.StrategyRiskPolicy != nil && !ctx.StrategyRiskPolicy.Legacy && ctx.StrategyRiskPolicy.Enabled {
+		strategyProfile = ResolveInstrumentProfile(d.Symbol, ctx.StrategyRiskPolicy)
+	}
 	gate := EvaluateOpenGate(OpenGateInput{
 		Decision:         &d,
 		Context:          ctx,
 		MarketData:       marketData,
 		ExecutionQuality: ctx.ExecutionQuality,
+		StrategyPolicy:   ctx.StrategyRiskPolicy,
+		StrategyProfile:  strategyProfile,
 	})
 	rejection.GateState = gate.State
 	rejection.GateReasons = append(rejection.GateReasons, gate.Reasons...)
@@ -806,11 +814,27 @@ func validateOpenDecision(d *Decision, ctx *Context) error {
 		return fmt.Errorf("缺少 %s 市场数据", d.Symbol)
 	}
 
+	var riskNormalization *OpenRiskNormalization
+	var strategyProfile InstrumentProfile
+	if ctx.StrategyRiskPolicy != nil && !ctx.StrategyRiskPolicy.Legacy && ctx.StrategyRiskPolicy.Enabled {
+		strategyProfile = ResolveInstrumentProfile(d.Symbol, ctx.StrategyRiskPolicy)
+	}
+	if StrategyRiskActive(ctx.StrategyRiskPolicy) {
+		var err error
+		riskNormalization, err = NormalizeOpenDecisionRisk(d, ctx, marketData)
+		if err != nil {
+			return fmt.Errorf("策略风险规范化失败: %w", err)
+		}
+	}
+
 	gate := EvaluateOpenGate(OpenGateInput{
-		Decision:         d,
-		Context:          ctx,
-		MarketData:       marketData,
-		ExecutionQuality: ctx.ExecutionQuality,
+		Decision:          d,
+		Context:           ctx,
+		MarketData:        marketData,
+		ExecutionQuality:  ctx.ExecutionQuality,
+		StrategyProfile:   strategyProfile,
+		StrategyPolicy:    ctx.StrategyRiskPolicy,
+		RiskNormalization: riskNormalization,
 	})
 	if !gate.Allowed {
 		return fmt.Errorf("open gate阻止开仓: %s", strings.Join(gate.Reasons, "; "))
@@ -900,32 +924,56 @@ func validateOpenDecision(d *Decision, ctx *Context) error {
 	}
 
 	// 检查单笔风险
+	effectiveRiskForSizing := gate.EffectiveRisk
+	if StrategyRiskActive(ctx.StrategyRiskPolicy) && strategyProfile.MaxRiskPct > 0 &&
+		(effectiveRiskForSizing == 0 || strategyProfile.MaxRiskPct < effectiveRiskForSizing) {
+		effectiveRiskForSizing = strategyProfile.MaxRiskPct
+	}
+	feeSlippagePct := 0.0
+	if ctx.StrategyRiskPolicy != nil {
+		feeSlippagePct = ctx.StrategyRiskPolicy.FeeSlippagePct
+	}
+	minOrderValue := defaultMinOrderValueUSDT
+	if StrategyRiskActive(ctx.StrategyRiskPolicy) && strategyProfile.MinOrderValueUSDT > 0 {
+		minOrderValue = strategyProfile.MinOrderValueUSDT
+	}
 	sizing := CalculatePositionSizing(PositionSizingInput{
 		AccountEquity:            ctx.Account.TotalEquity,
 		AvailableBalance:         ctx.Account.AvailableBalance,
 		CurrentPrice:             currentPrice,
 		StopLoss:                 d.StopLoss,
 		Leverage:                 d.Leverage,
-		EffectiveRiskPct:         gate.EffectiveRisk,
+		EffectiveRiskPct:         effectiveRiskForSizing,
 		RemainingRiskBudgetPct:   remainingBudget,
 		RequestedPositionSizeUSD: d.PositionSizeUSD,
-		MinOrderValueUSDT:        defaultMinOrderValueUSDT,
+		MinOrderValueUSDT:        minOrderValue,
+		FeeSlippagePct:           feeSlippagePct,
+		ProfileName:              strategyProfile.Name,
 	})
 	d.StopDistancePct = sizing.StopDistancePct
+	d.StopDistanceRatio = sizing.StopDistanceRatio
+	d.StopDistancePercent = sizing.StopDistancePercent
 	d.EffectiveRiskPct = sizing.RiskPct
+	d.FeeSlippageReserveUSD = sizing.FeeSlippageReserveUSD
+	d.TotalRiskUSD = sizing.TotalRiskUSD
+	d.TotalRiskPct = sizing.TotalRiskPct
+	d.RiskCapReason = sizing.RiskCapReason
 	if d.PositionSizeUSD > sizing.MaxPositionSizeUSD*1.01 && sizing.MaxPositionSizeUSD > 0 {
-		if sizing.PositionSizeUSD >= defaultMinOrderValueUSDT {
+		if sizing.PositionSizeUSD >= minOrderValue {
 			log.Printf("⚠️ 单笔风险超限，自动缩仓: %.2f → %.2f USD", d.PositionSizeUSD, sizing.PositionSizeUSD)
 			d.AdjustedPositionSizeUSD = sizing.PositionSizeUSD
 			d.PositionSizeUSD = sizing.PositionSizeUSD
 			d.RiskUSD = sizing.RiskUSD
+			d.FeeSlippageReserveUSD = sizing.FeeSlippageReserveUSD
+			d.TotalRiskUSD = sizing.TotalRiskUSD
+			d.TotalRiskPct = sizing.TotalRiskPct
 			d.SizingAdjusted = true
 			d.SizingReason = "单笔风险超限，已缩小到最大可执行仓位"
 			return nil
 		}
-		return fmt.Errorf("单笔风险(%.2f USD)超过上限(%.2f USD)", d.PositionSizeUSD*(riskPct/100), ctx.Account.TotalEquity*gate.EffectiveRisk)
+		return fmt.Errorf("单笔风险(%.2f USD)超过上限(%.2f USD)", d.PositionSizeUSD*(riskPct/100), ctx.Account.TotalEquity*effectiveRiskForSizing)
 	}
-	if !sizing.Executable && sizing.PositionSizeUSD < defaultMinOrderValueUSDT {
+	if !sizing.Executable && sizing.PositionSizeUSD < minOrderValue {
 		return fmt.Errorf("仓位sizing不可执行: %s", strings.Join(sizing.Reasons, "; "))
 	}
 
@@ -1671,6 +1719,29 @@ func CreateTradePlanFromDecision(d *Decision, actualEntryPrice float64) *TradePl
 		Confidence:                  d.Confidence,
 		RiskUSD:                     d.RiskUSD,
 		ExecutedTranches:            make(map[int]bool),
+		ProfileName:                 d.ProfileName,
+		InitialRiskDistance:         math.Abs(actualEntryPrice - adjustedSL),
+		EffectiveStopLoss:           d.EffectiveStopLoss,
+		EffectiveTakeProfit:         d.EffectiveTakeProfit,
+		ExchangeFullTakeProfit:      d.ExchangeFullTakeProfit,
+		ExchangeFullTPMode:          d.ExchangeFullTPMode,
+	}
+	if actualEntryPrice > 0 {
+		plan.InitialRiskDistancePct = plan.InitialRiskDistance / actualEntryPrice
+	}
+	if plan.EffectiveStopLoss <= 0 {
+		plan.EffectiveStopLoss = adjustedSL
+	}
+	if plan.EffectiveTakeProfit <= 0 {
+		plan.EffectiveTakeProfit = adjustedTP
+	}
+	if plan.ExchangeFullTakeProfit <= 0 {
+		plan.ExchangeFullTakeProfit = adjustedTP
+	}
+	if d.RiskNormalization != nil {
+		plan.InitialATR = d.RiskNormalization.ATRValue
+		plan.InitialATRTimeframe = d.RiskNormalization.ATRTimeframe
+		plan.MinNetRR = d.RiskNormalization.MinNetRR
 	}
 
 	if plan.MinHoldMinutes == 0 {
@@ -2224,6 +2295,30 @@ func buildUserPrompt(ctx *Context, remainingBudget float64) string {
 			stopPct = stopDist / marketData.CurrentPrice * 100
 		}
 		minTakeProfitPct := stopPct*2.5 + 0.2
+		if ctx.StrategyRiskPolicy != nil && !ctx.StrategyRiskPolicy.Legacy && ctx.StrategyRiskPolicy.Enabled {
+			profile := ResolveInstrumentProfile(coin.Symbol, ctx.StrategyRiskPolicy)
+			atr := market.GetATR(marketData, profile.ATRTimeframe)
+			minStopRatio := profile.MinStopPct
+			if atr > 0 && marketData.CurrentPrice > 0 {
+				atrRatio := atr * profile.ATRMultiplier / marketData.CurrentPrice
+				if atrRatio > minStopRatio {
+					minStopRatio = atrRatio
+				}
+			}
+			minTPRatio := minStopRatio*profile.MinNetRR + ctx.StrategyRiskPolicy.FeeSlippagePct
+			adxSnapshot := market.GetDirectionalSnapshot(marketData, ctx.StrategyRiskPolicy.ADXTimeframe)
+			executableLong := profile.AllowLong && adxSnapshot.ADX >= profile.MinADX && adxSnapshot.DIPlus > adxSnapshot.DIMinus
+			executableShort := profile.AllowShort && adxSnapshot.ADX >= profile.MinADX && adxSnapshot.DIMinus > adxSnapshot.DIPlus
+			if adxSnapshot.ADX <= 0 || adxSnapshot.DIPlus <= 0 || adxSnapshot.DIMinus <= 0 {
+				executableLong = false
+				executableShort = false
+			}
+			nonExecutable := !executableLong && !executableShort
+			sb.WriteString(fmt.Sprintf("**Profile**: %s | ATR(%s): %.4f | minSL: %.2f%% | minTP: %.2f%% | ADX(%s): %.1f DI+: %.1f DI-: %.1f | executable_long=%t executable_short=%t non_executable=%t\n",
+				profile.Name, profile.ATRTimeframe, atr, minStopRatio*100, minTPRatio*100,
+				adxSnapshot.Timeframe, adxSnapshot.ADX, adxSnapshot.DIPlus, adxSnapshot.DIMinus,
+				executableLong, executableShort, nonExecutable))
+		}
 		sb.WriteString(fmt.Sprintf("**建议仓位**: %.0f USD | **建议止损/最大SL距离**: %.4f (%.2f%%) | **最低TP距离**: %.2f%%\n",
 			suggestedSize, stopDist, stopPct, minTakeProfitPct))
 		sb.WriteString(market.FormatCompact(marketData))

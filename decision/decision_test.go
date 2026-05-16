@@ -307,6 +307,50 @@ func TestBuildUserPrompt_ExcludesHighBetaLongCandidatesWhenBTCGateBlocks(t *test
 	}
 }
 
+func TestBuildUserPrompt_IncludesStrategyRiskCandidateFields(t *testing.T) {
+	ctx := newTestContext()
+	ctx.CurrentTime = "2026-05-16 20:15:00"
+	ctx.CandidateCoins = []CandidateCoin{{Symbol: "ETHUSDT", Sources: []string{"test"}, IncludedInPrompt: true, DataQuality: "ok"}}
+	ctx.StrategyRiskPolicy = testStrategyPolicy()
+	md := newTestMarketData(100)
+	md.MidTermSeries1h = &market.MidTermData1h{
+		ADXValues: []float64{30},
+		DIPlus:    []float64{28},
+		DIMinus:   []float64{12},
+		ATRValues: []float64{1.5},
+	}
+	ctx.MarketDataMap["ETHUSDT"] = md
+
+	prompt := buildUserPrompt(ctx, 0.08)
+	for _, required := range []string{"Profile", "ATR(1h)", "minSL", "minTP", "ADX(1h)", "executable_long=true"} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("候选prompt缺少策略风险字段 %q: %s", required, prompt)
+		}
+	}
+}
+
+func TestBuildUserPrompt_MarksBlockedStrategyRiskCandidateNonExecutable(t *testing.T) {
+	ctx := newTestContext()
+	ctx.CurrentTime = "2026-05-16 20:15:00"
+	ctx.CandidateCoins = []CandidateCoin{{Symbol: "ETHUSDT", Sources: []string{"test"}, IncludedInPrompt: true, DataQuality: "ok"}}
+	ctx.StrategyRiskPolicy = testStrategyPolicy()
+	md := newTestMarketData(100)
+	md.MidTermSeries1h = &market.MidTermData1h{
+		ADXValues: []float64{12},
+		DIPlus:    []float64{10},
+		DIMinus:   []float64{9},
+		ATRValues: []float64{1.5},
+	}
+	ctx.MarketDataMap["ETHUSDT"] = md
+
+	prompt := buildUserPrompt(ctx, 0.08)
+	for _, required := range []string{"executable_long=false", "executable_short=false", "non_executable=true"} {
+		if !strings.Contains(prompt, required) {
+			t.Fatalf("低ADX候选应标记不可执行，缺少 %q: %s", required, prompt)
+		}
+	}
+}
+
 func TestBuildSystemPrompt_UsesExactNetRRFormula(t *testing.T) {
 	ctx := newTestContext()
 	prompt := buildSystemPrompt(ctx)

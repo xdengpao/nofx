@@ -255,6 +255,102 @@ func TestNormalizeTradingFrequency_InvalidValues(t *testing.T) {
 	}
 }
 
+func TestNormalizeStrategyRisk_LegacyPreservesExistingBehavior(t *testing.T) {
+	cfg := validConfig()
+	profile, err := cfg.NormalizeStrategyRisk()
+	if err != nil {
+		t.Fatalf("legacy strategy risk归一化失败: %v", err)
+	}
+	if !profile.Legacy || profile.Enabled {
+		t.Fatalf("缺少strategy_risk时应保持legacy且不启用: %+v", profile)
+	}
+	if !profile.RollbackLegacyValidation || profile.FeeSlippagePct <= 0 || profile.ADXTimeframe != "1h" {
+		t.Fatalf("legacy默认值异常: %+v", profile)
+	}
+}
+
+func TestNormalizeStrategyRisk_DefaultBlockDerivesStrictProfiles(t *testing.T) {
+	cfg := validConfig()
+	cfg.StrategyRisk = &StrategyRiskConfig{}
+	profile, err := cfg.NormalizeStrategyRisk()
+	if err != nil {
+		t.Fatalf("strategy risk默认块归一化失败: %v", err)
+	}
+	if profile.Legacy || !profile.Enabled {
+		t.Fatalf("存在strategy_risk块时应启用非legacy策略: %+v", profile)
+	}
+	if len(profile.Profiles) == 0 {
+		t.Fatal("应生成默认profile")
+	}
+	for _, p := range profile.Profiles {
+		if p.MinStopPct < defaultMinStopFloorPct {
+			t.Fatalf("%s min stop低于硬地板: %+v", p.Name, p)
+		}
+		if p.ExchangeFullTPMode != StrategyRiskTPModeAlgorithmicFull {
+			t.Fatalf("%s full TP模式应默认为algorithmic_full: %+v", p.Name, p)
+		}
+	}
+}
+
+func TestNormalizeStrategyRisk_PercentNormalizationAndOverrides(t *testing.T) {
+	allowShort := false
+	cfg := validConfig()
+	cfg.StrategyRisk = &StrategyRiskConfig{
+		FeeSlippagePct: 0.2,
+		Profiles: []InstrumentProfileConfig{
+			{
+				Name:                "btc_eth",
+				MinStopPct:          1.2,
+				MaxRiskPct:          0.5,
+				AllowShort:          &allowShort,
+				ExchangeFullTPMinRR: 3.0,
+			},
+		},
+	}
+	profile, err := cfg.NormalizeStrategyRisk()
+	if err != nil {
+		t.Fatalf("strategy risk覆盖归一化失败: %v", err)
+	}
+	if profile.FeeSlippagePct != 0.002 {
+		t.Fatalf("fee_slippage_pct 0.2应归一化为0.002，实际 %.6f", profile.FeeSlippagePct)
+	}
+	var btc InstrumentProfileProfile
+	for _, p := range profile.Profiles {
+		if p.Name == "btc_eth" {
+			btc = p
+			break
+		}
+	}
+	if btc.Name == "" {
+		t.Fatal("未找到btc_eth profile")
+	}
+	if btc.MinStopPct != 0.012 || btc.MaxRiskPct != 0.005 {
+		t.Fatalf("profile百分比归一化错误: %+v", btc)
+	}
+	if btc.AllowShort {
+		t.Fatalf("AllowShort override未生效: %+v", btc)
+	}
+	if btc.ExchangeFullTPMinRR != 3.0 {
+		t.Fatalf("ExchangeFullTPMinRR override未生效: %+v", btc)
+	}
+}
+
+func TestNormalizeStrategyRisk_InvalidProfileValues(t *testing.T) {
+	cfg := validConfig()
+	cfg.StrategyRisk = &StrategyRiskConfig{
+		Profiles: []InstrumentProfileConfig{{Name: "btc_eth", MinStopPct: 0.005}},
+	}
+	if _, err := cfg.NormalizeStrategyRisk(); err == nil {
+		t.Fatal("显式min_stop_pct低于1%应返回错误")
+	}
+
+	cfg = validConfig()
+	cfg.StrategyRisk = &StrategyRiskConfig{ADXTimeframe: "2h"}
+	if _, err := cfg.NormalizeStrategyRisk(); err == nil {
+		t.Fatal("非法ADX timeframe应返回错误")
+	}
+}
+
 func TestLoadConfig_TradingFrequencyOverridesDynamicPromptLimit(t *testing.T) {
 	cfg := validConfig()
 	cfg.TradingFrequency = &TradingFrequencyConfig{Mode: TradingFrequencyModeBalanced}

@@ -170,6 +170,20 @@ type TradePlan struct {
 
 	// 🆕 新增：连续亏损追踪
 	ConsecutiveLosses int `json:"consecutive_losses,omitempty"`
+
+	// 策略风险规范化字段
+	ProfileName            string  `json:"profile_name,omitempty"`
+	InitialRiskDistance    float64 `json:"initial_risk_distance,omitempty"`
+	InitialRiskDistancePct float64 `json:"initial_risk_distance_pct,omitempty"`
+	InitialATR             float64 `json:"initial_atr,omitempty"`
+	InitialATRTimeframe    string  `json:"initial_atr_timeframe,omitempty"`
+	EffectiveStopLoss      float64 `json:"effective_stop_loss,omitempty"`
+	EffectiveTakeProfit    float64 `json:"effective_take_profit,omitempty"`
+	ExchangeFullTakeProfit float64 `json:"exchange_full_take_profit,omitempty"`
+	ExchangeFullTPMode     string  `json:"exchange_full_tp_mode,omitempty"`
+	ExchangeFullTPMinRR    float64 `json:"exchange_full_tp_min_rr,omitempty"`
+	FeeSlippagePct         float64 `json:"fee_slippage_pct,omitempty"`
+	MinNetRR               float64 `json:"min_net_rr,omitempty"`
 }
 
 // TradePlanManager 交易计划管理器
@@ -188,28 +202,45 @@ type TradePlanManager struct {
 
 // Decision AI的交易决策
 type Decision struct {
-	Symbol                   string  `json:"symbol"`
-	Action                   string  `json:"action"`
-	Leverage                 int     `json:"leverage,omitempty"`
-	PositionSizeUSD          float64 `json:"position_size_usd,omitempty"`
-	RequestedPositionSizeUSD float64 `json:"requested_position_size_usd,omitempty"`
-	AdjustedPositionSizeUSD  float64 `json:"adjusted_position_size_usd,omitempty"`
-	SizingAdjusted           bool    `json:"sizing_adjusted,omitempty"`
-	SizingReason             string  `json:"sizing_reason,omitempty"`
-	StopDistancePct          float64 `json:"stop_distance_pct,omitempty"`
-	EffectiveRiskPct         float64 `json:"effective_risk_pct,omitempty"`
-	StopLoss                 float64 `json:"stop_loss,omitempty"`
-	TakeProfit               float64 `json:"take_profit,omitempty"`
-	NewStopLoss              float64 `json:"new_stop_loss,omitempty"`
-	NewTakeProfit            float64 `json:"new_take_profit,omitempty"`
-	ClosePercentage          float64 `json:"close_percentage,omitempty"`
-	Confidence               int     `json:"confidence,omitempty"`
-	RiskUSD                  float64 `json:"risk_usd,omitempty"`
-	Reasoning                string  `json:"reasoning"`
-	InvalidationPrice        float64 `json:"invalidation_price,omitempty"`
-	InvalidationCondition    string  `json:"invalidation_condition,omitempty"`
-	MinHoldMinutes           int     `json:"min_hold_minutes,omitempty"`
-	TrancheIndex             int     `json:"tranche_index,omitempty"`
+	Symbol                   string                 `json:"symbol"`
+	Action                   string                 `json:"action"`
+	Leverage                 int                    `json:"leverage,omitempty"`
+	PositionSizeUSD          float64                `json:"position_size_usd,omitempty"`
+	RequestedPositionSizeUSD float64                `json:"requested_position_size_usd,omitempty"`
+	AdjustedPositionSizeUSD  float64                `json:"adjusted_position_size_usd,omitempty"`
+	SizingAdjusted           bool                   `json:"sizing_adjusted,omitempty"`
+	SizingReason             string                 `json:"sizing_reason,omitempty"`
+	StopDistancePct          float64                `json:"stop_distance_pct,omitempty"`
+	StopDistanceRatio        float64                `json:"stop_distance_ratio,omitempty"`
+	StopDistancePercent      float64                `json:"stop_distance_percent,omitempty"`
+	EffectiveRiskPct         float64                `json:"effective_risk_pct,omitempty"`
+	StopLoss                 float64                `json:"stop_loss,omitempty"`
+	TakeProfit               float64                `json:"take_profit,omitempty"`
+	RequestedStopLoss        float64                `json:"requested_stop_loss,omitempty"`
+	RequestedTakeProfit      float64                `json:"requested_take_profit,omitempty"`
+	EffectiveStopLoss        float64                `json:"effective_stop_loss,omitempty"`
+	EffectiveTakeProfit      float64                `json:"effective_take_profit,omitempty"`
+	ExchangeFullTakeProfit   float64                `json:"exchange_full_take_profit,omitempty"`
+	ExchangeFullTPMode       string                 `json:"exchange_full_tp_mode,omitempty"`
+	TakeProfitRatio          float64                `json:"take_profit_ratio,omitempty"`
+	TakeProfitPercent        float64                `json:"take_profit_percent,omitempty"`
+	NetRR                    float64                `json:"net_rr,omitempty"`
+	ProfileName              string                 `json:"profile_name,omitempty"`
+	FeeSlippageReserveUSD    float64                `json:"fee_slippage_reserve_usd,omitempty"`
+	TotalRiskUSD             float64                `json:"total_risk_usd,omitempty"`
+	TotalRiskPct             float64                `json:"total_risk_pct,omitempty"`
+	RiskCapReason            string                 `json:"risk_cap_reason,omitempty"`
+	NewStopLoss              float64                `json:"new_stop_loss,omitempty"`
+	NewTakeProfit            float64                `json:"new_take_profit,omitempty"`
+	ClosePercentage          float64                `json:"close_percentage,omitempty"`
+	Confidence               int                    `json:"confidence,omitempty"`
+	RiskUSD                  float64                `json:"risk_usd,omitempty"`
+	Reasoning                string                 `json:"reasoning"`
+	InvalidationPrice        float64                `json:"invalidation_price,omitempty"`
+	InvalidationCondition    string                 `json:"invalidation_condition,omitempty"`
+	MinHoldMinutes           int                    `json:"min_hold_minutes,omitempty"`
+	TrancheIndex             int                    `json:"tranche_index,omitempty"`
+	RiskNormalization        *OpenRiskNormalization `json:"risk_normalization,omitempty"`
 }
 
 // FullDecision AI的完整决策
@@ -283,6 +314,74 @@ type LossModeState struct {
 	MaxPositions    int       `json:"max_positions,omitempty"`
 	DailyOpenLimit  int       `json:"daily_open_limit,omitempty"`
 	MinConfidence   int       `json:"min_confidence,omitempty"`
+}
+
+// StrategyRiskPolicy 是 ATR/ADX/profile 风控的运行时策略。
+type StrategyRiskPolicy struct {
+	Legacy                   bool
+	Enabled                  bool
+	RollbackLegacyValidation bool
+	FeeSlippagePct           float64
+	DefaultMinNetRR          float64
+	ADXTimeframe             string
+	Profiles                 []InstrumentProfile
+	SafeMode                 StrategySafeMode
+}
+
+type StrategySafeMode struct {
+	MaxRiskPct      float64
+	MaxPositions    int
+	DailyOpenLimit  int
+	RequireHours    int
+	MinProfitFactor float64
+}
+
+type InstrumentProfile struct {
+	Name                string
+	Symbols             []string
+	MatchQuote          string
+	MatchType           string
+	MinStopPct          float64
+	FallbackStopPct     float64
+	ATRMultiplier       float64
+	ATRTimeframe        string
+	MinNetRR            float64
+	MaxRiskPct          float64
+	RegimeRiskCapPct    float64
+	MinADX              float64
+	AllowLong           bool
+	AllowShort          bool
+	MaxSameSideHighCorr int
+	MaxSameSideLossPct  float64
+	MinOrderValueUSDT   float64
+	ExchangeFullTPMode  string
+	ExchangeFullTPMinRR float64
+}
+
+type OpenRiskNormalization struct {
+	ProfileName             string   `json:"profile_name,omitempty"`
+	ATRTimeframe            string   `json:"atr_timeframe,omitempty"`
+	ATRValue                float64  `json:"atr_value,omitempty"`
+	RequestedStopLoss       float64  `json:"requested_stop_loss,omitempty"`
+	RequestedTakeProfit     float64  `json:"requested_take_profit,omitempty"`
+	EffectiveStopLoss       float64  `json:"effective_stop_loss,omitempty"`
+	EffectiveTakeProfit     float64  `json:"effective_take_profit,omitempty"`
+	ExchangeFullTakeProfit  float64  `json:"exchange_full_take_profit,omitempty"`
+	ExchangeFullTPMode      string   `json:"exchange_full_tp_mode,omitempty"`
+	StopDistanceRatio       float64  `json:"stop_distance_ratio,omitempty"`
+	StopDistancePct         float64  `json:"stop_distance_pct,omitempty"`
+	StopDistancePercent     float64  `json:"stop_distance_percent,omitempty"`
+	MinStopDistanceRatio    float64  `json:"min_stop_distance_ratio,omitempty"`
+	MinTakeProfitRatio      float64  `json:"min_take_profit_ratio,omitempty"`
+	MinNetRR                float64  `json:"min_net_rr,omitempty"`
+	TakeProfitRatio         float64  `json:"take_profit_ratio,omitempty"`
+	TakeProfitPercent       float64  `json:"take_profit_percent,omitempty"`
+	NetRR                   float64  `json:"net_rr,omitempty"`
+	RewrittenStop           bool     `json:"rewritten_stop,omitempty"`
+	RewrittenTakeProfit     bool     `json:"rewritten_take_profit,omitempty"`
+	RewrittenExchangeFullTP bool     `json:"rewritten_exchange_full_tp,omitempty"`
+	DegradedATR             bool     `json:"degraded_atr,omitempty"`
+	Reasons                 []string `json:"reasons,omitempty"`
 }
 
 // EvaluationResult 评估结果

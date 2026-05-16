@@ -75,6 +75,9 @@ type MidTermData15m struct {
 	RSI7Values  []float64
 	RSI14Values []float64
 	ADXValues   []float64 // 新增：ADX序列
+	ADXLegacyDX []float64 // 旧DX-like近似值，用于report-only对比
+	DIPlus      []float64 // 新增：DI+序列
+	DIMinus     []float64 // 新增：DI-序列
 	ATRValues   []float64
 }
 
@@ -92,6 +95,9 @@ type MidTermData1h struct {
 	RSI7Values  []float64
 	RSI14Values []float64
 	ADXValues   []float64
+	ADXLegacyDX []float64
+	DIPlus      []float64
+	DIMinus     []float64
 	ATRValues   []float64
 }
 
@@ -110,6 +116,7 @@ type LongerTermData struct {
 	MACDHist       []float64 // 新增：MACD柱状图序列
 	RSI14Values    []float64
 	ADXValues      []float64 // 新增：ADX序列
+	ADXLegacyDX    []float64 // 旧DX-like近似值，用于report-only对比
 	DIPlus         []float64 // 新增：DI+序列
 	DIMinus        []float64 // 新增：DI-序列
 	BollingerUpper float64   // 新增：布林带上轨
@@ -127,6 +134,16 @@ type Kline struct {
 	Close     float64
 	Volume    float64
 	CloseTime int64
+}
+
+type DirectionalIndicatorSnapshot struct {
+	Timeframe    string
+	ADX          float64
+	DIPlus       float64
+	DIMinus      float64
+	ATR          float64
+	Source       string
+	LegacyDXLike float64
 }
 
 // 缓存结构（避免重复请求）
@@ -482,13 +499,19 @@ func calculateATR(klines []Kline, period int) float64 {
 	return atr
 }
 
-// calculateADX 计算ADX和方向指标（新增）
+// calculateADX 计算Wilder ADX和方向指标。
 func calculateADX(klines []Kline, period int) (adx, diPlus, diMinus float64) {
-	if len(klines) < period*2 {
+	adxSeries, diPlusSeries, diMinusSeries := calculateADXSeries(klines, period)
+	if len(adxSeries) == 0 {
 		return 0, 0, 0
 	}
+	return GetLastValue(adxSeries), GetLastValue(diPlusSeries), GetLastValue(diMinusSeries)
+}
 
-	// 计算+DM, -DM, TR序列
+func calculateADXSeries(klines []Kline, period int) (adxSeries, diPlusSeries, diMinusSeries []float64) {
+	if period <= 0 || len(klines) < period*2 {
+		return nil, nil, nil
+	}
 	plusDM := make([]float64, len(klines))
 	minusDM := make([]float64, len(klines))
 	tr := make([]float64, len(klines))
@@ -518,38 +541,117 @@ func calculateADX(klines []Kline, period int) (adx, diPlus, diMinus float64) {
 		}
 	}
 
-	// 平滑计算（Wilder平滑）
 	smoothedPlusDM := 0.0
 	smoothedMinusDM := 0.0
 	smoothedTR := 0.0
 
-	// 初始值
 	for i := 1; i <= period; i++ {
 		smoothedPlusDM += plusDM[i]
 		smoothedMinusDM += minusDM[i]
 		smoothedTR += tr[i]
 	}
 
-	// Wilder平滑
+	adxSeries = make([]float64, 0, len(klines))
+	diPlusSeries = make([]float64, 0, len(klines))
+	diMinusSeries = make([]float64, 0, len(klines))
+	dxValues := make([]float64, 0, len(klines))
+
+	calcDIAndDX := func() (float64, float64, float64) {
+		if smoothedTR <= 0 {
+			return 0, 0, 0
+		}
+		diPlus := (smoothedPlusDM / smoothedTR) * 100
+		diMinus := (smoothedMinusDM / smoothedTR) * 100
+		diSum := diPlus + diMinus
+		if diSum <= 0 {
+			return diPlus, diMinus, 0
+		}
+		return diPlus, diMinus, math.Abs(diPlus-diMinus) / diSum * 100
+	}
+
+	diPlus, diMinus, dx := calcDIAndDX()
+	dxValues = append(dxValues, dx)
+	diPlusByIndex := map[int]float64{period: diPlus}
+	diMinusByIndex := map[int]float64{period: diMinus}
+
+	for i := period + 1; i < len(klines); i++ {
+		smoothedPlusDM = smoothedPlusDM - (smoothedPlusDM / float64(period)) + plusDM[i]
+		smoothedMinusDM = smoothedMinusDM - (smoothedMinusDM / float64(period)) + minusDM[i]
+		smoothedTR = smoothedTR - (smoothedTR / float64(period)) + tr[i]
+		diPlus, diMinus, dx = calcDIAndDX()
+		dxValues = append(dxValues, dx)
+		diPlusByIndex[i] = diPlus
+		diMinusByIndex[i] = diMinus
+	}
+
+	if len(dxValues) < period {
+		return nil, nil, nil
+	}
+
+	adx := 0.0
+	for i := 0; i < period; i++ {
+		adx += dxValues[i]
+	}
+	adx /= float64(period)
+
+	firstADXIndex := period*2 - 1
+	for i := firstADXIndex; i < len(klines); i++ {
+		dxIndex := i - period
+		if dxIndex >= period {
+			adx = ((adx * float64(period-1)) + dxValues[dxIndex]) / float64(period)
+		}
+		adxSeries = append(adxSeries, adx)
+		diPlusSeries = append(diPlusSeries, diPlusByIndex[i])
+		diMinusSeries = append(diMinusSeries, diMinusByIndex[i])
+	}
+
+	return adxSeries, diPlusSeries, diMinusSeries
+}
+
+func calculateDXLike(klines []Kline, period int) (adx, diPlus, diMinus float64) {
+	if len(klines) < period*2 {
+		return 0, 0, 0
+	}
+	plusDM := make([]float64, len(klines))
+	minusDM := make([]float64, len(klines))
+	tr := make([]float64, len(klines))
+	for i := 1; i < len(klines); i++ {
+		high := klines[i].High
+		low := klines[i].Low
+		prevHigh := klines[i-1].High
+		prevLow := klines[i-1].Low
+		prevClose := klines[i-1].Close
+		tr[i] = math.Max(high-low, math.Max(math.Abs(high-prevClose), math.Abs(low-prevClose)))
+		upMove := high - prevHigh
+		downMove := prevLow - low
+		if upMove > downMove && upMove > 0 {
+			plusDM[i] = upMove
+		}
+		if downMove > upMove && downMove > 0 {
+			minusDM[i] = downMove
+		}
+	}
+	smoothedPlusDM := 0.0
+	smoothedMinusDM := 0.0
+	smoothedTR := 0.0
+	for i := 1; i <= period; i++ {
+		smoothedPlusDM += plusDM[i]
+		smoothedMinusDM += minusDM[i]
+		smoothedTR += tr[i]
+	}
 	for i := period + 1; i < len(klines); i++ {
 		smoothedPlusDM = smoothedPlusDM - (smoothedPlusDM / float64(period)) + plusDM[i]
 		smoothedMinusDM = smoothedMinusDM - (smoothedMinusDM / float64(period)) + minusDM[i]
 		smoothedTR = smoothedTR - (smoothedTR / float64(period)) + tr[i]
 	}
-
-	// 计算+DI和-DI
 	if smoothedTR > 0 {
 		diPlus = (smoothedPlusDM / smoothedTR) * 100
 		diMinus = (smoothedMinusDM / smoothedTR) * 100
 	}
-
-	// 计算DX和ADX
 	diSum := diPlus + diMinus
 	if diSum > 0 {
-		dx := math.Abs(diPlus-diMinus) / diSum * 100
-		adx = dx // 简化：直接使用DX作为ADX（完整版需要再平滑一次）
+		adx = math.Abs(diPlus-diMinus) / diSum * 100
 	}
-
 	return adx, diPlus, diMinus
 }
 
@@ -781,6 +883,9 @@ func calculateMidTermSeries15mEnhanced(klines []Kline) *MidTermData15m {
 		RSI7Values:  make([]float64, 0, 10),
 		RSI14Values: make([]float64, 0, 10),
 		ADXValues:   make([]float64, 0, 10),
+		ADXLegacyDX: make([]float64, 0, 10),
+		DIPlus:      make([]float64, 0, 10),
+		DIMinus:     make([]float64, 0, 10),
 		ATRValues:   make([]float64, 0, 10),
 	}
 
@@ -824,8 +929,12 @@ func calculateMidTermSeries15mEnhanced(klines []Kline) *MidTermData15m {
 		}
 
 		if i >= 28 {
-			adx, _, _ := calculateADX(klines[:i+1], 14)
+			adx, diPlus, diMinus := calculateADX(klines[:i+1], 14)
+			legacyADX, _, _ := calculateDXLike(klines[:i+1], 14)
 			data.ADXValues = append(data.ADXValues, adx)
+			data.ADXLegacyDX = append(data.ADXLegacyDX, legacyADX)
+			data.DIPlus = append(data.DIPlus, diPlus)
+			data.DIMinus = append(data.DIMinus, diMinus)
 		}
 	}
 
@@ -847,6 +956,9 @@ func calculateMidTermSeries1hEnhanced(klines []Kline) *MidTermData1h {
 		RSI7Values:  make([]float64, 0, 10),
 		RSI14Values: make([]float64, 0, 10),
 		ADXValues:   make([]float64, 0, 10),
+		ADXLegacyDX: make([]float64, 0, 10),
+		DIPlus:      make([]float64, 0, 10),
+		DIMinus:     make([]float64, 0, 10),
 		ATRValues:   make([]float64, 0, 10),
 	}
 
@@ -890,8 +1002,12 @@ func calculateMidTermSeries1hEnhanced(klines []Kline) *MidTermData1h {
 		}
 
 		if i >= 28 {
-			adx, _, _ := calculateADX(klines[:i+1], 14)
+			adx, diPlus, diMinus := calculateADX(klines[:i+1], 14)
+			legacyADX, _, _ := calculateDXLike(klines[:i+1], 14)
 			data.ADXValues = append(data.ADXValues, adx)
+			data.ADXLegacyDX = append(data.ADXLegacyDX, legacyADX)
+			data.DIPlus = append(data.DIPlus, diPlus)
+			data.DIMinus = append(data.DIMinus, diMinus)
 		}
 	}
 
@@ -906,6 +1022,7 @@ func calculateLongerTermDataEnhanced(klines []Kline) *LongerTermData {
 		MACDHist:    make([]float64, 0, 10),
 		RSI14Values: make([]float64, 0, 10),
 		ADXValues:   make([]float64, 0, 10),
+		ADXLegacyDX: make([]float64, 0, 10),
 		DIPlus:      make([]float64, 0, 10),
 		DIMinus:     make([]float64, 0, 10),
 	}
@@ -960,7 +1077,9 @@ func calculateLongerTermDataEnhanced(klines []Kline) *LongerTermData {
 		}
 		if i >= 28 {
 			adx, diPlus, diMinus := calculateADX(klines[:i+1], 14)
+			legacyADX, _, _ := calculateDXLike(klines[:i+1], 14)
 			data.ADXValues = append(data.ADXValues, adx)
+			data.ADXLegacyDX = append(data.ADXLegacyDX, legacyADX)
 			data.DIPlus = append(data.DIPlus, diPlus)
 			data.DIMinus = append(data.DIMinus, diMinus)
 		}
@@ -1266,6 +1385,76 @@ func GetMarketState(data *Data) (state string, confidence int) {
 	}
 
 	return state, confidence
+}
+
+func GetATR(data *Data, timeframe string) float64 {
+	if data == nil {
+		return 0
+	}
+	switch strings.ToLower(strings.TrimSpace(timeframe)) {
+	case "15m":
+		if data.MidTermSeries15m != nil {
+			return GetLastValue(data.MidTermSeries15m.ATRValues)
+		}
+	case "4h":
+		if data.LongerTermContext != nil {
+			return data.LongerTermContext.ATR14
+		}
+	default:
+		if data.MidTermSeries1h != nil {
+			return GetLastValue(data.MidTermSeries1h.ATRValues)
+		}
+	}
+	return 0
+}
+
+func GetDirectionalSnapshot(data *Data, timeframe string) DirectionalIndicatorSnapshot {
+	tf := strings.ToLower(strings.TrimSpace(timeframe))
+	if tf == "" {
+		tf = "1h"
+	}
+	snapshot := DirectionalIndicatorSnapshot{Timeframe: tf}
+	if data == nil {
+		snapshot.Source = "missing_data"
+		return snapshot
+	}
+	switch tf {
+	case "15m":
+		snapshot.Source = "15m"
+		if data.MidTermSeries15m != nil {
+			snapshot.ADX = GetLastValue(data.MidTermSeries15m.ADXValues)
+			snapshot.LegacyDXLike = GetLastValue(data.MidTermSeries15m.ADXLegacyDX)
+			snapshot.DIPlus = GetLastValue(data.MidTermSeries15m.DIPlus)
+			snapshot.DIMinus = GetLastValue(data.MidTermSeries15m.DIMinus)
+			snapshot.ATR = GetLastValue(data.MidTermSeries15m.ATRValues)
+		}
+	case "4h":
+		snapshot.Source = "4h"
+		snapshot.ADX = data.CurrentADX
+		snapshot.DIPlus = data.CurrentDIPlus
+		snapshot.DIMinus = data.CurrentDIMinus
+		if data.LongerTermContext != nil {
+			snapshot.ATR = data.LongerTermContext.ATR14
+			snapshot.ADX = GetLastValue(data.LongerTermContext.ADXValues)
+			snapshot.LegacyDXLike = GetLastValue(data.LongerTermContext.ADXLegacyDX)
+			snapshot.DIPlus = GetLastValue(data.LongerTermContext.DIPlus)
+			snapshot.DIMinus = GetLastValue(data.LongerTermContext.DIMinus)
+		}
+	default:
+		snapshot.Timeframe = "1h"
+		snapshot.Source = "1h"
+		if data.MidTermSeries1h != nil {
+			snapshot.ADX = GetLastValue(data.MidTermSeries1h.ADXValues)
+			snapshot.LegacyDXLike = GetLastValue(data.MidTermSeries1h.ADXLegacyDX)
+			snapshot.DIPlus = GetLastValue(data.MidTermSeries1h.DIPlus)
+			snapshot.DIMinus = GetLastValue(data.MidTermSeries1h.DIMinus)
+			snapshot.ATR = GetLastValue(data.MidTermSeries1h.ATRValues)
+		}
+	}
+	if snapshot.ADX <= 0 && snapshot.DIPlus <= 0 && snapshot.DIMinus <= 0 {
+		snapshot.Source += "_missing"
+	}
+	return snapshot
 }
 
 // DetectDivergence 检测MACD背离（新增）

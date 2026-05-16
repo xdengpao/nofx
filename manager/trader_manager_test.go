@@ -129,6 +129,63 @@ func TestAddTraderWithFrequency_PassesPolicy(t *testing.T) {
 	}
 }
 
+func TestAddTraderWithPolicies_PassesStrategyRiskPolicy(t *testing.T) {
+	tm := NewTraderManager()
+	defer tm.StopOrderTracking()
+
+	cfg := makeTestTraderConfig("risk-trader", "Risk Trader")
+	frequency := config.TradingFrequencyProfile{
+		Mode:                    config.TradingFrequencyModeSafe,
+		EffectiveMode:           config.TradingFrequencyModeSafe,
+		AnalysisIntervalMinutes: 15,
+		PromptCandidateLimit:    8,
+	}
+	strategyRisk := config.StrategyRiskProfile{
+		Enabled:         true,
+		FeeSlippagePct:  0.002,
+		DefaultMinNetRR: 2.5,
+		ADXTimeframe:    "1h",
+		Profiles: []config.InstrumentProfileProfile{
+			{
+				Name:                "btc_eth",
+				Symbols:             []string{"BTCUSDT", "ETHUSDT"},
+				MinStopPct:          0.01,
+				FallbackStopPct:     0.015,
+				ATRMultiplier:       1.5,
+				ATRTimeframe:        "1h",
+				MinNetRR:            2.5,
+				MaxRiskPct:          0.005,
+				AllowLong:           true,
+				AllowShort:          true,
+				ExchangeFullTPMode:  config.StrategyRiskTPModeAlgorithmicFull,
+				ExchangeFullTPMinRR: 2.5,
+			},
+		},
+	}
+	if err := tm.AddTraderWithPolicies(cfg, "", 10.0, 20.0, 30, defaultLeverage, frequency, strategyRisk); err != nil {
+		t.Fatalf("添加带策略风控policy的trader失败: %v", err)
+	}
+	at, err := tm.GetTrader("risk-trader")
+	if err != nil {
+		t.Fatalf("获取trader失败: %v", err)
+	}
+	status := at.GetStatus()
+	summary, ok := status["strategy_risk_policy"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("status应输出strategy_risk_policy: %+v", status)
+	}
+	if summary["enabled"] != true || summary["adx_timeframe"] != "1h" || summary["profile_count"] != 1 {
+		t.Fatalf("strategy_risk_policy派生错误: %+v", summary)
+	}
+	defaults, ok := summary["profile_defaults"].([]map[string]interface{})
+	if !ok || len(defaults) != 1 {
+		t.Fatalf("status应输出profile默认参数: %+v", summary)
+	}
+	if defaults[0]["exchange_full_tp_mode"] != config.StrategyRiskTPModeAlgorithmicFull || defaults[0]["min_stop_pct"] != 0.01 {
+		t.Fatalf("profile默认参数摘要错误: %+v", defaults[0])
+	}
+}
+
 // --- 14.1: 并发安全性测试 ---
 
 func TestConcurrentAddTraders(t *testing.T) {

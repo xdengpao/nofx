@@ -39,7 +39,13 @@ func (at *AutoTrader) setProtectiveOrdersWithRecord(d *decision.Decision, side s
 		actionRecord.HighRiskReason = "止损保护无法建立，仓位可能裸露"
 	}
 
-	result.takeProfitErr = at.trader.SetTakeProfit(d.Symbol, positionSide, quantity, d.TakeProfit)
+	takeProfitPrice := d.TakeProfit
+	if d.ExchangeFullTakeProfit > 0 {
+		takeProfitPrice = d.ExchangeFullTakeProfit
+		actionRecord.ExchangeFullTakeProfit = d.ExchangeFullTakeProfit
+		actionRecord.ExchangeFullTPMode = d.ExchangeFullTPMode
+	}
+	result.takeProfitErr = at.trader.SetTakeProfit(d.Symbol, positionSide, quantity, takeProfitPrice)
 	result.takeProfitSet = result.takeProfitErr == nil
 	actionRecord.TakeProfitSet = boolPtr(result.takeProfitSet)
 	if result.takeProfitErr != nil {

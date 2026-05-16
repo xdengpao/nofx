@@ -91,6 +91,106 @@ func TestEvaluateOpenGate_ShortConfidenceRequirement(t *testing.T) {
 	}
 }
 
+func TestEvaluateOpenGate_ADXRegimeBlocksLowADX(t *testing.T) {
+	ctx := newTestContext()
+	policy := &StrategyRiskPolicy{
+		Enabled:      true,
+		ADXTimeframe: "1h",
+		Profiles: []InstrumentProfile{{
+			Name:       "btc_eth",
+			Symbols:    []string{"ETHUSDT"},
+			MinADX:     20,
+			AllowLong:  true,
+			AllowShort: true,
+		}},
+	}
+	data := newTestMarketData(100)
+	data.MidTermSeries1h = &market.MidTermData1h{
+		ADXValues: []float64{18},
+		DIPlus:    []float64{25},
+		DIMinus:   []float64{10},
+		ATRValues: []float64{2},
+	}
+	result := EvaluateOpenGate(OpenGateInput{
+		Decision:        &Decision{Symbol: "ETHUSDT", Action: "open_long", Confidence: 95},
+		Context:         ctx,
+		MarketData:      data,
+		StrategyPolicy:  policy,
+		StrategyProfile: ResolveInstrumentProfile("ETHUSDT", policy),
+	})
+	if result.Allowed {
+		t.Fatalf("1h ADX低于阈值应阻止开仓: %+v", result)
+	}
+	if result.Diagnostics["adx_regime"] == nil {
+		t.Fatalf("应输出ADX诊断: %+v", result)
+	}
+}
+
+func TestEvaluateOpenGate_ADXRegimeBlocksWrongDI(t *testing.T) {
+	ctx := newTestContext()
+	policy := &StrategyRiskPolicy{
+		Enabled:      true,
+		ADXTimeframe: "1h",
+		Profiles: []InstrumentProfile{{
+			Name:       "btc_eth",
+			Symbols:    []string{"ETHUSDT"},
+			MinADX:     20,
+			AllowLong:  true,
+			AllowShort: true,
+		}},
+	}
+	data := newTestMarketData(100)
+	data.MidTermSeries1h = &market.MidTermData1h{
+		ADXValues: []float64{30},
+		DIPlus:    []float64{12},
+		DIMinus:   []float64{28},
+		ATRValues: []float64{2},
+	}
+	result := EvaluateOpenGate(OpenGateInput{
+		Decision:        &Decision{Symbol: "ETHUSDT", Action: "open_long", Confidence: 95},
+		Context:         ctx,
+		MarketData:      data,
+		StrategyPolicy:  policy,
+		StrategyProfile: ResolveInstrumentProfile("ETHUSDT", policy),
+	})
+	if result.Allowed {
+		t.Fatalf("ADX趋势中DI方向错误应阻止开仓: %+v", result)
+	}
+}
+
+func TestEvaluateOpenGate_ADXReportOnlyPenalizes(t *testing.T) {
+	ctx := newTestContext()
+	policy := &StrategyRiskPolicy{
+		Enabled:                  true,
+		RollbackLegacyValidation: true,
+		ADXTimeframe:             "1h",
+		Profiles: []InstrumentProfile{{
+			Name:       "btc_eth",
+			Symbols:    []string{"ETHUSDT"},
+			MinADX:     20,
+			AllowLong:  true,
+			AllowShort: true,
+		}},
+	}
+	data := newTestMarketData(100)
+	data.MidTermSeries1h = &market.MidTermData1h{
+		ADXValues: []float64{18},
+		DIPlus:    []float64{25},
+		DIMinus:   []float64{10},
+		ATRValues: []float64{2},
+	}
+	result := EvaluateOpenGate(OpenGateInput{
+		Decision:        &Decision{Symbol: "ETHUSDT", Action: "open_long", Confidence: 95},
+		Context:         ctx,
+		MarketData:      data,
+		StrategyPolicy:  policy,
+		StrategyProfile: ResolveInstrumentProfile("ETHUSDT", policy),
+	})
+	if !result.Allowed || result.State != "penalize" {
+		t.Fatalf("rollback/report-only ADX gate应只降权不阻止: %+v", result)
+	}
+}
+
 func TestEvaluateOpenGate_CorrelationConcentrationBlocks(t *testing.T) {
 	ctx := newTestContext()
 	ctx.Positions = []PositionInfo{
@@ -341,6 +441,32 @@ func TestEvaluateOpenGate_LosingSameSidePositionBlocksAdd(t *testing.T) {
 	})
 	if result.Allowed {
 		t.Fatalf("已有同向浮亏持仓时应拒绝继续加同向仓: %+v", result)
+	}
+}
+
+func TestEvaluateOpenGate_LossModeBlocksSecondSameSideHighCorrShort(t *testing.T) {
+	ctx := newTestContext()
+	ctx.LossMode = &LossModeState{Active: true, MaxRiskPerTrade: 0.005}
+	ctx.Positions = []PositionInfo{
+		{Symbol: "ETHUSDT", Side: "short", UnrealizedPnLPct: 0.5},
+	}
+	ctx.CorrelationMap = map[string]*CorrelationData{
+		"ETHUSDT": {IsHighCorr: true},
+		"BCHUSDT": {IsHighCorr: true},
+	}
+	profile := InstrumentProfile{Name: "major_alt", MaxSameSideHighCorr: 2, MaxSameSideLossPct: 0.02}
+
+	result := EvaluateOpenGate(OpenGateInput{
+		Decision:        &Decision{Symbol: "BCHUSDT", Action: "open_short", Confidence: 95},
+		Context:         ctx,
+		MarketData:      newTestMarketData(100),
+		StrategyProfile: profile,
+	})
+	if result.Allowed {
+		t.Fatalf("亏损模式下第二个同向高相关空单应被阻止: %+v", result)
+	}
+	if result.Diagnostics["correlation_concentration"] == nil {
+		t.Fatalf("应输出相关性诊断: %+v", result)
 	}
 }
 

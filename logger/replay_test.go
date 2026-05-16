@@ -137,6 +137,143 @@ func TestBuildReplayReport_RejectionBuckets(t *testing.T) {
 	}
 }
 
+func TestBuildReplayReport_StrategyDiseaseBucketsAndRMultiple(t *testing.T) {
+	now := time.Date(2026, 5, 6, 14, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{
+		{
+			Timestamp: now,
+			Decisions: []DecisionAction{{
+				Action:                 "open_long",
+				Symbol:                 "BTCUSDT",
+				Quantity:               1,
+				Price:                  100,
+				Success:                true,
+				Timestamp:              now,
+				ProfileName:            "btc_eth",
+				RequestedStopLoss:      99.97,
+				EffectiveStopLoss:      98,
+				RequestedTakeProfit:    100.07,
+				EffectiveTakeProfit:    104,
+				ExchangeFullTakeProfit: 106,
+				ExchangeFullTPMode:     "algorithmic_full",
+				StopDistanceRatio:      0.02,
+				TakeProfitRatio:        0.06,
+				RiskNormalization: map[string]any{
+					"rewritten_stop_loss":        true,
+					"rewritten_take_profit":      true,
+					"rewritten_exchange_full_tp": true,
+				},
+				GateDiagnostics: map[string]any{
+					"adx_regime": map[string]any{
+						"gate": "low_adx",
+						"adx":  14.5,
+					},
+					"correlation_concentration": map[string]any{
+						"same_side_high_corr": 1,
+					},
+				},
+			}},
+		},
+		{
+			Timestamp: now.Add(time.Hour),
+			Decisions: []DecisionAction{{
+				Action:      "close_long",
+				Symbol:      "BTCUSDT",
+				Quantity:    1,
+				Price:       104,
+				Success:     true,
+				Timestamp:   now.Add(time.Hour),
+				CloseSource: "take_profit",
+				Reasoning:   "止盈成交",
+			}},
+		},
+	}
+
+	report := BuildReplayReport(records, true, true)
+	disease := report.StrategyDisease
+	if disease.MicroStopCount != 1 || disease.MicroTPCount != 1 {
+		t.Fatalf("微止损/微止盈诊断错误: %+v", disease)
+	}
+	if disease.RewrittenStopCount != 1 || disease.RewrittenTPCount != 1 || disease.RewrittenExchangeFullTPCount != 1 {
+		t.Fatalf("重写计数错误: %+v", disease)
+	}
+	if disease.LowADXEntryCount != 1 || disease.SameSideCorrelationCount != 1 {
+		t.Fatalf("ADX/相关性病因计数错误: %+v", disease)
+	}
+	if disease.PrematureFullTPCount != 1 {
+		t.Fatalf("应识别未到algorithmic full TP的提前整仓止盈: %+v", disease)
+	}
+	if disease.RMultipleStats.Count != 1 || disease.RMultipleStats.Average < 1.99 || disease.RMultipleStats.Average > 2.01 {
+		t.Fatalf("R multiple统计错误: %+v", disease.RMultipleStats)
+	}
+	if disease.ByProfile["btc_eth"].MicroStopCount != 1 || disease.ByCloseReason["take_profit"].PrematureFullTPCount != 1 {
+		t.Fatalf("分组病因统计错误: by_profile=%+v by_close=%+v", disease.ByProfile, disease.ByCloseReason)
+	}
+}
+
+func TestBuildReplayReport_StrategyDiseaseRejectedBuckets(t *testing.T) {
+	now := time.Date(2026, 5, 6, 14, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{{
+		Timestamp: now,
+		Decisions: []DecisionAction{
+			{Action: "open_rejected", Symbol: "ETHUSDT", Success: false, Error: "ETHUSDT 1h ADX 14.5低于profile阈值25.0，禁止趋势开仓", Timestamp: now},
+			{Action: "open_rejected", Symbol: "BCHUSDT", Success: false, Error: "BCHUSDT 1h ADX 31.2但DI方向与开仓方向不一致", Timestamp: now},
+			{Action: "open_rejected", Symbol: "SOLUSDT", Success: false, Error: "已有同向高相关持仓集中，禁止继续叠加风险", Timestamp: now},
+			{Action: "open_rejected", Symbol: "XAGUSDT", Success: false, Error: "profile不允许当前品种方向", Timestamp: now},
+		},
+	}}
+
+	report := BuildReplayReport(records, true, true)
+	if report.StrategyDisease.RejectedByADXCount != 2 {
+		t.Fatalf("ADX拒绝计数错误: %+v", report.StrategyDisease)
+	}
+	if report.StrategyDisease.RejectedByCorrelationCount != 1 || report.StrategyDisease.RejectedByProfileCount != 1 {
+		t.Fatalf("相关性/profile拒绝计数错误: %+v", report.StrategyDisease)
+	}
+	if report.RejectionBuckets["adx"] != 1 || report.RejectionBuckets["counter_di"] != 1 || report.RejectionBuckets["correlation"] != 1 || report.RejectionBuckets["profile"] != 1 {
+		t.Fatalf("拒绝桶分类错误: %+v", report.RejectionBuckets)
+	}
+}
+
+func TestBuildReplayReport_ClassifiesExchangeFullTPCloseReason(t *testing.T) {
+	now := time.Date(2026, 5, 6, 14, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{
+		{
+			Timestamp: now,
+			Decisions: []DecisionAction{{
+				Action:                 "open_long",
+				Symbol:                 "ETHUSDT",
+				Quantity:               1,
+				Price:                  100,
+				Success:                true,
+				ProfileName:            "btc_eth",
+				EffectiveStopLoss:      98,
+				ExchangeFullTakeProfit: 106,
+				Timestamp:              now,
+			}},
+		},
+		{
+			Timestamp: now.Add(time.Hour),
+			Decisions: []DecisionAction{{
+				Action:      "auto_close_long",
+				Symbol:      "ETHUSDT",
+				Quantity:    1,
+				Price:       106,
+				Success:     true,
+				CloseSource: "order_tracker",
+				Reasoning:   "EXCHANGE_FULL_TP",
+				Timestamp:   now.Add(time.Hour),
+			}},
+		},
+	}
+
+	report := BuildReplayReport(records, true, true)
+	group := report.StrategyDisease.ByCloseReason["exchange_full_tp"]
+	if group == nil || group.TradeCount != 1 || group.RMultipleStats.Count != 1 {
+		t.Fatalf("交易所整仓TP应单独归类: %+v", report.StrategyDisease.ByCloseReason)
+	}
+}
+
 func TestAttachExchangeCloseSnapshots(t *testing.T) {
 	now := time.Date(2026, 5, 6, 14, 0, 0, 0, time.UTC)
 	records := []*DecisionRecord{{

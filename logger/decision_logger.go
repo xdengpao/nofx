@@ -142,6 +142,23 @@ type DecisionAction struct {
 	SizingAdjusted           bool                              `json:"sizing_adjusted,omitempty"`
 	SizingReason             string                            `json:"sizing_reason,omitempty"`
 	StopDistancePct          float64                           `json:"stop_distance_pct,omitempty"`
+	StopDistanceRatio        float64                           `json:"stop_distance_ratio,omitempty"`
+	StopDistancePercent      float64                           `json:"stop_distance_percent,omitempty"`
+	TakeProfitRatio          float64                           `json:"take_profit_ratio,omitempty"`
+	TakeProfitPercent        float64                           `json:"take_profit_percent,omitempty"`
+	RequestedStopLoss        float64                           `json:"requested_stop_loss,omitempty"`
+	RequestedTakeProfit      float64                           `json:"requested_take_profit,omitempty"`
+	EffectiveStopLoss        float64                           `json:"effective_stop_loss,omitempty"`
+	EffectiveTakeProfit      float64                           `json:"effective_take_profit,omitempty"`
+	ExchangeFullTakeProfit   float64                           `json:"exchange_full_take_profit,omitempty"`
+	ExchangeFullTPMode       string                            `json:"exchange_full_tp_mode,omitempty"`
+	NetRR                    float64                           `json:"net_rr,omitempty"`
+	ProfileName              string                            `json:"profile_name,omitempty"`
+	FeeSlippageReserveUSD    float64                           `json:"fee_slippage_reserve_usd,omitempty"`
+	TotalRiskUSD             float64                           `json:"total_risk_usd,omitempty"`
+	TotalRiskPct             float64                           `json:"total_risk_pct,omitempty"`
+	RiskCapReason            string                            `json:"risk_cap_reason,omitempty"`
+	RiskNormalization        interface{}                       `json:"risk_normalization,omitempty"`
 	EffectiveRiskPct         float64                           `json:"effective_risk_pct,omitempty"`
 	GateState                string                            `json:"gate_state,omitempty"`
 	GateReasons              []string                          `json:"gate_reasons,omitempty"`

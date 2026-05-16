@@ -27,11 +27,14 @@ const (
 
 // OpenGateInput 是开仓准入评估的输入。
 type OpenGateInput struct {
-	Decision         *Decision
-	Context          *Context
-	MarketData       *market.Data
-	ExistingRisk     float64
-	ExecutionQuality *logger.ExecutionQualityStats
+	Decision          *Decision
+	Context           *Context
+	MarketData        *market.Data
+	ExistingRisk      float64
+	ExecutionQuality  *logger.ExecutionQualityStats
+	StrategyProfile   InstrumentProfile
+	StrategyPolicy    *StrategyRiskPolicy
+	RiskNormalization *OpenRiskNormalization
 }
 
 // OpenGateResult 是结构化开仓准入结果。
@@ -71,10 +74,11 @@ func EvaluateOpenGate(input OpenGateInput) OpenGateResult {
 	}
 
 	applyDirectionalConfidenceGate(&result, input.Decision, input.MarketData)
+	applyADXRegimeGate(&result, input.Decision, input.MarketData, input.StrategyProfile, input.StrategyPolicy, input.RiskNormalization)
 	applyBTCMarketGate(&result, ctx)
 	applyBTCMultiTimeframeGate(&result, input.Decision, ctx)
-	applySameSideExposureGate(&result, input.Decision, ctx)
-	applyCorrelationConcentrationGate(&result, input.Decision, ctx)
+	applySameSideExposureGate(&result, input.Decision, ctx, input.StrategyProfile)
+	applyCorrelationConcentrationGate(&result, input.Decision, ctx, input.StrategyProfile, input.MarketData)
 	applyHighADXChaseGate(&result, input.Decision, input.MarketData)
 	applyExecutionQualityGate(&result, input.ExecutionQuality)
 	applyLossModeGate(&result, input.Decision, ctx)
@@ -158,6 +162,112 @@ func applyDirectionalConfidenceGate(result *OpenGateResult, d *Decision, data *m
 			result.penalize("标的处于上行结构，空单属于逆势")
 			result.requireMinConfidence(counterTrendMinConfidence, "逆势空单置信度要求")
 		}
+	}
+}
+
+func applyADXRegimeGate(result *OpenGateResult, d *Decision, data *market.Data, profile InstrumentProfile, policy *StrategyRiskPolicy, normalization *OpenRiskNormalization) {
+	if result == nil || d == nil || data == nil || policy == nil || policy.Legacy || !policy.Enabled {
+		return
+	}
+	if d.Action != "open_long" && d.Action != "open_short" {
+		return
+	}
+	if profile.Name == "" {
+		profile = ResolveInstrumentProfile(d.Symbol, policy)
+	}
+	timeframe := policy.ADXTimeframe
+	if timeframe == "" {
+		timeframe = "1h"
+	}
+	snapshot := market.GetDirectionalSnapshot(data, timeframe)
+	minADX := profile.MinADX
+	if minADX <= 0 {
+		minADX = 20
+	}
+	diagnostics := map[string]any{
+		"symbol":          d.Symbol,
+		"adx_timeframe":   snapshot.Timeframe,
+		"adx":             snapshot.ADX,
+		"di_plus":         snapshot.DIPlus,
+		"di_minus":        snapshot.DIMinus,
+		"atr":             snapshot.ATR,
+		"source":          snapshot.Source,
+		"legacy_dx_like":  snapshot.LegacyDXLike,
+		"profile":         profile.Name,
+		"profile_min_adx": minADX,
+	}
+	if normalization != nil {
+		diagnostics["stop_distance_ratio"] = normalization.StopDistanceRatio
+		diagnostics["net_rr"] = normalization.NetRR
+	}
+	active := StrategyRiskActive(policy)
+	reportOnlyReason := func(reason string) {
+		result.penalize(reason + "（report-only）")
+		result.addDiagnostics("adx_regime", diagnostics)
+	}
+	if snapshot.ADX <= 0 || snapshot.DIPlus <= 0 || snapshot.DIMinus <= 0 {
+		reason := fmt.Sprintf("%s %s ADX/DI数据缺失，拒绝趋势开仓", d.Symbol, timeframe)
+		diagnostics["gate"] = "missing"
+		if active {
+			result.blockWithDiagnostics(reason, "adx_regime", diagnostics)
+		} else {
+			reportOnlyReason(reason)
+		}
+		return
+	}
+
+	if snapshot.ADX < minADX {
+		reason := fmt.Sprintf("%s %s ADX %.1f低于profile阈值%.1f，禁止趋势开仓", d.Symbol, timeframe, snapshot.ADX, minADX)
+		diagnostics["gate"] = "low_adx"
+		if profile.RegimeRiskCapPct > 0 && result.EffectiveRisk > profile.RegimeRiskCapPct {
+			result.EffectiveRisk = profile.RegimeRiskCapPct
+		}
+		if active {
+			result.blockWithDiagnostics(reason, "adx_regime", diagnostics)
+		} else {
+			reportOnlyReason(reason)
+		}
+		return
+	}
+
+	diAligned := isDIAligned(d.Action, snapshot.DIPlus, snapshot.DIMinus)
+	if snapshot.ADX < 25 {
+		diagnostics["gate"] = "transition"
+		if !diAligned {
+			reason := fmt.Sprintf("%s %s ADX %.1f过渡区且DI方向不一致", d.Symbol, timeframe, snapshot.ADX)
+			if active {
+				result.blockWithDiagnostics(reason, "adx_regime", diagnostics)
+			} else {
+				reportOnlyReason(reason)
+			}
+			return
+		}
+		result.requireMinConfidence(counterTrendMinConfidence, "ADX过渡区趋势确认置信度要求")
+		return
+	}
+
+	if !diAligned {
+		reason := fmt.Sprintf("%s %s ADX %.1f但DI方向与开仓方向不一致", d.Symbol, timeframe, snapshot.ADX)
+		diagnostics["gate"] = "counter_di"
+		if active {
+			result.blockWithDiagnostics(reason, "adx_regime", diagnostics)
+		} else {
+			reportOnlyReason(reason)
+		}
+		return
+	}
+	diagnostics["gate"] = "aligned"
+	result.addDiagnostics("adx_regime", diagnostics)
+}
+
+func isDIAligned(action string, diPlus, diMinus float64) bool {
+	switch action {
+	case "open_long":
+		return diPlus > diMinus
+	case "open_short":
+		return diMinus > diPlus
+	default:
+		return true
 	}
 }
 
@@ -257,20 +367,32 @@ func applyBTCMultiTimeframeGate(result *OpenGateResult, d *Decision, ctx *Contex
 	}
 }
 
-func applySameSideExposureGate(result *OpenGateResult, d *Decision, ctx *Context) {
+func applySameSideExposureGate(result *OpenGateResult, d *Decision, ctx *Context, profile InstrumentProfile) {
 	side := decisionSide(d.Action)
 	if side == "" {
 		return
 	}
 	sameSidePositions := 0
 	sameSideHighBetaPositions := 0
+	lossBlockPct := losingSameSideBlockPnLPct
+	if profile.MaxSameSideLossPct > 0 {
+		lossBlockPct = -profile.MaxSameSideLossPct * 100
+	}
 	for _, pos := range ctx.Positions {
 		posSide := normalizePositionSide(pos.Side)
 		if posSide != side {
 			continue
 		}
-		if pos.UnrealizedPnLPct <= losingSameSideBlockPnLPct {
+		if pos.UnrealizedPnLPct <= lossBlockPct {
 			result.block(fmt.Sprintf("已有同向持仓 %s 浮亏 %.2f%%，禁止继续加同向仓", pos.Symbol, pos.UnrealizedPnLPct))
+			result.addDiagnostics("same_side_exposure", map[string]any{
+				"target_symbol": d.Symbol,
+				"existing":      pos.Symbol,
+				"side":          side,
+				"profile":       profile.Name,
+				"loss_pct":      pos.UnrealizedPnLPct,
+				"threshold_pct": lossBlockPct,
+			})
 			return
 		}
 		sameSidePositions++
@@ -282,7 +404,11 @@ func applySameSideExposureGate(result *OpenGateResult, d *Decision, ctx *Context
 	if d.Action != "open_long" || !isHighBetaAltcoin(d.Symbol) {
 		return
 	}
-	if sameSidePositions >= highBetaLongMaxSameSidePositions {
+	maxHighBeta := highBetaLongMaxSameSidePositions
+	if profile.MaxSameSideHighCorr > 0 {
+		maxHighBeta = profile.MaxSameSideHighCorr
+	}
+	if sameSidePositions >= maxHighBeta {
 		result.block("已有2个及以上同向多单，禁止继续叠加高 beta 多单")
 		return
 	}
@@ -292,7 +418,7 @@ func applySameSideExposureGate(result *OpenGateResult, d *Decision, ctx *Context
 	}
 }
 
-func applyCorrelationConcentrationGate(result *OpenGateResult, d *Decision, ctx *Context) {
+func applyCorrelationConcentrationGate(result *OpenGateResult, d *Decision, ctx *Context, profile InstrumentProfile, data *market.Data) {
 	targetCorr, ok := ctx.CorrelationMap[d.Symbol]
 	if !ok || !targetCorr.IsHighCorr {
 		return
@@ -302,22 +428,52 @@ func applyCorrelationConcentrationGate(result *OpenGateResult, d *Decision, ctx 
 		side = "short"
 	}
 	sameSideHighCorr := 0
+	existingSymbols := make([]string, 0)
 	for _, pos := range ctx.Positions {
 		if normalizePositionSide(pos.Side) != side {
 			continue
 		}
 		if corr, ok := ctx.CorrelationMap[pos.Symbol]; ok && corr.IsHighCorr {
 			sameSideHighCorr++
+			existingSymbols = append(existingSymbols, pos.Symbol)
 		}
 	}
-	if sameSideHighCorr >= 2 {
+	limit := maxSameSideHighCorr(ctx, profile, data)
+	diagnostics := map[string]any{
+		"target_symbol":       d.Symbol,
+		"existing_symbols":    existingSymbols,
+		"side":                side,
+		"profile":             profile.Name,
+		"same_side_high_corr": sameSideHighCorr,
+		"limit":               limit,
+		"target_is_high_corr": targetCorr.IsHighCorr,
+	}
+	if sameSideHighCorr >= limit {
+		result.addDiagnostics("correlation_concentration", diagnostics)
 		result.block("已有同向高相关持仓集中，禁止继续叠加风险")
 		return
 	}
 	if sameSideHighCorr == 1 {
+		result.addDiagnostics("correlation_concentration", diagnostics)
 		result.penalize("已有同向高相关持仓，新开仓降权")
 		result.EffectiveRisk *= 0.5
 	}
+}
+
+func maxSameSideHighCorr(ctx *Context, profile InstrumentProfile, data *market.Data) int {
+	if ctx != nil && ctx.LossMode != nil && ctx.LossMode.Active {
+		return 1
+	}
+	if data != nil {
+		state, _ := market.GetMarketState(data)
+		if state == "RANGING" || state == "SQUEEZE" {
+			return 1
+		}
+	}
+	if profile.MaxSameSideHighCorr > 0 {
+		return profile.MaxSameSideHighCorr
+	}
+	return 2
 }
 
 func applyHighADXChaseGate(result *OpenGateResult, d *Decision, data *market.Data) {

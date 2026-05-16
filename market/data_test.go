@@ -158,6 +158,20 @@ func TestCalculateADX_InsufficientData(t *testing.T) {
 	}
 }
 
+func TestCalculateADX_WilderRanges(t *testing.T) {
+	closes := make([]float64, 60)
+	for i := range closes {
+		closes[i] = 100 + float64(i)*0.8
+	}
+	adx, diPlus, diMinus := calculateADX(makeKlines(closes), 14)
+	if adx <= 0 || adx > 100 {
+		t.Fatalf("ADX应在0-100且有趋势值，got %.4f", adx)
+	}
+	if diPlus <= diMinus {
+		t.Fatalf("上涨序列DI+应大于DI-，di+=%.4f di-=%.4f", diPlus, diMinus)
+	}
+}
+
 // ─── 布林带单元测试 ───────────────────────────────────────────────────────────
 
 func TestCalculateBollingerBands_InsufficientData(t *testing.T) {
@@ -213,6 +227,9 @@ func TestCalculateMidTermSeries15m_LengthLimit(t *testing.T) {
 	data := calculateMidTermSeries15mEnhanced(makeKlinesN(70, 100.0))
 	checkSeriesLen(t, "MidPrices", data.MidPrices)
 	checkSeriesLen(t, "ADXValues", data.ADXValues)
+	checkSeriesLen(t, "ADXLegacyDX", data.ADXLegacyDX)
+	checkSeriesLen(t, "DIPlus", data.DIPlus)
+	checkSeriesLen(t, "DIMinus", data.DIMinus)
 	checkSeriesLen(t, "ATRValues", data.ATRValues)
 }
 
@@ -220,6 +237,64 @@ func TestCalculateMidTermSeries1h_LengthLimit(t *testing.T) {
 	data := calculateMidTermSeries1hEnhanced(makeKlinesN(80, 100.0))
 	checkSeriesLen(t, "MidPrices", data.MidPrices)
 	checkSeriesLen(t, "ADXValues", data.ADXValues)
+	checkSeriesLen(t, "ADXLegacyDX", data.ADXLegacyDX)
+	checkSeriesLen(t, "DIPlus", data.DIPlus)
+	checkSeriesLen(t, "DIMinus", data.DIMinus)
+}
+
+func TestGetDirectionalSnapshot_Uses1hDI(t *testing.T) {
+	data := &Data{
+		CurrentADX:     40,
+		CurrentDIPlus:  5,
+		CurrentDIMinus: 25,
+		MidTermSeries1h: &MidTermData1h{
+			ADXValues:   []float64{28},
+			ADXLegacyDX: []float64{35},
+			DIPlus:      []float64{30},
+			DIMinus:     []float64{10},
+			ATRValues:   []float64{2.5},
+		},
+	}
+	snapshot := GetDirectionalSnapshot(data, "1h")
+	if snapshot.ADX != 28 || snapshot.LegacyDXLike != 35 || snapshot.DIPlus != 30 || snapshot.DIMinus != 10 || snapshot.ATR != 2.5 {
+		t.Fatalf("1h snapshot应使用1h ADX/DI/ATR而非4h顶层字段: %+v", snapshot)
+	}
+	if snapshot.Source != "1h" {
+		t.Fatalf("source错误: %+v", snapshot)
+	}
+}
+
+func TestGetDirectionalSnapshot_Uses4hFallbackFields(t *testing.T) {
+	data := &Data{
+		CurrentADX:     31,
+		CurrentDIPlus:  18,
+		CurrentDIMinus: 9,
+	}
+
+	snapshot := GetDirectionalSnapshot(data, "4h")
+	if snapshot.ADX != 31 || snapshot.DIPlus != 18 || snapshot.DIMinus != 9 || snapshot.Source != "4h" {
+		t.Fatalf("4h snapshot应保留顶层兼容字段: %+v", snapshot)
+	}
+}
+
+func TestGetATR_SelectsRequestedTimeframe(t *testing.T) {
+	data := &Data{
+		MidTermSeries15m: &MidTermData15m{ATRValues: []float64{1.1, 1.2}},
+		MidTermSeries1h:  &MidTermData1h{ATRValues: []float64{2.1, 2.2}},
+		LongerTermContext: &LongerTermData{
+			ATR14: 3.3,
+		},
+	}
+
+	if got := GetATR(data, "15m"); got != 1.2 {
+		t.Fatalf("15m ATR选择错误: %.4f", got)
+	}
+	if got := GetATR(data, "1h"); got != 2.2 {
+		t.Fatalf("1h ATR选择错误: %.4f", got)
+	}
+	if got := GetATR(data, "4h"); got != 3.3 {
+		t.Fatalf("4h ATR选择错误: %.4f", got)
+	}
 }
 
 func TestCalculateLongerTermData_LengthLimit(t *testing.T) {

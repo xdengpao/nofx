@@ -8,6 +8,7 @@ import (
 	"math"
 	"nofx/market"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -101,6 +102,42 @@ func newMarketData(currentPrice float64) *market.Data {
 			EMA20: currentPrice * 0.99,
 			EMA50: currentPrice * 0.98,
 		},
+	}
+}
+
+func TestPositionEvaluator_FixedTPUsesExchangeFullTakeProfit(t *testing.T) {
+	plan := newLongPlan(100, 98, 101)
+	plan.ExchangeFullTakeProfit = 106
+	position := newLongPosition(100, 106.1, 6.1, time.Now().Add(-2*time.Hour).UnixMilli())
+	evaluator := &PositionEvaluator{Position: position, Plan: plan, MarketData: newMarketData(106.1)}
+
+	result := evaluator.Evaluate()
+	if result.Action != "close" {
+		t.Fatalf("达到algorithmic full TP时应全平: %+v", result)
+	}
+	if !strings.Contains(result.Reason, "106.0000") {
+		t.Fatalf("应使用ExchangeFullTakeProfit而非raw TP: %+v", result)
+	}
+}
+
+func TestPositionEvaluator_DoesNotCloseAtRawTPWhenExchangeFullTPFarther(t *testing.T) {
+	plan := newLongPlan(100, 98, 101)
+	plan.ExchangeFullTakeProfit = 106
+	position := newLongPosition(100, 101.2, 1.2, time.Now().Add(-2*time.Hour).UnixMilli())
+	evaluator := &PositionEvaluator{Position: position, Plan: plan, MarketData: newMarketData(101.2)}
+
+	result := evaluator.Evaluate()
+	if result.Action == "close" && result.IsHardStop {
+		t.Fatalf("strict计划不应在raw AI微止盈处全平: %+v", result)
+	}
+}
+
+func TestPositionEvaluator_CurrentRRUsesInitialRiskDistance(t *testing.T) {
+	plan := newLongPlan(100, 90, 120)
+	plan.InitialRiskDistance = 2
+	evaluator := &PositionEvaluator{Plan: plan, MarketData: newMarketData(104)}
+	if rr := evaluator.calculateCurrentRR(); rr != 2 {
+		t.Fatalf("RR应使用InitialRiskDistance，got %.4f", rr)
 	}
 }
 

@@ -15,19 +15,26 @@ type PositionSizingInput struct {
 	MinOrderValueUSDT        float64
 	RequestedPositionSizeUSD float64
 	PartialClosePct          float64
+	ProfileName              string
 }
 
 // PositionSizingResult 是统一仓位 sizing 的结果。
 type PositionSizingResult struct {
-	Executable         bool     `json:"executable"`
-	PositionSizeUSD    float64  `json:"position_size_usd"`
-	MaxPositionSizeUSD float64  `json:"max_position_size_usd"`
-	RiskUSD            float64  `json:"risk_usd"`
-	RiskPct            float64  `json:"risk_pct"`
-	MarginRequiredUSD  float64  `json:"margin_required_usd"`
-	StopDistancePct    float64  `json:"stop_distance_pct"`
-	CanPartialExit     bool     `json:"can_partial_exit"`
-	Reasons            []string `json:"reasons,omitempty"`
+	Executable            bool     `json:"executable"`
+	PositionSizeUSD       float64  `json:"position_size_usd"`
+	MaxPositionSizeUSD    float64  `json:"max_position_size_usd"`
+	RiskUSD               float64  `json:"risk_usd"`
+	RiskPct               float64  `json:"risk_pct"`
+	FeeSlippageReserveUSD float64  `json:"fee_slippage_reserve_usd"`
+	TotalRiskUSD          float64  `json:"total_risk_usd"`
+	TotalRiskPct          float64  `json:"total_risk_pct"`
+	RiskCapReason         string   `json:"risk_cap_reason,omitempty"`
+	MarginRequiredUSD     float64  `json:"margin_required_usd"`
+	StopDistancePct       float64  `json:"stop_distance_pct"`
+	StopDistanceRatio     float64  `json:"stop_distance_ratio"`
+	StopDistancePercent   float64  `json:"stop_distance_percent"`
+	CanPartialExit        bool     `json:"can_partial_exit"`
+	Reasons               []string `json:"reasons,omitempty"`
 }
 
 const (
@@ -75,15 +82,23 @@ func CalculatePositionSizing(input PositionSizingInput) PositionSizingResult {
 		return result
 	}
 	result.StopDistancePct = stopDistancePct
+	result.StopDistanceRatio = stopDistancePct
+	result.StopDistancePercent = stopDistancePct * 100
 
 	effectiveRiskPct := input.EffectiveRiskPct
 	if input.RemainingRiskBudgetPct > 0 && input.RemainingRiskBudgetPct < effectiveRiskPct {
 		effectiveRiskPct = input.RemainingRiskBudgetPct
+		result.RiskCapReason = "remaining_risk_budget"
 	}
 	riskBudgetUSD := input.AccountEquity * effectiveRiskPct
 	maxByRisk := riskBudgetUSD / (stopDistancePct + input.FeeSlippagePct)
 	maxByMargin := input.AvailableBalance * float64(input.Leverage) * 0.9
 	result.MaxPositionSizeUSD = math.Min(maxByRisk, maxByMargin)
+	if maxByMargin < maxByRisk {
+		result.RiskCapReason = "available_margin"
+	} else if result.RiskCapReason == "" {
+		result.RiskCapReason = "risk_budget"
+	}
 
 	positionSize := result.MaxPositionSizeUSD
 	if input.RequestedPositionSizeUSD > 0 {
@@ -92,6 +107,9 @@ func CalculatePositionSizing(input PositionSizingInput) PositionSizingResult {
 	result.PositionSizeUSD = positionSize
 	result.RiskUSD = positionSize * stopDistancePct
 	result.RiskPct = result.RiskUSD / input.AccountEquity
+	result.FeeSlippageReserveUSD = positionSize * input.FeeSlippagePct
+	result.TotalRiskUSD = result.RiskUSD + result.FeeSlippageReserveUSD
+	result.TotalRiskPct = result.TotalRiskUSD / input.AccountEquity
 	result.MarginRequiredUSD = positionSize / float64(input.Leverage)
 
 	if positionSize < input.MinOrderValueUSDT {

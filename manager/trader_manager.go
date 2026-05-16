@@ -52,17 +52,29 @@ func (tm *TraderManager) SetTrackerInterval(interval time.Duration) {
 
 // AddTrader 添加一个trader
 func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig) error {
-	return tm.AddTraderWithFrequency(cfg, coinPoolURL, maxDailyLoss, maxDrawdown, stopTradingMinutes, leverage, config.TradingFrequencyProfile{
+	return tm.AddTraderWithPolicies(cfg, coinPoolURL, maxDailyLoss, maxDrawdown, stopTradingMinutes, leverage, config.TradingFrequencyProfile{
 		Legacy:                  true,
 		Mode:                    config.TradingFrequencyModeLegacy,
 		EffectiveMode:           config.TradingFrequencyModeLegacy,
 		AnalysisIntervalMinutes: trader.DefaultAnalysisInterval,
 		PromptCandidateLimit:    8,
-	})
+	}, config.StrategyRiskProfile{Legacy: true, RollbackLegacyValidation: true, FeeSlippagePct: 0.002, DefaultMinNetRR: 2.5, ADXTimeframe: "1h"})
 }
 
 // AddTraderWithFrequency 添加一个带开仓频率策略的trader。
 func (tm *TraderManager) AddTraderWithFrequency(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig, frequency config.TradingFrequencyProfile) error {
+	return tm.AddTraderWithPolicies(cfg, coinPoolURL, maxDailyLoss, maxDrawdown, stopTradingMinutes, leverage, frequency, config.StrategyRiskProfile{
+		Legacy:                   true,
+		Enabled:                  false,
+		RollbackLegacyValidation: true,
+		FeeSlippagePct:           0.002,
+		DefaultMinNetRR:          2.5,
+		ADXTimeframe:             "1h",
+	})
+}
+
+// AddTraderWithPolicies 添加一个带开仓频率和策略风险策略的trader。
+func (tm *TraderManager) AddTraderWithPolicies(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig, frequency config.TradingFrequencyProfile, strategyRisk config.StrategyRiskProfile) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
@@ -102,6 +114,7 @@ func (tm *TraderManager) AddTraderWithFrequency(cfg config.TraderConfig, coinPoo
 		TotalRiskBudget:       trader.DefaultTotalRiskBudget,
 		AnalysisIntervalMin:   frequency.AnalysisIntervalMinutes,
 		FrequencyPolicy:       decisionFrequencyPolicy(frequency),
+		StrategyRiskPolicy:    decisionStrategyRiskPolicy(strategyRisk),
 	}
 
 	// 创建trader实例
@@ -148,6 +161,48 @@ func decisionFrequencyPolicy(profile config.TradingFrequencyProfile) decision.Fr
 		RRReportOnly:            profile.RRReportOnly,
 		RollingGateReportOnly:   profile.RollingGateReportOnly,
 	}
+}
+
+func decisionStrategyRiskPolicy(profile config.StrategyRiskProfile) decision.StrategyRiskPolicy {
+	policy := decision.StrategyRiskPolicy{
+		Legacy:                   profile.Legacy,
+		Enabled:                  profile.Enabled,
+		RollbackLegacyValidation: profile.RollbackLegacyValidation,
+		FeeSlippagePct:           profile.FeeSlippagePct,
+		DefaultMinNetRR:          profile.DefaultMinNetRR,
+		ADXTimeframe:             profile.ADXTimeframe,
+		SafeMode: decision.StrategySafeMode{
+			MaxRiskPct:      profile.SafeMode.MaxRiskPct,
+			MaxPositions:    profile.SafeMode.MaxPositions,
+			DailyOpenLimit:  profile.SafeMode.DailyOpenLimit,
+			RequireHours:    profile.SafeMode.RequireHours,
+			MinProfitFactor: profile.SafeMode.MinProfitFactor,
+		},
+	}
+	for _, p := range profile.Profiles {
+		policy.Profiles = append(policy.Profiles, decision.InstrumentProfile{
+			Name:                p.Name,
+			Symbols:             append([]string(nil), p.Symbols...),
+			MatchQuote:          p.MatchQuote,
+			MatchType:           p.MatchType,
+			MinStopPct:          p.MinStopPct,
+			FallbackStopPct:     p.FallbackStopPct,
+			ATRMultiplier:       p.ATRMultiplier,
+			ATRTimeframe:        p.ATRTimeframe,
+			MinNetRR:            p.MinNetRR,
+			MaxRiskPct:          p.MaxRiskPct,
+			RegimeRiskCapPct:    p.RegimeRiskCapPct,
+			MinADX:              p.MinADX,
+			AllowLong:           p.AllowLong,
+			AllowShort:          p.AllowShort,
+			MaxSameSideHighCorr: p.MaxSameSideHighCorr,
+			MaxSameSideLossPct:  p.MaxSameSideLossPct,
+			MinOrderValueUSDT:   p.MinOrderValueUSDT,
+			ExchangeFullTPMode:  p.ExchangeFullTPMode,
+			ExchangeFullTPMinRR: p.ExchangeFullTPMinRR,
+		})
+	}
+	return policy
 }
 
 // GetOrderTracker 获取指定trader的订单追踪器

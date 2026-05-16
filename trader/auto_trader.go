@@ -70,6 +70,7 @@ type AutoTraderConfig struct {
 	AnalysisIntervalMin  int           // AI新机会分析间隔
 	EnableEmergencyClose bool          // 止损保护无法建立时是否紧急平仓
 	FrequencyPolicy      decision.FrequencyPolicy
+	StrategyRiskPolicy   decision.StrategyRiskPolicy
 }
 
 const (
@@ -165,6 +166,16 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		config.FrequencyPolicy.AnalysisIntervalMin = config.AnalysisIntervalMin
 	}
 	config.AnalysisIntervalMin = config.FrequencyPolicy.AnalysisIntervalMin
+	if config.StrategyRiskPolicy.ADXTimeframe == "" {
+		config.StrategyRiskPolicy = decision.StrategyRiskPolicy{
+			Legacy:                   true,
+			Enabled:                  false,
+			RollbackLegacyValidation: true,
+			FeeSlippagePct:           0.002,
+			DefaultMinNetRR:          2.5,
+			ADXTimeframe:             "1h",
+		}
+	}
 
 	mcpClient := mcp.New()
 
@@ -538,6 +549,23 @@ func applyDecisionSizingToActionRecord(d *decision.Decision, actionRecord *logge
 	actionRecord.SizingAdjusted = d.SizingAdjusted
 	actionRecord.SizingReason = d.SizingReason
 	actionRecord.StopDistancePct = d.StopDistancePct
+	actionRecord.StopDistanceRatio = d.StopDistanceRatio
+	actionRecord.StopDistancePercent = d.StopDistancePercent
+	actionRecord.TakeProfitRatio = d.TakeProfitRatio
+	actionRecord.TakeProfitPercent = d.TakeProfitPercent
+	actionRecord.RequestedStopLoss = d.RequestedStopLoss
+	actionRecord.RequestedTakeProfit = d.RequestedTakeProfit
+	actionRecord.EffectiveStopLoss = d.EffectiveStopLoss
+	actionRecord.EffectiveTakeProfit = d.EffectiveTakeProfit
+	actionRecord.ExchangeFullTakeProfit = d.ExchangeFullTakeProfit
+	actionRecord.ExchangeFullTPMode = d.ExchangeFullTPMode
+	actionRecord.NetRR = d.NetRR
+	actionRecord.ProfileName = d.ProfileName
+	actionRecord.FeeSlippageReserveUSD = d.FeeSlippageReserveUSD
+	actionRecord.TotalRiskUSD = d.TotalRiskUSD
+	actionRecord.TotalRiskPct = d.TotalRiskPct
+	actionRecord.RiskCapReason = d.RiskCapReason
+	actionRecord.RiskNormalization = d.RiskNormalization
 	actionRecord.EffectiveRiskPct = d.EffectiveRiskPct
 }
 
@@ -1037,6 +1065,7 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		FrequencyPolicy:          &frequencyPolicy,
 		FrequencyState:           &frequencyState,
 		LossMode:                 lossMode,
+		StrategyRiskPolicy:       &at.config.StrategyRiskPolicy,
 		Account: decision.AccountInfo{
 			TotalEquity:      totalEquity,
 			AvailableBalance: availableBalance,
@@ -2261,7 +2290,54 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
 		"ai_provider":      aiProvider,
 		"frequency_policy": frequencyPolicy,
 		"frequency_state":  frequencyState,
+		"strategy_risk_policy": map[string]interface{}{
+			"legacy":                     at.config.StrategyRiskPolicy.Legacy,
+			"enabled":                    at.config.StrategyRiskPolicy.Enabled,
+			"rollback_legacy_validation": at.config.StrategyRiskPolicy.RollbackLegacyValidation,
+			"adx_timeframe":              at.config.StrategyRiskPolicy.ADXTimeframe,
+			"default_min_net_rr":         at.config.StrategyRiskPolicy.DefaultMinNetRR,
+			"fee_slippage_pct":           at.config.StrategyRiskPolicy.FeeSlippagePct,
+			"profile_count":              len(at.config.StrategyRiskPolicy.Profiles),
+			"profiles":                   strategyRiskProfileNames(at.config.StrategyRiskPolicy.Profiles),
+			"profile_defaults":           strategyRiskProfileSummaries(at.config.StrategyRiskPolicy.Profiles),
+		},
 	}
+}
+
+func strategyRiskProfileNames(profiles []decision.InstrumentProfile) []string {
+	names := make([]string, 0, len(profiles))
+	for _, profile := range profiles {
+		if profile.Name != "" {
+			names = append(names, profile.Name)
+		}
+	}
+	return names
+}
+
+func strategyRiskProfileSummaries(profiles []decision.InstrumentProfile) []map[string]interface{} {
+	summaries := make([]map[string]interface{}, 0, len(profiles))
+	for _, profile := range profiles {
+		if profile.Name == "" {
+			continue
+		}
+		summaries = append(summaries, map[string]interface{}{
+			"name":                    profile.Name,
+			"match_type":              profile.MatchType,
+			"min_stop_pct":            profile.MinStopPct,
+			"fallback_stop_pct":       profile.FallbackStopPct,
+			"atr_multiplier":          profile.ATRMultiplier,
+			"atr_timeframe":           profile.ATRTimeframe,
+			"min_net_rr":              profile.MinNetRR,
+			"max_risk_pct":            profile.MaxRiskPct,
+			"min_adx":                 profile.MinADX,
+			"allow_long":              profile.AllowLong,
+			"allow_short":             profile.AllowShort,
+			"max_same_side_high_corr": profile.MaxSameSideHighCorr,
+			"exchange_full_tp_mode":   profile.ExchangeFullTPMode,
+			"exchange_full_tp_min_rr": profile.ExchangeFullTPMinRR,
+		})
+	}
+	return summaries
 }
 
 // GetAccountInfo 获取账户信息（用于API）
@@ -2597,15 +2673,17 @@ func planAutoClosePriceAndReason(plan *decision.TradePlan, marketPrice float64) 
 		if stopLoss > 0 && marketPrice > 0 && marketPrice <= stopLoss {
 			return stopLoss, "STOP_LOSS"
 		}
-		if plan.TakeProfit > 0 && marketPrice > 0 && marketPrice >= plan.TakeProfit {
-			return plan.TakeProfit, "TAKE_PROFIT"
+		fullTP, fullTPReason := planFullTakeProfitAndReason(plan)
+		if fullTP > 0 && marketPrice > 0 && marketPrice >= fullTP {
+			return fullTP, fullTPReason
 		}
 	} else {
 		if stopLoss > 0 && marketPrice > 0 && marketPrice >= stopLoss {
 			return stopLoss, "STOP_LOSS"
 		}
-		if plan.TakeProfit > 0 && marketPrice > 0 && marketPrice <= plan.TakeProfit {
-			return plan.TakeProfit, "TAKE_PROFIT"
+		fullTP, fullTPReason := planFullTakeProfitAndReason(plan)
+		if fullTP > 0 && marketPrice > 0 && marketPrice <= fullTP {
+			return fullTP, fullTPReason
 		}
 	}
 
@@ -2627,17 +2705,29 @@ func (at *AutoTrader) inferAutoCloseReason(symbol, side string, closePrice float
 		if stopLoss > 0 && closePrice <= stopLoss {
 			return "STOP_LOSS"
 		}
-		if plan.TakeProfit > 0 && closePrice >= plan.TakeProfit {
-			return "TAKE_PROFIT"
+		fullTP, fullTPReason := planFullTakeProfitAndReason(plan)
+		if fullTP > 0 && closePrice >= fullTP {
+			return fullTPReason
 		}
 	} else {
 		if stopLoss > 0 && closePrice >= stopLoss {
 			return "STOP_LOSS"
 		}
-		if plan.TakeProfit > 0 && closePrice <= plan.TakeProfit {
-			return "TAKE_PROFIT"
+		fullTP, fullTPReason := planFullTakeProfitAndReason(plan)
+		if fullTP > 0 && closePrice <= fullTP {
+			return fullTPReason
 		}
 	}
 
 	return "AUTO_CLOSE_DETECTED"
+}
+
+func planFullTakeProfitAndReason(plan *decision.TradePlan) (float64, string) {
+	if plan == nil {
+		return 0, "TAKE_PROFIT"
+	}
+	if plan.ExchangeFullTakeProfit > 0 {
+		return plan.ExchangeFullTakeProfit, "EXCHANGE_FULL_TP"
+	}
+	return plan.TakeProfit, "TAKE_PROFIT"
 }

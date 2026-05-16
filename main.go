@@ -252,6 +252,10 @@ func setupTraderManager(cfg *config.Config) (*manager.TraderManager, error) {
 	if err != nil {
 		return nil, err
 	}
+	strategyRiskProfile, err := cfg.NormalizeStrategyRisk()
+	if err != nil {
+		return nil, err
+	}
 
 	// 设置自动平仓回调
 	traderManager.SetAutoCloseCallback(handleAutoClose)
@@ -266,7 +270,7 @@ func setupTraderManager(cfg *config.Config) (*manager.TraderManager, error) {
 		log.Printf("📦 [%d/%d] 初始化 %s (%s模型)...",
 			i+1, len(cfg.Traders), traderCfg.Name, strings.ToUpper(traderCfg.AIModel))
 
-		err := traderManager.AddTraderWithFrequency(
+		err := traderManager.AddTraderWithPolicies(
 			traderCfg,
 			cfg.CoinPoolAPIURL,
 			cfg.MaxDailyLoss,
@@ -274,6 +278,7 @@ func setupTraderManager(cfg *config.Config) (*manager.TraderManager, error) {
 			cfg.StopTradingMinutes,
 			cfg.Leverage,
 			frequencyProfile,
+			strategyRiskProfile,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("添加trader '%s' 失败: %w", traderCfg.Name, err)

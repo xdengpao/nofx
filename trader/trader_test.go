@@ -446,18 +446,19 @@ func TestProperty33_SortDecisionsByPriority_CloseBeforeOpen(t *testing.T) {
 
 // mockTrader 实现 Trader 接口，用于单元测试
 type mockTrader struct {
-	openLongCalled   bool
-	openShortCalled  bool
-	closeLongCalled  bool
-	closeShortCalled bool
-	lastSymbol       string
-	lastQuantity     float64
-	lastLeverage     int
-	shouldError      bool
-	stopLossError    bool
-	takeProfitError  bool
-	stopLossCalls    int
-	takeProfitCalls  int
+	openLongCalled      bool
+	openShortCalled     bool
+	closeLongCalled     bool
+	closeShortCalled    bool
+	lastSymbol          string
+	lastQuantity        float64
+	lastLeverage        int
+	shouldError         bool
+	stopLossError       bool
+	takeProfitError     bool
+	stopLossCalls       int
+	takeProfitCalls     int
+	lastTakeProfitPrice float64
 }
 
 func (m *mockTrader) GetBalance() (map[string]interface{}, error) {
@@ -523,6 +524,7 @@ func (m *mockTrader) SetStopLoss(symbol, positionSide string, qty, price float64
 }
 func (m *mockTrader) SetTakeProfit(symbol, positionSide string, qty, price float64) error {
 	m.takeProfitCalls++
+	m.lastTakeProfitPrice = price
 	if m.takeProfitError {
 		return fmt.Errorf("mock 设置止盈失败")
 	}
@@ -835,6 +837,30 @@ func TestExecuteOpenLong_StopLossFailure_MarksHighRisk(t *testing.T) {
 	}
 }
 
+func TestSetProtectiveOrders_UsesExchangeFullTakeProfit(t *testing.T) {
+	m := &mockTrader{}
+	at := &AutoTrader{trader: m}
+	record := &logger.DecisionAction{}
+	d := &decision.Decision{
+		Symbol:                 "BTCUSDT",
+		StopLoss:               95,
+		TakeProfit:             102,
+		ExchangeFullTakeProfit: 108,
+		ExchangeFullTPMode:     decision.ExchangeFullTPModeAlgorithmicFull,
+	}
+
+	result := at.setProtectiveOrdersWithRecord(d, "long", 0.2, record)
+	if result.stopLossErr != nil || result.takeProfitErr != nil {
+		t.Fatalf("保护单设置应成功: %+v", result)
+	}
+	if m.lastTakeProfitPrice != 108 {
+		t.Fatalf("整仓TP应使用algorithmic full TP价格，got %.4f", m.lastTakeProfitPrice)
+	}
+	if record.ExchangeFullTakeProfit != 108 || record.ExchangeFullTPMode != decision.ExchangeFullTPModeAlgorithmicFull {
+		t.Fatalf("action record应记录整仓TP模式和价格: %+v", record)
+	}
+}
+
 func TestExecuteOpenLong_StopLossFailure_EmergencyClose(t *testing.T) {
 	originalGetter := getMarketData
 	getMarketData = func(symbol string) (*market.Data, error) {
@@ -1141,6 +1167,28 @@ func TestReconcileStaleTradePlans_RemovesPlanWithoutCurrentPosition(t *testing.T
 	}
 	if plan := decision.GetPlanByScope("trader-a", "ETHUSDT", "short"); plan != nil {
 		t.Fatalf("stale plan 自动平仓后应移除交易计划: %+v", plan)
+	}
+}
+
+func TestPlanAutoClosePriceAndReason_UsesExchangeFullTP(t *testing.T) {
+	plan := &decision.TradePlan{
+		Symbol:                 "ETHUSDT",
+		Direction:              "long",
+		EntryPrice:             100,
+		StopLoss:               98,
+		TakeProfit:             102,
+		ExchangeFullTakeProfit: 106,
+		ExchangeFullTPMode:     "algorithmic_full",
+	}
+
+	price, reason := planAutoClosePriceAndReason(plan, 106.5)
+	if price != 106 || reason != "EXCHANGE_FULL_TP" {
+		t.Fatalf("严格计划应按交易所整仓TP识别: price=%.4f reason=%s", price, reason)
+	}
+
+	price, reason = planAutoClosePriceAndReason(plan, 102.5)
+	if price != 102.5 || reason != "AUTO_CLOSE_DETECTED" {
+		t.Fatalf("未到交易所整仓TP时不应按raw TP归类: price=%.4f reason=%s", price, reason)
 	}
 }
 

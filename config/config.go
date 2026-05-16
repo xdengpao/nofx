@@ -101,17 +101,110 @@ type TradingFrequencyProfile struct {
 	RollingGateReportOnly   bool
 }
 
+// StrategyRiskConfig 控制 ATR/ADX/profile 风控灰度。
+type StrategyRiskConfig struct {
+	Enabled                  *bool                     `json:"enabled,omitempty"`
+	RollbackLegacyValidation bool                      `json:"rollback_legacy_validation,omitempty"`
+	FeeSlippagePct           float64                   `json:"fee_slippage_pct,omitempty"`
+	DefaultMinNetRR          float64                   `json:"default_min_net_rr,omitempty"`
+	ADXTimeframe             string                    `json:"adx_timeframe,omitempty"`
+	Profiles                 []InstrumentProfileConfig `json:"profiles,omitempty"`
+	SafeMode                 StrategySafeModeConfig    `json:"safe_mode,omitempty"`
+}
+
+// InstrumentProfileConfig 是品种级风控覆盖项。百分数字段可写 1.0 或 0.01，都会归一化为 ratio 0.01。
+type InstrumentProfileConfig struct {
+	Name                string   `json:"name"`
+	Symbols             []string `json:"symbols,omitempty"`
+	MatchQuote          string   `json:"match_quote,omitempty"`
+	MatchType           string   `json:"match_type,omitempty"`
+	MinStopPct          float64  `json:"min_stop_pct,omitempty"`
+	FallbackStopPct     float64  `json:"fallback_stop_pct,omitempty"`
+	ATRMultiplier       float64  `json:"atr_multiplier,omitempty"`
+	ATRTimeframe        string   `json:"atr_timeframe,omitempty"`
+	MinNetRR            float64  `json:"min_net_rr,omitempty"`
+	MaxRiskPct          float64  `json:"max_risk_pct,omitempty"`
+	RegimeRiskCapPct    float64  `json:"regime_risk_cap_pct,omitempty"`
+	MinADX              float64  `json:"min_adx,omitempty"`
+	AllowLong           *bool    `json:"allow_long,omitempty"`
+	AllowShort          *bool    `json:"allow_short,omitempty"`
+	MaxSameSideHighCorr int      `json:"max_same_side_high_corr,omitempty"`
+	MaxSameSideLossPct  float64  `json:"max_same_side_loss_pct,omitempty"`
+	MinOrderValueUSDT   float64  `json:"min_order_value_usdt,omitempty"`
+	ExchangeFullTPMode  string   `json:"exchange_full_tp_mode,omitempty"`
+	ExchangeFullTPMinRR float64  `json:"exchange_full_tp_min_rr,omitempty"`
+}
+
+// StrategySafeModeConfig 控制严格策略首次上线的保守上限。
+type StrategySafeModeConfig struct {
+	MaxRiskPct      float64 `json:"max_risk_pct,omitempty"`
+	MaxPositions    int     `json:"max_positions,omitempty"`
+	DailyOpenLimit  int     `json:"daily_open_limit,omitempty"`
+	RequireHours    int     `json:"require_hours,omitempty"`
+	MinProfitFactor float64 `json:"min_profit_factor,omitempty"`
+}
+
+// StrategyRiskProfile 是归一化后的运行时配置，百分数字段均为 ratio。
+type StrategyRiskProfile struct {
+	Legacy                   bool
+	Enabled                  bool
+	RollbackLegacyValidation bool
+	FeeSlippagePct           float64
+	DefaultMinNetRR          float64
+	ADXTimeframe             string
+	Profiles                 []InstrumentProfileProfile
+	SafeMode                 StrategySafeModeProfile
+}
+
+type InstrumentProfileProfile struct {
+	Name                string
+	Symbols             []string
+	MatchQuote          string
+	MatchType           string
+	MinStopPct          float64
+	FallbackStopPct     float64
+	ATRMultiplier       float64
+	ATRTimeframe        string
+	MinNetRR            float64
+	MaxRiskPct          float64
+	RegimeRiskCapPct    float64
+	MinADX              float64
+	AllowLong           bool
+	AllowShort          bool
+	MaxSameSideHighCorr int
+	MaxSameSideLossPct  float64
+	MinOrderValueUSDT   float64
+	ExchangeFullTPMode  string
+	ExchangeFullTPMinRR float64
+}
+
+type StrategySafeModeProfile struct {
+	MaxRiskPct      float64
+	MaxPositions    int
+	DailyOpenLimit  int
+	RequireHours    int
+	MinProfitFactor float64
+}
+
 const (
 	TradingFrequencyModeLegacy   = "legacy"
 	TradingFrequencyModeSafe     = "safe"
 	TradingFrequencyModeBalanced = "balanced"
 	TradingFrequencyModeActive   = "active"
 
+	StrategyRiskTPModeAlgorithmicFull = "algorithmic_full"
+	StrategyRiskTPModeLegacyAI        = "legacy_ai"
+	StrategyRiskTPModeFinalRTarget    = "final_r_target"
+
 	minAnalysisIntervalMinutes = 9
 	minPromptCandidateLimit    = 8
 	defaultRollbackWindowHours = 24
 	defaultRollbackMinPF       = 0.8
 	defaultRollbackDrawdownPct = 2.0
+	defaultStrategyFeeSlipPct  = 0.002
+	defaultStrategyMinNetRR    = 2.5
+	defaultStrategyADXTF       = "1h"
+	defaultMinStopFloorPct     = 0.01
 )
 
 // Config 总配置
@@ -123,6 +216,7 @@ type Config struct {
 	OITopAPIURL          string                     `json:"oi_top_api_url"`
 	DynamicCandidatePool DynamicCandidatePoolConfig `json:"dynamic_candidate_pool"`
 	TradingFrequency     *TradingFrequencyConfig    `json:"trading_frequency,omitempty"`
+	StrategyRisk         *StrategyRiskConfig        `json:"strategy_risk,omitempty"`
 	APIServerPort        int                        `json:"api_server_port"`
 	MaxDailyLoss         float64                    `json:"max_daily_loss"`
 	MaxDrawdown          float64                    `json:"max_drawdown"`
@@ -350,6 +444,317 @@ func (c *Config) NormalizeTradingFrequency() (TradingFrequencyProfile, error) {
 	return profile, nil
 }
 
+// NormalizeStrategyRisk 归一化策略风控配置。旧配置缺少 strategy_risk 时保持 legacy 行为。
+func (c *Config) NormalizeStrategyRisk() (StrategyRiskProfile, error) {
+	if c.StrategyRisk == nil {
+		return StrategyRiskProfile{
+			Legacy:                   true,
+			Enabled:                  false,
+			RollbackLegacyValidation: true,
+			FeeSlippagePct:           defaultStrategyFeeSlipPct,
+			DefaultMinNetRR:          defaultStrategyMinNetRR,
+			ADXTimeframe:             defaultStrategyADXTF,
+			Profiles:                 defaultStrategyProfiles(defaultStrategyMinNetRR),
+			SafeMode:                 defaultStrategySafeMode(),
+		}, nil
+	}
+
+	cfg := c.StrategyRisk
+	enabled := true
+	if cfg.Enabled != nil {
+		enabled = *cfg.Enabled
+	}
+
+	feeSlippage, err := normalizePercentRatio(cfg.FeeSlippagePct, defaultStrategyFeeSlipPct, "strategy_risk.fee_slippage_pct")
+	if err != nil {
+		return StrategyRiskProfile{}, err
+	}
+	minRR := cfg.DefaultMinNetRR
+	if minRR <= 0 {
+		minRR = defaultStrategyMinNetRR
+	}
+	if minRR < 1 {
+		return StrategyRiskProfile{}, fmt.Errorf("strategy_risk.default_min_net_rr不能低于1: %.4f", minRR)
+	}
+
+	adxTimeframe := cfg.ADXTimeframe
+	if adxTimeframe == "" {
+		adxTimeframe = defaultStrategyADXTF
+	}
+	if !isSupportedStrategyTimeframe(adxTimeframe) {
+		return StrategyRiskProfile{}, fmt.Errorf("strategy_risk.adx_timeframe必须是 15m、1h 或 4h: %q", adxTimeframe)
+	}
+
+	profiles, err := normalizeInstrumentProfiles(cfg.Profiles, minRR)
+	if err != nil {
+		return StrategyRiskProfile{}, err
+	}
+	safeMode, err := normalizeStrategySafeMode(cfg.SafeMode)
+	if err != nil {
+		return StrategyRiskProfile{}, err
+	}
+
+	return StrategyRiskProfile{
+		Legacy:                   false,
+		Enabled:                  enabled,
+		RollbackLegacyValidation: cfg.RollbackLegacyValidation,
+		FeeSlippagePct:           feeSlippage,
+		DefaultMinNetRR:          minRR,
+		ADXTimeframe:             adxTimeframe,
+		Profiles:                 profiles,
+		SafeMode:                 safeMode,
+	}, nil
+}
+
+func normalizeInstrumentProfiles(overrides []InstrumentProfileConfig, defaultMinRR float64) ([]InstrumentProfileProfile, error) {
+	profiles := defaultStrategyProfiles(defaultMinRR)
+	indexByName := make(map[string]int, len(profiles))
+	for i, profile := range profiles {
+		indexByName[profile.Name] = i
+	}
+
+	for _, override := range overrides {
+		if override.Name == "" {
+			return nil, fmt.Errorf("strategy_risk.profiles.name不能为空")
+		}
+		base := InstrumentProfileProfile{
+			Name:                override.Name,
+			MatchType:           "custom",
+			AllowLong:           true,
+			AllowShort:          true,
+			MinStopPct:          defaultMinStopFloorPct,
+			FallbackStopPct:     0.02,
+			ATRMultiplier:       2.0,
+			ATRTimeframe:        defaultStrategyADXTF,
+			MinNetRR:            defaultMinRR,
+			MaxRiskPct:          0.005,
+			RegimeRiskCapPct:    0.005,
+			MinADX:              25,
+			MaxSameSideHighCorr: 1,
+			MaxSameSideLossPct:  0.02,
+			MinOrderValueUSDT:   10,
+			ExchangeFullTPMode:  StrategyRiskTPModeAlgorithmicFull,
+			ExchangeFullTPMinRR: defaultMinRR,
+		}
+		if idx, ok := indexByName[override.Name]; ok {
+			base = profiles[idx]
+		}
+		merged, err := applyInstrumentProfileOverride(base, override, defaultMinRR)
+		if err != nil {
+			return nil, err
+		}
+		if idx, ok := indexByName[merged.Name]; ok {
+			profiles[idx] = merged
+		} else {
+			indexByName[merged.Name] = len(profiles)
+			profiles = append(profiles, merged)
+		}
+	}
+	return profiles, nil
+}
+
+func applyInstrumentProfileOverride(base InstrumentProfileProfile, override InstrumentProfileConfig, defaultMinRR float64) (InstrumentProfileProfile, error) {
+	base.Name = override.Name
+	if len(override.Symbols) > 0 {
+		base.Symbols = append([]string(nil), override.Symbols...)
+	}
+	if override.MatchQuote != "" {
+		base.MatchQuote = override.MatchQuote
+	}
+	if override.MatchType != "" {
+		base.MatchType = override.MatchType
+	}
+	var err error
+	if override.MinStopPct > 0 {
+		base.MinStopPct, err = normalizePercentRatio(override.MinStopPct, base.MinStopPct, "strategy_risk.profiles.min_stop_pct")
+		if err != nil {
+			return base, err
+		}
+		if base.MinStopPct < defaultMinStopFloorPct {
+			return base, fmt.Errorf("strategy_risk.profiles[%s].min_stop_pct不能低于1%%", base.Name)
+		}
+	}
+	if override.FallbackStopPct > 0 {
+		base.FallbackStopPct, err = normalizePercentRatio(override.FallbackStopPct, base.FallbackStopPct, "strategy_risk.profiles.fallback_stop_pct")
+		if err != nil {
+			return base, err
+		}
+	}
+	if base.FallbackStopPct < base.MinStopPct {
+		base.FallbackStopPct = base.MinStopPct
+	}
+	if override.ATRMultiplier > 0 {
+		base.ATRMultiplier = override.ATRMultiplier
+	}
+	if base.ATRMultiplier <= 0 {
+		return base, fmt.Errorf("strategy_risk.profiles[%s].atr_multiplier必须大于0", base.Name)
+	}
+	if override.ATRTimeframe != "" {
+		if !isSupportedStrategyTimeframe(override.ATRTimeframe) {
+			return base, fmt.Errorf("strategy_risk.profiles[%s].atr_timeframe必须是 15m、1h 或 4h", base.Name)
+		}
+		base.ATRTimeframe = override.ATRTimeframe
+	}
+	if override.MinNetRR > 0 {
+		base.MinNetRR = override.MinNetRR
+	}
+	if base.MinNetRR <= 0 {
+		base.MinNetRR = defaultMinRR
+	}
+	if base.MinNetRR < 1 {
+		return base, fmt.Errorf("strategy_risk.profiles[%s].min_net_rr不能低于1", base.Name)
+	}
+	if override.MaxRiskPct > 0 {
+		base.MaxRiskPct, err = normalizePercentRatio(override.MaxRiskPct, base.MaxRiskPct, "strategy_risk.profiles.max_risk_pct")
+		if err != nil {
+			return base, err
+		}
+	}
+	if override.RegimeRiskCapPct > 0 {
+		base.RegimeRiskCapPct, err = normalizePercentRatio(override.RegimeRiskCapPct, base.RegimeRiskCapPct, "strategy_risk.profiles.regime_risk_cap_pct")
+		if err != nil {
+			return base, err
+		}
+	}
+	if override.MinADX > 0 {
+		base.MinADX = override.MinADX
+	}
+	if override.AllowLong != nil {
+		base.AllowLong = *override.AllowLong
+	}
+	if override.AllowShort != nil {
+		base.AllowShort = *override.AllowShort
+	}
+	if override.MaxSameSideHighCorr > 0 {
+		base.MaxSameSideHighCorr = override.MaxSameSideHighCorr
+	}
+	if override.MaxSameSideLossPct > 0 {
+		base.MaxSameSideLossPct, err = normalizePercentRatio(override.MaxSameSideLossPct, base.MaxSameSideLossPct, "strategy_risk.profiles.max_same_side_loss_pct")
+		if err != nil {
+			return base, err
+		}
+	}
+	if override.MinOrderValueUSDT > 0 {
+		base.MinOrderValueUSDT = override.MinOrderValueUSDT
+	}
+	if override.ExchangeFullTPMode != "" {
+		if !isSupportedExchangeFullTPMode(override.ExchangeFullTPMode) {
+			return base, fmt.Errorf("strategy_risk.profiles[%s].exchange_full_tp_mode无效: %q", base.Name, override.ExchangeFullTPMode)
+		}
+		base.ExchangeFullTPMode = override.ExchangeFullTPMode
+	}
+	if override.ExchangeFullTPMinRR > 0 {
+		base.ExchangeFullTPMinRR = override.ExchangeFullTPMinRR
+	}
+	if base.ExchangeFullTPMinRR < base.MinNetRR {
+		base.ExchangeFullTPMinRR = base.MinNetRR
+	}
+	if base.MinOrderValueUSDT <= 0 {
+		base.MinOrderValueUSDT = 10
+	}
+	return base, nil
+}
+
+func normalizeStrategySafeMode(cfg StrategySafeModeConfig) (StrategySafeModeProfile, error) {
+	safe := defaultStrategySafeMode()
+	var err error
+	if cfg.MaxRiskPct > 0 {
+		safe.MaxRiskPct, err = normalizePercentRatio(cfg.MaxRiskPct, safe.MaxRiskPct, "strategy_risk.safe_mode.max_risk_pct")
+		if err != nil {
+			return safe, err
+		}
+	}
+	if cfg.MaxPositions > 0 {
+		safe.MaxPositions = cfg.MaxPositions
+	}
+	if cfg.DailyOpenLimit > 0 {
+		safe.DailyOpenLimit = cfg.DailyOpenLimit
+	}
+	if cfg.RequireHours > 0 {
+		safe.RequireHours = cfg.RequireHours
+	}
+	if cfg.MinProfitFactor > 0 {
+		safe.MinProfitFactor = cfg.MinProfitFactor
+	}
+	return safe, nil
+}
+
+func defaultStrategyProfiles(defaultMinRR float64) []InstrumentProfileProfile {
+	return []InstrumentProfileProfile{
+		{
+			Name: "btc_eth", Symbols: []string{"BTCUSDT", "ETHUSDT"}, MatchType: "btc_eth",
+			MinStopPct: defaultMinStopFloorPct, FallbackStopPct: 0.015, ATRMultiplier: 1.5, ATRTimeframe: "1h",
+			MinNetRR: defaultMinRR, MaxRiskPct: 0.005, RegimeRiskCapPct: 0.005, MinADX: 20,
+			AllowLong: true, AllowShort: true, MaxSameSideHighCorr: 2, MaxSameSideLossPct: 0.02, MinOrderValueUSDT: 10,
+			ExchangeFullTPMode: StrategyRiskTPModeAlgorithmicFull, ExchangeFullTPMinRR: defaultMinRR,
+		},
+		{
+			Name: "major_alt", Symbols: []string{"SOLUSDT", "BNBUSDT", "BCHUSDT", "XRPUSDT", "LTCUSDT", "ADAUSDT"}, MatchType: "major_alt",
+			MinStopPct: 0.015, FallbackStopPct: 0.02, ATRMultiplier: 2.0, ATRTimeframe: "1h",
+			MinNetRR: defaultMinRR, MaxRiskPct: 0.005, RegimeRiskCapPct: 0.005, MinADX: 22,
+			AllowLong: true, AllowShort: true, MaxSameSideHighCorr: 2, MaxSameSideLossPct: 0.02, MinOrderValueUSDT: 10,
+			ExchangeFullTPMode: StrategyRiskTPModeAlgorithmicFull, ExchangeFullTPMinRR: defaultMinRR,
+		},
+		{
+			Name: "high_beta_alt", Symbols: []string{"DOGEUSDT", "HYPEUSDT", "ZECUSDT", "ASTERUSDT"}, MatchType: "high_beta_alt",
+			MinStopPct: 0.02, FallbackStopPct: 0.025, ATRMultiplier: 2.5, ATRTimeframe: "1h",
+			MinNetRR: defaultMinRR, MaxRiskPct: 0.005, RegimeRiskCapPct: 0.005, MinADX: 25,
+			AllowLong: true, AllowShort: true, MaxSameSideHighCorr: 1, MaxSameSideLossPct: 0.02, MinOrderValueUSDT: 10,
+			ExchangeFullTPMode: StrategyRiskTPModeAlgorithmicFull, ExchangeFullTPMinRR: defaultMinRR,
+		},
+		{
+			Name: "non_crypto", Symbols: []string{"XAG", "XAGUSD", "XAGUSDT"}, MatchType: "non_crypto",
+			MinStopPct: 0.015, FallbackStopPct: 0.02, ATRMultiplier: 2.0, ATRTimeframe: "1h",
+			MinNetRR: defaultMinRR, MaxRiskPct: 0.0025, RegimeRiskCapPct: 0.0025, MinADX: 25,
+			AllowLong: true, AllowShort: true, MaxSameSideHighCorr: 1, MaxSameSideLossPct: 0.015, MinOrderValueUSDT: 10,
+			ExchangeFullTPMode: StrategyRiskTPModeAlgorithmicFull, ExchangeFullTPMinRR: defaultMinRR,
+		},
+		{
+			Name: "default", MatchType: "default",
+			MinStopPct: 0.02, FallbackStopPct: 0.025, ATRMultiplier: 2.5, ATRTimeframe: "1h",
+			MinNetRR: defaultMinRR, MaxRiskPct: 0.005, RegimeRiskCapPct: 0.005, MinADX: 25,
+			AllowLong: true, AllowShort: true, MaxSameSideHighCorr: 1, MaxSameSideLossPct: 0.02, MinOrderValueUSDT: 10,
+			ExchangeFullTPMode: StrategyRiskTPModeAlgorithmicFull, ExchangeFullTPMinRR: defaultMinRR,
+		},
+	}
+}
+
+func defaultStrategySafeMode() StrategySafeModeProfile {
+	return StrategySafeModeProfile{
+		MaxRiskPct:      0.005,
+		MaxPositions:    1,
+		DailyOpenLimit:  1,
+		RequireHours:    24,
+		MinProfitFactor: 1.0,
+	}
+}
+
+func normalizePercentRatio(value, fallback float64, field string) (float64, error) {
+	if value == 0 {
+		return fallback, nil
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("%s不能为负数: %.4f", field, value)
+	}
+	if value >= 0.1 {
+		value = value / 100
+	}
+	return value, nil
+}
+
+func isSupportedStrategyTimeframe(value string) bool {
+	return value == "15m" || value == "1h" || value == "4h"
+}
+
+func isSupportedExchangeFullTPMode(value string) bool {
+	switch value {
+	case StrategyRiskTPModeAlgorithmicFull, StrategyRiskTPModeLegacyAI, StrategyRiskTPModeFinalRTarget:
+		return true
+	default:
+		return false
+	}
+}
+
 // Validate 验证配置有效性
 func (c *Config) Validate() error {
 	if len(c.Traders) == 0 {
@@ -443,6 +848,9 @@ func (c *Config) Validate() error {
 	c.DynamicCandidatePool.ApplyDefaults()
 
 	if _, err := c.NormalizeTradingFrequency(); err != nil {
+		return err
+	}
+	if _, err := c.NormalizeStrategyRisk(); err != nil {
 		return err
 	}
 
