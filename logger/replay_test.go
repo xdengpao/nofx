@@ -76,6 +76,92 @@ func TestBuildReplayReport_UsesStructuredSimulationSource(t *testing.T) {
 	}
 }
 
+func TestBuildReplayReport_DetectsDuplicateCloseAndBalanceDelta(t *testing.T) {
+	now := time.Date(2026, 5, 6, 14, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{
+		{
+			Timestamp:    now,
+			AccountState: AccountSnapshot{TotalBalance: 200},
+			RiskState:    &RiskStateSnapshot{TraderID: "trader-a"},
+			Decisions: []DecisionAction{
+				{Action: "open_long", Symbol: "BTCUSDT", Quantity: 1, Price: 100, Leverage: 5, Success: true, Timestamp: now},
+			},
+		},
+		{
+			Timestamp:    now.Add(10 * time.Minute),
+			AccountState: AccountSnapshot{TotalBalance: 198.5},
+			RiskState:    &RiskStateSnapshot{TraderID: "trader-a"},
+			Decisions: []DecisionAction{
+				{Action: "close_long", Symbol: "BTCUSDT", Quantity: 1, Price: 98, Success: true, Timestamp: now.Add(10 * time.Minute)},
+			},
+		},
+		{
+			Timestamp:    now.Add(13 * time.Minute),
+			AccountState: AccountSnapshot{TotalBalance: 197.8},
+			RiskState:    &RiskStateSnapshot{TraderID: "trader-a"},
+			Decisions: []DecisionAction{
+				{Action: "auto_close_long", Symbol: "BTCUSDT", Quantity: 1, Price: 98, Success: true, CloseSource: "snapshot", Timestamp: now.Add(13 * time.Minute)},
+			},
+		},
+	}
+
+	report := BuildReplayReport(records, true, true)
+	if report.RawCloseActions != 2 || report.DeduplicatedCloseActions != 1 || report.DuplicateCloseCount != 1 {
+		t.Fatalf("重复close统计错误: %+v", report)
+	}
+	if report.DuplicateCloseGroups["BTCUSDT_long"] != 1 {
+		t.Fatalf("重复close分组错误: %+v", report.DuplicateCloseGroups)
+	}
+	if report.FirstBalance != 200 || report.LastBalance != 197.8 || report.BalanceDelta > -2.19 || report.BalanceDelta < -2.21 {
+		t.Fatalf("余额delta错误: first=%.4f last=%.4f delta=%.4f", report.FirstBalance, report.LastBalance, report.BalanceDelta)
+	}
+}
+
+func TestBuildReplayReport_RejectionBuckets(t *testing.T) {
+	now := time.Date(2026, 5, 6, 14, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{{
+		Timestamp: now,
+		Decisions: []DecisionAction{
+			{Action: "open_rejected", Symbol: "ETHUSDT", Success: false, GateReasons: []string{"风险回报比不足: net RR < 2.5"}, Timestamp: now},
+			{Action: "open_rejected", Symbol: "XAGUSDT", Success: false, GateReasons: []string{"BTC 1h/4h bearish，高beta多头禁止"}, Timestamp: now},
+			{Action: "open_rejected", Symbol: "BNBUSDT", Success: false, GateReasons: []string{"置信度低于90"}, Timestamp: now},
+		},
+	}}
+
+	report := BuildReplayReport(records, true, true)
+	if report.RejectionBuckets["rr"] != 1 || report.RejectionBuckets["btc_gate"] != 1 || report.RejectionBuckets["confidence"] != 1 {
+		t.Fatalf("拒绝原因桶错误: %+v", report.RejectionBuckets)
+	}
+	if report.RRRejectionRate < 33 || report.RRRejectionRate > 34 {
+		t.Fatalf("RR拒绝率错误: %.4f", report.RRRejectionRate)
+	}
+}
+
+func TestAttachExchangeCloseSnapshots(t *testing.T) {
+	now := time.Date(2026, 5, 6, 14, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{{
+		Timestamp: now,
+		RiskState: &RiskStateSnapshot{TraderID: "trader-a"},
+		Decisions: []DecisionAction{
+			{Action: "close_short", Symbol: "ETHUSDT", OrderID: 7, Success: true, Timestamp: now},
+			{Action: "auto_close_long", Symbol: "BTCUSDT", OrderID: 8, Success: true, Timestamp: now.Add(time.Minute)},
+		},
+	}}
+	report := BuildReplayReport(records, true, true)
+	AttachExchangeCloseSnapshots(&report, records, []ExchangeCloseSnapshot{
+		{TraderID: "trader-a", Symbol: "ETHUSDT", Side: "short", OrderID: 7, CloseTime: now},
+		{TraderID: "trader-a", Symbol: "SOLUSDT", Side: "long", OrderID: 9, CloseTime: now},
+	})
+
+	if report.ExchangeReconciliation == nil {
+		t.Fatal("应生成交易所对账结果")
+	}
+	got := report.ExchangeReconciliation
+	if got.MatchedCloseCount != 1 || got.MissingInLogsCount != 1 || got.MissingInExchangeCount != 1 {
+		t.Fatalf("交易所对账统计错误: %+v", got)
+	}
+}
+
 func TestFrequencyHelpers(t *testing.T) {
 	now := time.Date(2026, 5, 6, 14, 0, 0, 0, time.UTC)
 	records := []*DecisionRecord{{

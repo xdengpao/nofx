@@ -49,9 +49,11 @@ type TrailingStopLevel struct {
 
 const (
 	softStopLossPnLPct         = -5.0
-	noMomentumMFEThresholdPct  = 3.0
-	noMomentumLossPnLPct       = -3.0
-	noMomentumHoldMinutes      = 60
+	noMomentumMFEThresholdPct  = 1.5
+	noMomentumLossPnLPct       = -1.5
+	noMomentumHoldMinutes      = 45
+	mfeGivebackTriggerPct      = 3.0
+	mfeGivebackCloseRatio      = 0.70
 	highPeakProfitProtectPct   = 12.0
 	highPeakProfitProtectRatio = 0.65
 	basePeakProfitProtectRatio = 0.60
@@ -81,7 +83,7 @@ var defaultTPConfig = &TakeProfitEngineConfig{
 }
 
 var defaultTrailingConfig = &TrailingStopConfig{
-	BreakevenThreshold: 6.0,
+	BreakevenThreshold: 2.0,
 	LockProfitThresholds: []TrailingStopLevel{
 		{PnLThreshold: 10.0, LockPercent: 0.25, RequireADXAbove: 20},
 		{PnLThreshold: 12.0, LockPercent: 0.40, RequireADXAbove: 20},
@@ -311,9 +313,9 @@ func (e *PositionEvaluator) evaluateSoftStop(holdingMinutes int64) *EvaluationRe
 	}
 
 	peakPnL := math.Max(e.Plan.PeakPnLPercent, pnlPct)
-	if holdingMinutes >= noMomentumHoldMinutes &&
-		peakPnL < noMomentumMFEThresholdPct &&
-		pnlPct <= noMomentumLossPnLPct {
+	noMomentumFailure := peakPnL < noMomentumMFEThresholdPct && pnlPct <= noMomentumLossPnLPct
+	lateSevereFailure := peakPnL < 3.0 && pnlPct <= -3.0
+	if holdingMinutes >= noMomentumHoldMinutes && (noMomentumFailure || lateSevereFailure) {
 		return &EvaluationResult{
 			Action: "close",
 			Reason: fmt.Sprintf("⚠️ 动量失败软止损: 持仓%d分钟，MFE %.2f%% < %.2f%%，当前%.2f%%",
@@ -331,11 +333,32 @@ func (e *PositionEvaluator) evaluateSoftStop(holdingMinutes int64) *EvaluationRe
 		}
 	}
 
+	if e.checkMFEGivebackWithWeakMomentum(peakPnL) {
+		return &EvaluationResult{
+			Action: "close",
+			Reason: fmt.Sprintf("⚠️ 浮盈大幅回吐软止损: 峰值盈利%.2f%%，当前%.2f%%，短周期动量转弱",
+				peakPnL, pnlPct),
+			IsHardStop: false,
+		}
+	}
+
 	return nil
 }
 
 func (e *PositionEvaluator) checkLostBreakevenWithWeakMomentum(peakPnL float64) bool {
 	if peakPnL < noMomentumMFEThresholdPct || e.Position.UnrealizedPnLPct > 0 {
+		return false
+	}
+	return hasWeakShortTermMomentum(e.MarketData, e.Plan.Direction) ||
+		hasWeakShortTermMomentum(e.BTCMarketData, e.Plan.Direction)
+}
+
+func (e *PositionEvaluator) checkMFEGivebackWithWeakMomentum(peakPnL float64) bool {
+	if peakPnL < mfeGivebackTriggerPct || e.Position.UnrealizedPnLPct < 0 {
+		return false
+	}
+	giveback := peakPnL - e.Position.UnrealizedPnLPct
+	if giveback < peakPnL*mfeGivebackCloseRatio {
 		return false
 	}
 	return hasWeakShortTermMomentum(e.MarketData, e.Plan.Direction) ||
@@ -784,7 +807,8 @@ func (e *PositionEvaluator) calculateTrailingStopImproved(config *TrailingStopCo
 	var reason string
 
 	// 检查是否达到保本阈值
-	if pnlPct < config.BreakevenThreshold {
+	currentRR := e.calculateCurrentRR()
+	if pnlPct < config.BreakevenThreshold && currentRR < 1.0 {
 		return 0 // 盈利不足，不移动止损
 	}
 
@@ -813,7 +837,7 @@ func (e *PositionEvaluator) calculateTrailingStopImproved(config *TrailingStopCo
 	}
 
 	// 如果没有匹配任何档位，检查是否应该保本
-	if newSL == 0 && pnlPct >= config.BreakevenThreshold {
+	if newSL == 0 && (pnlPct >= config.BreakevenThreshold || currentRR >= 1.0) {
 		if e.Plan.Direction == "long" {
 			newSL = entryPrice * 1.002 // 0.2%覆盖手续费
 		} else {

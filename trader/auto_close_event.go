@@ -8,10 +8,18 @@ import (
 )
 
 const autoCloseDedupeTTL = 10 * time.Minute
+const closedPositionDedupeTTL = 30 * time.Minute
+
+const (
+	autoCloseSourceOrderTracker = "order_tracker"
+	autoCloseSourceSnapshot     = "snapshot"
+	autoCloseSourceStalePlan    = "stale_plan"
+)
 
 type autoCloseEvent struct {
 	Symbol          string
 	Side            string
+	Source          string
 	OrderID         int64
 	EntryPrice      float64
 	ExitPrice       float64
@@ -23,6 +31,10 @@ type autoCloseEvent struct {
 	Commission      float64
 	CloseReason     string
 	CloseTime       time.Time
+}
+
+func positionLifecycleKey(symbol, side string) string {
+	return symbol + "_" + side
 }
 
 func (at *AutoTrader) claimAutoCloseEvent(symbol, side string, orderID int64, eventTime time.Time) bool {
@@ -53,6 +65,39 @@ func (at *AutoTrader) claimAutoCloseEvent(symbol, side string, orderID int64, ev
 	return true
 }
 
+func (at *AutoTrader) markPositionLifecycleClosed(symbol, side string, closedAt time.Time) {
+	if at.closedPositionDedupe == nil {
+		at.closedPositionDedupe = make(map[string]time.Time)
+	}
+	if closedAt.IsZero() {
+		closedAt = time.Now()
+	}
+	at.closedPositionDedupe[positionLifecycleKey(symbol, side)] = closedAt
+	at.clearLocalPositionLifecycle(symbol, side)
+}
+
+func (at *AutoTrader) clearLocalPositionLifecycle(symbol, side string) {
+	key := positionLifecycleKey(symbol, side)
+	delete(at.lastPositions, key)
+	delete(at.positionFirstSeenTime, key)
+}
+
+func (at *AutoTrader) wasPositionLifecycleRecentlyClosed(symbol, side string, now time.Time) bool {
+	if len(at.closedPositionDedupe) == 0 {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	for key, closedAt := range at.closedPositionDedupe {
+		if now.Sub(closedAt) > closedPositionDedupeTTL {
+			delete(at.closedPositionDedupe, key)
+		}
+	}
+	closedAt, ok := at.closedPositionDedupe[positionLifecycleKey(symbol, side)]
+	return ok && now.Sub(closedAt) <= closedPositionDedupeTTL
+}
+
 func (at *AutoTrader) handleAutoCloseEvent(event autoCloseEvent, writeStandaloneLog bool) logger.DecisionAction {
 	action := "auto_close_long"
 	if event.Side == "short" {
@@ -61,19 +106,25 @@ func (at *AutoTrader) handleAutoCloseEvent(event autoCloseEvent, writeStandalone
 	if event.CloseTime.IsZero() {
 		event.CloseTime = time.Now()
 	}
-
-	actionRecord := logger.DecisionAction{
-		Action:    action,
-		Symbol:    event.Symbol,
-		Quantity:  event.Quantity,
-		Leverage:  event.Leverage,
-		Price:     event.ExitPrice,
-		OrderID:   event.OrderID,
-		Timestamp: event.CloseTime,
-		Success:   true,
-		Reasoning: event.CloseReason,
+	if event.Source == "" {
+		event.Source = autoCloseSourceSnapshot
 	}
 
+	actionRecord := logger.DecisionAction{
+		Action:           action,
+		Symbol:           event.Symbol,
+		Quantity:         event.Quantity,
+		Leverage:         event.Leverage,
+		Price:            event.ExitPrice,
+		OrderID:          event.OrderID,
+		Timestamp:        event.CloseTime,
+		Success:          true,
+		Reasoning:        event.CloseReason,
+		CloseSource:      event.Source,
+		ExchangeMetadata: event.Source == autoCloseSourceOrderTracker,
+	}
+
+	counted := false
 	if event.ExitPrice > 0 && event.EntryPrice > 0 && event.Quantity > 0 {
 		pnlUSD, pnlPercent := autoClosePnL(event.Side, event.EntryPrice, event.ExitPrice, event.Quantity, event.Leverage)
 		if event.RealizedPnL != 0 {
@@ -82,14 +133,32 @@ func (at *AutoTrader) handleAutoCloseEvent(event autoCloseEvent, writeStandalone
 		if event.PnLPercent != 0 {
 			pnlPercent = event.PnLPercent
 		}
-		decision.OnPositionClosedScoped(at.id, event.Symbol, event.Side, event.ExitPrice, pnlPercent, pnlUSD, event.CloseReason)
+		counted = decision.OnPositionClosedWithInput(decision.ClosedPositionInput{
+			TraderID:            at.id,
+			Symbol:              event.Symbol,
+			Side:                event.Side,
+			Source:              event.Source,
+			EntryPrice:          event.EntryPrice,
+			ExitPrice:           event.ExitPrice,
+			Quantity:            event.Quantity,
+			Leverage:            event.Leverage,
+			PnLPercent:          pnlPercent,
+			PnLUSD:              pnlUSD,
+			Commission:          event.Commission,
+			Reason:              event.CloseReason,
+			CloseTime:           event.CloseTime,
+			HoldingMinutes:      event.HoldTimeMinutes,
+			HasExchangeMetadata: event.Source == autoCloseSourceOrderTracker,
+		})
 	} else {
 		decision.OnPositionClosedSimpleScoped(at.id, event.Symbol, event.Side, event.CloseReason)
 	}
+	actionRecord.CountedInStats = &counted
 
 	if at.orderTracker != nil {
 		at.orderTracker.StopTracking(event.Symbol, event.Side)
 	}
+	at.markPositionLifecycleClosed(event.Symbol, event.Side, event.CloseTime)
 
 	if writeStandaloneLog {
 		at.logAutoClosedAction(actionRecord, event)

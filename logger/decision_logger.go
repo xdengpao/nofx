@@ -47,6 +47,7 @@ type RiskStateSnapshot struct {
 	OpenGateDiagnostics      []map[string]any         `json:"open_gate_diagnostics,omitempty"`
 	FrequencyPolicy          *FrequencyPolicySnapshot `json:"frequency_policy,omitempty"`
 	FrequencyState           *FrequencyStateSnapshot  `json:"frequency_state,omitempty"`
+	LossMode                 *LossModeSnapshot        `json:"loss_mode,omitempty"`
 }
 
 // FrequencyPolicySnapshot 是日志层的开仓频率策略快照，避免 logger 依赖 decision 包。
@@ -72,6 +73,17 @@ type FrequencyStateSnapshot struct {
 	Drawdown24hPct     float64 `json:"drawdown_24h_pct"`
 	AutoRollbackActive bool    `json:"auto_rollback_active"`
 	AutoRollbackReason string  `json:"auto_rollback_reason,omitempty"`
+}
+
+// LossModeSnapshot 是日志层的亏损模式状态快照，避免 logger 依赖 decision 包。
+type LossModeSnapshot struct {
+	Active          bool    `json:"active"`
+	Reason          string  `json:"reason,omitempty"`
+	CooldownUntil   string  `json:"cooldown_until,omitempty"`
+	MaxRiskPerTrade float64 `json:"max_risk_per_trade,omitempty"`
+	MaxPositions    int     `json:"max_positions,omitempty"`
+	DailyOpenLimit  int     `json:"daily_open_limit,omitempty"`
+	MinConfidence   int     `json:"min_confidence,omitempty"`
 }
 
 // AccountSnapshot 账户状态快照
@@ -142,6 +154,9 @@ type DecisionAction struct {
 	HighRisk                 bool                              `json:"high_risk,omitempty"`
 	HighRiskReason           string                            `json:"high_risk_reason,omitempty"`
 	RemainingPositionUSD     float64                           `json:"remaining_position_usd,omitempty"`
+	CloseSource              string                            `json:"close_source,omitempty"`
+	ExchangeMetadata         bool                              `json:"exchange_metadata,omitempty"`
+	CountedInStats           *bool                             `json:"counted_in_stats,omitempty"`
 }
 
 // OpenFrequencySimulationSnapshot 是日志层的 report-only 开仓频率模拟结果。

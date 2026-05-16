@@ -274,6 +274,17 @@ type FrequencyState struct {
 	AutoRollbackReason string  `json:"auto_rollback_reason,omitempty"`
 }
 
+// LossModeState 是去重后亏损模式的确定性风控状态。
+type LossModeState struct {
+	Active          bool      `json:"active"`
+	Reason          string    `json:"reason,omitempty"`
+	CooldownUntil   time.Time `json:"cooldown_until,omitempty"`
+	MaxRiskPerTrade float64   `json:"max_risk_per_trade,omitempty"`
+	MaxPositions    int       `json:"max_positions,omitempty"`
+	DailyOpenLimit  int       `json:"daily_open_limit,omitempty"`
+	MinConfidence   int       `json:"min_confidence,omitempty"`
+}
+
 // EvaluationResult 评估结果
 type EvaluationResult struct {
 	Action            string
@@ -315,6 +326,7 @@ type TradeStatistics struct {
 type ClosedTradeRecord struct {
 	Symbol         string    `json:"symbol"`
 	Side           string    `json:"side"`
+	Source         string    `json:"source,omitempty"`
 	CloseReason    string    `json:"close_reason"`
 	EntryPrice     float64   `json:"entry_price"`
 	ExitPrice      float64   `json:"exit_price"`
@@ -331,6 +343,26 @@ type ClosedTradeRecord struct {
 	ExitReason     string    `json:"exit_reason"`
 	PeakPnLPercent float64   `json:"peak_pnl_percent"`
 	ClosedAt       time.Time `json:"closed_at"`
+}
+
+// ClosedPositionInput 描述一次已确认的平仓事件。
+type ClosedPositionInput struct {
+	TraderID            string
+	Symbol              string
+	Side                string
+	Source              string
+	EntryPrice          float64
+	ExitPrice           float64
+	Quantity            float64
+	Leverage            int
+	PnLPercent          float64
+	PnLUSD              float64
+	Commission          float64
+	Reason              string
+	EntryTime           time.Time
+	CloseTime           time.Time
+	HoldingMinutes      float64
+	HasExchangeMetadata bool
 }
 
 // PersistentData 持久化数据结构

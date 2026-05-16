@@ -939,19 +939,60 @@ func OnPositionClosed(symbol string, exitPrice float64, pnlPercent float64, pnlU
 
 // OnPositionClosedScoped 平仓成功后调用，带 trader/side 作用域。
 func OnPositionClosedScoped(traderID, symbol, side string, exitPrice float64, pnlPercent float64, pnlUSD float64, reason string) {
+	OnPositionClosedWithInput(ClosedPositionInput{
+		TraderID:   traderID,
+		Symbol:     symbol,
+		Side:       side,
+		Source:     "manual",
+		ExitPrice:  exitPrice,
+		PnLPercent: pnlPercent,
+		PnLUSD:     pnlUSD,
+		Reason:     reason,
+	})
+}
+
+// OnPositionClosedWithInput 记录一次平仓。只有活跃计划或交易所验证元数据足够完整时才更新统计。
+func OnPositionClosedWithInput(input ClosedPositionInput) bool {
+	traderID := input.TraderID
+	symbol := input.Symbol
+	side := input.Side
 	plan := planManager.GetPlanScoped(traderID, symbol, side)
 
 	now := time.Now()
+	closeTime := input.CloseTime
+	if closeTime.IsZero() {
+		closeTime = now
+	}
+
+	hasPlan := plan != nil
+	hasExchangeMetadata := input.HasExchangeMetadata &&
+		input.Symbol != "" &&
+		input.Side != "" &&
+		input.EntryPrice > 0 &&
+		input.ExitPrice > 0 &&
+		input.Quantity > 0 &&
+		input.Leverage > 0
+	if !hasPlan && !hasExchangeMetadata {
+		planManager.RemovePlanScoped(traderID, symbol, side)
+		RemovePositionStartTimeScoped(traderID, symbol, side)
+		log.Printf("⚠️ 跳过平仓统计: %s %s 缺少交易计划和有效交易所元数据, 原因: %s",
+			symbol, side, input.Reason)
+		return false
+	}
+
 	var record ClosedTradeRecord
 	record.Symbol = symbol
-	record.ExitPrice = exitPrice
-	record.PnLPercent = pnlPercent
-	record.PnLUSD = pnlUSD
-	record.RealizedPnL = pnlUSD
-	record.ExitReason = reason
-	record.CloseReason = reason
+	record.Side = side
+	record.Source = input.Source
+	record.ExitPrice = input.ExitPrice
+	record.PnLPercent = input.PnLPercent
+	record.PnLUSD = input.PnLUSD
+	record.RealizedPnL = input.PnLUSD
+	record.ExitReason = input.Reason
+	record.CloseReason = input.Reason
 	record.ClosedAt = now
-	record.ExitTime = now
+	record.ExitTime = closeTime
+	record.Commission = input.Commission
 
 	if plan != nil {
 		record.Direction = plan.Direction
@@ -967,6 +1008,17 @@ func OnPositionClosedScoped(traderID, symbol, side string, exitPrice float64, pn
 		} else if plan.Direction == "short" {
 			record.Side = "short"
 		}
+	} else {
+		record.Direction = side
+		record.EntryPrice = input.EntryPrice
+		record.EntryTime = input.EntryTime
+		record.Quantity = input.Quantity
+		record.Leverage = input.Leverage
+		if input.HoldingMinutes > 0 {
+			record.HoldingMinutes = int64(input.HoldingMinutes)
+		} else if !input.EntryTime.IsZero() {
+			record.HoldingMinutes = int64(closeTime.Sub(input.EntryTime).Minutes())
+		}
 	}
 
 	closedTradesLock.Lock()
@@ -976,14 +1028,15 @@ func OnPositionClosedScoped(traderID, symbol, side string, exitPrice float64, pn
 	}
 	closedTradesLock.Unlock()
 
-	UpdateStatistics(pnlPercent, float64(record.HoldingMinutes))
-	AddReturn(pnlPercent)
+	UpdateStatistics(input.PnLPercent, float64(record.HoldingMinutes))
+	AddReturn(input.PnLPercent)
 
 	planManager.RemovePlanScoped(traderID, symbol, side)
 	RemovePositionStartTimeScoped(traderID, symbol, side)
 
 	log.Printf("✅ 平仓成功: %s 盈亏%.2f%% (峰值%.2f%%), 原因: %s",
-		symbol, pnlPercent, record.PeakPnLPercent, reason)
+		symbol, input.PnLPercent, record.PeakPnLPercent, input.Reason)
+	return true
 }
 
 // OnPositionClosedSimple 简化版平仓回调

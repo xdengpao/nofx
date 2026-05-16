@@ -48,6 +48,7 @@ type Context struct {
 	AnalysisIntervalMin      int                                `json:"-"`
 	FrequencyPolicy          *FrequencyPolicy                   `json:"-"`
 	FrequencyState           *FrequencyState                    `json:"-"`
+	LossMode                 *LossModeState                     `json:"-"`
 }
 
 const defaultMaxAccountDrawdownPct = 20.0
@@ -649,6 +650,19 @@ func needsTakeProfitSync(plan *TradePlan) bool {
 // ============================================================================
 
 func shouldCallAIForNewOpportunities(ctx *Context) bool {
+	if ctx.LossMode != nil && ctx.LossMode.Active {
+		if ctx.LossMode.DailyOpenLimit > 0 && ctx.FrequencyState != nil &&
+			ctx.FrequencyState.OpenCount24h >= ctx.LossMode.DailyOpenLimit {
+			log.Printf("📊 亏损模式24小时新增开仓已达上限(%d/%d)，跳过新机会搜索",
+				ctx.FrequencyState.OpenCount24h, ctx.LossMode.DailyOpenLimit)
+			return false
+		}
+		if ctx.LossMode.MaxPositions > 0 && ctx.Account.PositionCount >= ctx.LossMode.MaxPositions {
+			log.Printf("📊 亏损模式持仓已满(%d/%d)，跳过新机会搜索", ctx.Account.PositionCount, ctx.LossMode.MaxPositions)
+			return false
+		}
+	}
+
 	if ctx.FrequencyPolicy != nil && ctx.FrequencyPolicy.DailyOpenLimit > 0 && ctx.FrequencyState != nil &&
 		ctx.FrequencyState.OpenCount24h >= ctx.FrequencyPolicy.DailyOpenLimit {
 		log.Printf("📊 24小时新增开仓已达上限(%d/%d)，跳过新机会搜索",
@@ -670,8 +684,9 @@ func shouldCallAIForNewOpportunities(ctx *Context) bool {
 		}
 	}
 
-	if ctx.Account.PositionCount >= 3 {
-		log.Printf("📊 持仓已满(%d/3)，跳过新机会搜索", ctx.Account.PositionCount)
+	maxPositions := maxOpenPositions(ctx)
+	if ctx.Account.PositionCount >= maxPositions {
+		log.Printf("📊 持仓已满(%d/%d)，跳过新机会搜索", ctx.Account.PositionCount, maxPositions)
 		return false
 	}
 
@@ -685,6 +700,18 @@ func shouldCallAIForNewOpportunities(ctx *Context) bool {
 }
 
 func describeAISkipReason(ctx *Context) string {
+	if ctx.LossMode != nil && ctx.LossMode.Active {
+		if ctx.LossMode.DailyOpenLimit > 0 && ctx.FrequencyState != nil &&
+			ctx.FrequencyState.OpenCount24h >= ctx.LossMode.DailyOpenLimit {
+			return fmt.Sprintf("亏损模式24小时新增开仓已达上限(%d/%d)，跳过本周期新机会搜索",
+				ctx.FrequencyState.OpenCount24h, ctx.LossMode.DailyOpenLimit)
+		}
+		if ctx.LossMode.MaxPositions > 0 && ctx.Account.PositionCount >= ctx.LossMode.MaxPositions {
+			return fmt.Sprintf("亏损模式持仓已满(%d/%d)，跳过本周期新机会搜索",
+				ctx.Account.PositionCount, ctx.LossMode.MaxPositions)
+		}
+	}
+
 	if ctx.FrequencyPolicy != nil && ctx.FrequencyPolicy.DailyOpenLimit > 0 && ctx.FrequencyState != nil &&
 		ctx.FrequencyState.OpenCount24h >= ctx.FrequencyPolicy.DailyOpenLimit {
 		return fmt.Sprintf("24小时新增开仓已达上限(%d/%d)，跳过本周期新机会搜索",
@@ -703,8 +730,9 @@ func describeAISkipReason(ctx *Context) string {
 		}
 	}
 
-	if ctx.Account.PositionCount >= 3 {
-		return fmt.Sprintf("持仓已满(%d/3)，跳过本周期新机会搜索", ctx.Account.PositionCount)
+	maxPositions := maxOpenPositions(ctx)
+	if ctx.Account.PositionCount >= maxPositions {
+		return fmt.Sprintf("持仓已满(%d/%d)，跳过本周期新机会搜索", ctx.Account.PositionCount, maxPositions)
 	}
 
 	remainingBudget := calculateRemainingRiskBudget(ctx)
@@ -718,6 +746,15 @@ func describeAISkipReason(ctx *Context) string {
 func calculateRemainingRiskBudget(ctx *Context) float64 {
 	usedRisk, _ := CalculateTotalRisk(ctx)
 	return ctx.TotalRiskBudget - usedRisk
+}
+
+func maxOpenPositions(ctx *Context) int {
+	limit := 3
+	if ctx != nil && ctx.LossMode != nil && ctx.LossMode.Active &&
+		ctx.LossMode.MaxPositions > 0 && ctx.LossMode.MaxPositions < limit {
+		limit = ctx.LossMode.MaxPositions
+	}
+	return limit
 }
 
 // ============================================================================
@@ -976,8 +1013,9 @@ func validateFinalDecisions(decisions []Decision, ctx *Context) error {
 	}
 
 	totalPositions := ctx.Account.PositionCount + newPositions
-	if totalPositions > 3 {
-		return fmt.Errorf("总持仓数量(%d)超过上限(3)", totalPositions)
+	maxPositions := maxOpenPositions(ctx)
+	if totalPositions > maxPositions {
+		return fmt.Errorf("总持仓数量(%d)超过上限(%d)", totalPositions, maxPositions)
 	}
 
 	return nil
@@ -988,7 +1026,8 @@ func enforceFinalDecisionLimits(decisions []Decision, ctx *Context) ([]Decision,
 		return decisions, nil
 	}
 
-	availableSlots := 3 - ctx.Account.PositionCount
+	maxPositions := maxOpenPositions(ctx)
+	availableSlots := maxPositions - ctx.Account.PositionCount
 	if availableSlots < 0 {
 		availableSlots = 0
 	}
@@ -1007,6 +1046,19 @@ func enforceFinalDecisionLimits(decisions []Decision, ctx *Context) ([]Decision,
 			dailyOpenRemaining = 0
 		}
 	}
+	if ctx.LossMode != nil && ctx.LossMode.Active && ctx.LossMode.DailyOpenLimit > 0 {
+		openCount := 0
+		if ctx.FrequencyState != nil {
+			openCount = ctx.FrequencyState.OpenCount24h
+		}
+		lossModeRemaining := ctx.LossMode.DailyOpenLimit - openCount
+		if lossModeRemaining < 0 {
+			lossModeRemaining = 0
+		}
+		if dailyOpenRemaining == 0 || lossModeRemaining < dailyOpenRemaining {
+			dailyOpenRemaining = lossModeRemaining
+		}
+	}
 	for _, d := range decisions {
 		if d.Action != "open_long" && d.Action != "open_short" {
 			result = append(result, d)
@@ -1016,20 +1068,30 @@ func enforceFinalDecisionLimits(decisions []Decision, ctx *Context) ([]Decision,
 			rejections = append(rejections, OpenRejection{
 				Symbol: d.Symbol,
 				Action: d.Action,
-				Reason: fmt.Sprintf("%s %s 因持仓上限3个被拒绝", d.Symbol, d.Action),
+				Reason: fmt.Sprintf("%s %s 因持仓上限%d个被拒绝", d.Symbol, d.Action, maxPositions),
 			})
 			continue
 		}
-		if ctx.FrequencyPolicy != nil && ctx.FrequencyPolicy.DailyOpenLimit > 0 && keptOpens >= dailyOpenRemaining {
+		if dailyOpenRemaining > 0 && keptOpens >= dailyOpenRemaining ||
+			dailyOpenRemaining == 0 && (ctx.FrequencyPolicy != nil && ctx.FrequencyPolicy.DailyOpenLimit > 0 ||
+				ctx.LossMode != nil && ctx.LossMode.Active && ctx.LossMode.DailyOpenLimit > 0) {
 			openCount := 0
 			if ctx.FrequencyState != nil {
 				openCount = ctx.FrequencyState.OpenCount24h
+			}
+			limit := 0
+			if ctx.FrequencyPolicy != nil && ctx.FrequencyPolicy.DailyOpenLimit > 0 {
+				limit = ctx.FrequencyPolicy.DailyOpenLimit
+			}
+			if ctx.LossMode != nil && ctx.LossMode.Active && ctx.LossMode.DailyOpenLimit > 0 &&
+				(limit == 0 || ctx.LossMode.DailyOpenLimit < limit) {
+				limit = ctx.LossMode.DailyOpenLimit
 			}
 			rejections = append(rejections, OpenRejection{
 				Symbol: d.Symbol,
 				Action: d.Action,
 				Reason: fmt.Sprintf("%s %s 因24小时新增开仓上限%d笔被拒绝(当前%d笔)",
-					d.Symbol, d.Action, ctx.FrequencyPolicy.DailyOpenLimit, openCount+keptOpens),
+					d.Symbol, d.Action, limit, openCount+keptOpens),
 			})
 			continue
 		}
@@ -1922,7 +1984,7 @@ func buildSystemPrompt(ctx *Context) string {
 	sb.WriteString("# ⚖️ 硬约束\n\n")
 	sb.WriteString("| 约束 | 值 |\n")
 	sb.WriteString("|------|----|\n")
-	sb.WriteString("| 风险回报比 | ≥ 1:3 |\n")
+	sb.WriteString("| 净风险回报比 | `(止盈距离% - 0.2) / 止损距离% >= 2.5` |\n")
 	sb.WriteString("| 单笔风险 | ≤ 账户净值的2% |\n")
 	sb.WriteString(fmt.Sprintf("| 仓位上限 | 山寨币 %.0f USD / BTC&ETH %.0f USD |\n", maxPositionForAltcoin, maxPositionForBTCETH))
 	sb.WriteString("| OI价值 | ≥ 15M USD |\n\n")
@@ -1940,7 +2002,7 @@ func buildSystemPrompt(ctx *Context) string {
 	sb.WriteString("3. **检查组合暴露** → 避免同向高 beta 持仓过度集中\n")
 	sb.WriteString("4. **多时间框架确认** → 4h/1h/15m 信号对齐\n")
 	sb.WriteString("5. **计算仓位** → ATR自适应 + 相关性调整 + 亏损后降仓\n")
-	sb.WriteString("6. **设置止损止盈** → 止损=ATR×2.5, RR≥1:3.5\n")
+	sb.WriteString("6. **设置止损止盈** → 止损=ATR×2.5，净RR公式 `(止盈距离% - 0.2) / 止损距离% >= 2.5`\n")
 	sb.WriteString("7. **定义失效条件** → 什么情况下计划失效\n\n")
 
 	// 🆕 新增：失效条件格式说明
@@ -1964,6 +2026,7 @@ func buildSystemPrompt(ctx *Context) string {
 	sb.WriteString("# 💵 波动率自适应仓位\n\n")
 	sb.WriteString("```\n")
 	sb.WriteString("止损距离 = ATR14 × 倍数（山寨2.5，BTC/ETH 1.8）\n")
+	sb.WriteString("最低止盈距离% = 止损距离% × 2.5 + 0.2\n")
 	sb.WriteString("仓位大小 = (账户净值 × 2%) / 止损百分比\n")
 	sb.WriteString("```\n\n")
 
@@ -2022,7 +2085,7 @@ func buildSystemPrompt(ctx *Context) string {
 	sb.WriteString("```\n\n")
 
 	sb.WriteString("---\n")
-	sb.WriteString("**核心原则**: 宁可错过，不可做错 | 风险回报比≥1:3 | BTC是龙头 | 失效条件必须明确\n")
+	sb.WriteString("**核心原则**: 宁可错过，不可做错 | 净RR≥2.5 | BTC是龙头 | 失效条件必须明确\n")
 
 	return sb.String()
 }
@@ -2086,6 +2149,9 @@ func buildUserPrompt(ctx *Context, remainingBudget float64) string {
 		if coin.Symbol == "BTCUSDT" && !prioritizeCore {
 			continue
 		}
+		if restrictionState == "block" && isHighBetaAltcoin(coin.Symbol) {
+			continue
+		}
 		if !candidateIncludedInPrompt(coin) {
 			continue
 		}
@@ -2125,6 +2191,10 @@ func buildUserPrompt(ctx *Context, remainingBudget float64) string {
 		if ctx.EffectiveMaxRiskPerTrade > 0 && (riskForSizing == 0 || ctx.EffectiveMaxRiskPerTrade < riskForSizing) {
 			riskForSizing = ctx.EffectiveMaxRiskPerTrade
 		}
+		if ctx.LossMode != nil && ctx.LossMode.Active && ctx.LossMode.MaxRiskPerTrade > 0 &&
+			(riskForSizing == 0 || ctx.LossMode.MaxRiskPerTrade < riskForSizing) {
+			riskForSizing = ctx.LossMode.MaxRiskPerTrade
+		}
 		suggestedSize, stopDist := market.CalculateAdaptivePositionSize(
 			ctx.Account.TotalEquity,
 			atr14,
@@ -2149,8 +2219,13 @@ func buildUserPrompt(ctx *Context, remainingBudget float64) string {
 			}
 			sb.WriteString("\n")
 		}
-		sb.WriteString(fmt.Sprintf("**建议仓位**: %.0f USD | **止损距离**: %.4f\n",
-			suggestedSize, stopDist))
+		stopPct := 0.0
+		if marketData.CurrentPrice > 0 {
+			stopPct = stopDist / marketData.CurrentPrice * 100
+		}
+		minTakeProfitPct := stopPct*2.5 + 0.2
+		sb.WriteString(fmt.Sprintf("**建议仓位**: %.0f USD | **建议止损/最大SL距离**: %.4f (%.2f%%) | **最低TP距离**: %.2f%%\n",
+			suggestedSize, stopDist, stopPct, minTakeProfitPct))
 		sb.WriteString(market.FormatCompact(marketData))
 		sb.WriteString("\n")
 

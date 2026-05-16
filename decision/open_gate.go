@@ -77,6 +77,7 @@ func EvaluateOpenGate(input OpenGateInput) OpenGateResult {
 	applyCorrelationConcentrationGate(&result, input.Decision, ctx)
 	applyHighADXChaseGate(&result, input.Decision, input.MarketData)
 	applyExecutionQualityGate(&result, input.ExecutionQuality)
+	applyLossModeGate(&result, input.Decision, ctx)
 
 	if result.AdjustedSizeUSD <= 0 {
 		result.AdjustedSizeUSD = input.Decision.PositionSizeUSD
@@ -89,10 +90,36 @@ func baseOpenGateRisk(ctx *Context) float64 {
 	if ctx.EffectiveMaxRiskPerTrade > 0 && (maxRisk == 0 || ctx.EffectiveMaxRiskPerTrade < maxRisk) {
 		maxRisk = ctx.EffectiveMaxRiskPerTrade
 	}
+	if ctx.LossMode != nil && ctx.LossMode.Active && ctx.LossMode.MaxRiskPerTrade > 0 &&
+		(maxRisk == 0 || ctx.LossMode.MaxRiskPerTrade < maxRisk) {
+		maxRisk = ctx.LossMode.MaxRiskPerTrade
+	}
 	if maxRisk <= 0 {
 		maxRisk = 0.02
 	}
 	return maxRisk
+}
+
+func applyLossModeGate(result *OpenGateResult, d *Decision, ctx *Context) {
+	if result == nil || d == nil || ctx == nil || ctx.LossMode == nil || !ctx.LossMode.Active {
+		return
+	}
+	lossMode := ctx.LossMode
+	if lossMode.MaxRiskPerTrade > 0 && result.EffectiveRisk > lossMode.MaxRiskPerTrade {
+		result.EffectiveRisk = lossMode.MaxRiskPerTrade
+	}
+	if lossMode.MinConfidence > 0 {
+		result.requireMinConfidence(lossMode.MinConfidence, "亏损模式置信度要求")
+	}
+	if d.Action == "open_long" && isHighBetaAltcoin(d.Symbol) {
+		btcData := ctx.MarketDataMap["BTCUSDT"]
+		if !isBTCHigherTimeframeSupportive(btcData) {
+			result.blockWithDiagnostics("亏损模式下BTC高周期未确认支持，禁止高 beta 山寨多单", "loss_mode", buildBTCGateDiagnostics(btcData))
+		}
+	}
+	if lossMode.Reason != "" {
+		result.Warnings = append(result.Warnings, "亏损模式: "+lossMode.Reason)
+	}
 }
 
 func applyDirectionalConfidenceGate(result *OpenGateResult, d *Decision, data *market.Data) {
@@ -483,6 +510,29 @@ func isBTCOneHourBearish(data *market.Data) bool {
 	emaBearish := ema20 > 0 && ema50 > 0 && ema20 < ema50
 	macdPriceBearish := macdHist < 0 && data.PriceChange1h < 0
 	return emaBearish || macdPriceBearish
+}
+
+func isBTCHigherTimeframeSupportive(data *market.Data) bool {
+	if data == nil || isConfirmedBTCBearishStructure(data) || isBearishStructure(data) || hasBTCMultiTimeframeConflict(data) {
+		return false
+	}
+	fourHBullish := false
+	if data.LongerTermContext != nil {
+		macdHist := lastFloat(data.LongerTermContext.MACDHist)
+		fourHBullish = data.LongerTermContext.EMA20 > 0 &&
+			data.CurrentPrice >= data.LongerTermContext.EMA20 &&
+			data.CurrentDIPlus >= data.CurrentDIMinus &&
+			macdHist >= 0
+	}
+	oneHBullish := false
+	if data.MidTermSeries1h != nil {
+		oneHBullish = isSeriesBullish(
+			data.MidTermSeries1h.EMA20Values,
+			data.MidTermSeries1h.EMA50Values,
+			data.MidTermSeries1h.MACDHist,
+		) && data.PriceChange1h >= 0
+	}
+	return fourHBullish && oneHBullish
 }
 
 func buildBTCGateDiagnostics(data *market.Data) map[string]any {

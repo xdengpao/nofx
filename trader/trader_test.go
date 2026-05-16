@@ -919,6 +919,120 @@ func TestDetectAutoClosedPositions_DedupesPreviouslyClaimedEvent(t *testing.T) {
 	}
 }
 
+func TestDetectAutoClosedPositions_SkipsRecentlyManualClosedLifecycle(t *testing.T) {
+	originalGetter := getMarketData
+	getMarketData = func(symbol string) (*market.Data, error) {
+		return &market.Data{Symbol: symbol, CurrentPrice: 110}, nil
+	}
+	t.Cleanup(func() { getMarketData = originalGetter })
+	if err := decision.InitPlanManager(t.TempDir()); err != nil {
+		t.Fatalf("初始化计划管理器失败: %v", err)
+	}
+	decision.ResetStatistics()
+
+	at := &AutoTrader{
+		id: "trader-a",
+		lastPositions: map[string]*PositionSnapshot{
+			"BTCUSDT_long": {
+				Symbol:     "BTCUSDT",
+				Side:       "long",
+				Quantity:   1,
+				EntryPrice: 100,
+				Leverage:   5,
+			},
+		},
+		positionFirstSeenTime: map[string]int64{
+			"BTCUSDT_long": time.Now().Add(-time.Hour).UnixMilli(),
+		},
+	}
+	at.markPositionLifecycleClosed("BTCUSDT", "long", time.Now())
+	at.lastPositions["BTCUSDT_long"] = &PositionSnapshot{
+		Symbol:     "BTCUSDT",
+		Side:       "long",
+		Quantity:   1,
+		EntryPrice: 100,
+		Leverage:   5,
+	}
+
+	actions := at.detectAutoClosedPositions(nil)
+	if len(actions) != 0 {
+		t.Fatalf("近期已确认平仓的生命周期不应产生快照自动平仓: %+v", actions)
+	}
+	if _, ok := at.lastPositions["BTCUSDT_long"]; ok {
+		t.Fatal("跳过快照误报后应清理 lastPositions")
+	}
+	if got := decision.GetStatistics().TotalTrades; got != 0 {
+		t.Fatalf("跳过快照误报不应更新统计，total_trades=%d", got)
+	}
+}
+
+func TestHandleAutoCloseEvent_OrderTrackerCountsWithoutPlan(t *testing.T) {
+	if err := decision.InitPlanManager(t.TempDir()); err != nil {
+		t.Fatalf("初始化计划管理器失败: %v", err)
+	}
+	decision.ResetStatistics()
+
+	at := &AutoTrader{id: "trader-a"}
+	action := at.handleAutoCloseEvent(autoCloseEvent{
+		Symbol:          "ETHUSDT",
+		Side:            "long",
+		Source:          autoCloseSourceOrderTracker,
+		OrderID:         12345,
+		EntryPrice:      100,
+		ExitPrice:       103,
+		Quantity:        2,
+		Leverage:        5,
+		RealizedPnL:     6,
+		PnLPercent:      15,
+		HoldTimeMinutes: 12,
+		CloseReason:     "TAKE_PROFIT",
+		CloseTime:       time.Now(),
+	}, false)
+
+	if action.CountedInStats == nil || !*action.CountedInStats {
+		t.Fatalf("order_tracker 有完整元数据时应计入统计: %+v", action)
+	}
+	if !action.ExchangeMetadata || action.CloseSource != autoCloseSourceOrderTracker {
+		t.Fatalf("应标记交易所元数据来源: %+v", action)
+	}
+	stats := decision.GetStatistics()
+	if stats.TotalTrades != 1 || stats.WinningTrades != 1 {
+		t.Fatalf("应只记录一笔盈利平仓统计: %+v", stats)
+	}
+}
+
+func TestHandleAutoCloseEvent_SnapshotWithoutPlanDoesNotCountStats(t *testing.T) {
+	if err := decision.InitPlanManager(t.TempDir()); err != nil {
+		t.Fatalf("初始化计划管理器失败: %v", err)
+	}
+	decision.ResetStatistics()
+
+	at := &AutoTrader{id: "trader-a"}
+	action := at.handleAutoCloseEvent(autoCloseEvent{
+		Symbol:      "ETHUSDT",
+		Side:        "short",
+		Source:      autoCloseSourceSnapshot,
+		EntryPrice:  100,
+		ExitPrice:   103,
+		Quantity:    2,
+		Leverage:    5,
+		PnLPercent:  -15,
+		RealizedPnL: -6,
+		CloseReason: "AUTO_CLOSE_DETECTED",
+		CloseTime:   time.Now(),
+	}, false)
+
+	if action.CountedInStats == nil || *action.CountedInStats {
+		t.Fatalf("snapshot 无活跃计划时不应计入统计: %+v", action)
+	}
+	if action.ExchangeMetadata || action.CloseSource != autoCloseSourceSnapshot {
+		t.Fatalf("snapshot 来源标记不正确: %+v", action)
+	}
+	if got := decision.GetStatistics().TotalTrades; got != 0 {
+		t.Fatalf("snapshot 无计划兜底不应更新统计，total_trades=%d", got)
+	}
+}
+
 func TestDetectAutoClosedPositions_ReconcilesMissingShortPosition(t *testing.T) {
 	originalGetter := getMarketData
 	getMarketData = func(symbol string) (*market.Data, error) {

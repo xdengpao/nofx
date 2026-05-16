@@ -18,6 +18,7 @@ func main() {
 	traderID := flag.String("trader", "", "optional trader id filter")
 	fromText := flag.String("from", "", "optional inclusive start time (RFC3339 or YYYY-MM-DD)")
 	toText := flag.String("to", "", "optional inclusive end time (RFC3339 or YYYY-MM-DD)")
+	exchangeCloseJSON := flag.String("exchange-close-json", "", "optional read-only JSON export of exchange close snapshots")
 	flag.Parse()
 
 	records, err := logger.LoadDecisionRecordsRecursive(*logDir)
@@ -42,6 +43,19 @@ func main() {
 		To:             to,
 	})
 	report := logger.BuildReplayReport(records, *reportOnly, *dryRun)
+	if *exchangeCloseJSON != "" {
+		data, err := os.ReadFile(*exchangeCloseJSON)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "读取交易所平仓快照失败: %v\n", err)
+			os.Exit(1)
+		}
+		var exchangeCloses []logger.ExchangeCloseSnapshot
+		if err := json.Unmarshal(data, &exchangeCloses); err != nil {
+			fmt.Fprintf(os.Stderr, "解析交易所平仓快照失败: %v\n", err)
+			os.Exit(1)
+		}
+		logger.AttachExchangeCloseSnapshots(&report, records, exchangeCloses)
+	}
 
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {

@@ -118,6 +118,7 @@ type AutoTrader struct {
 	lastAIError           string                       // 最近一次 AI 失败原因
 	consecutiveAIFails    int                          // 连续 AI 失败次数
 	autoCloseDedupe       map[string]time.Time         // 自动平仓事件去重
+	closedPositionDedupe  map[string]time.Time         // 已确认平仓的持仓生命周期去重
 }
 
 func (at *AutoTrader) GetTrader() Trader {
@@ -617,6 +618,7 @@ func (at *AutoTrader) buildRiskStateSnapshot(ctx *decision.Context, rejections [
 		ConsecutiveAIFails:       ctx.ConsecutiveAIFails,
 		FrequencyPolicy:          copyFrequencyPolicySnapshot(ctx.FrequencyPolicy),
 		FrequencyState:           copyFrequencyStateSnapshot(ctx.FrequencyState),
+		LossMode:                 copyLossModeSnapshot(ctx.LossMode),
 	}
 	if !ctx.AIBackoffUntil.IsZero() {
 		snapshot.AIBackoffUntil = ctx.AIBackoffUntil.Format(time.RFC3339)
@@ -689,6 +691,24 @@ func copyFrequencyStateSnapshot(state *decision.FrequencyState) *logger.Frequenc
 	}
 }
 
+func copyLossModeSnapshot(state *decision.LossModeState) *logger.LossModeSnapshot {
+	if state == nil {
+		return nil
+	}
+	snapshot := &logger.LossModeSnapshot{
+		Active:          state.Active,
+		Reason:          state.Reason,
+		MaxRiskPerTrade: state.MaxRiskPerTrade,
+		MaxPositions:    state.MaxPositions,
+		DailyOpenLimit:  state.DailyOpenLimit,
+		MinConfidence:   state.MinConfidence,
+	}
+	if !state.CooldownUntil.IsZero() {
+		snapshot.CooldownUntil = state.CooldownUntil.Format(time.RFC3339)
+	}
+	return snapshot
+}
+
 func copyGateDiagnostics(source map[string]any) map[string]any {
 	if len(source) == 0 {
 		return nil
@@ -752,6 +772,7 @@ func (at *AutoTrader) syncAutoClosedOrders() {
 		at.handleAutoCloseEvent(autoCloseEvent{
 			Symbol:          order.Symbol,
 			Side:            order.Side,
+			Source:          autoCloseSourceOrderTracker,
 			OrderID:         order.OrderID,
 			EntryPrice:      order.EntryPrice,
 			ExitPrice:       order.ExitPrice,
@@ -982,9 +1003,10 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	var performanceGates *logger.RollingPerformanceSnapshot
 	if performance != nil && performance.Rolling != nil {
 		performanceGates = performance.Rolling
-		if performance.Rolling.EffectiveMaxRiskPerTrade > 0 {
-			effectiveMaxRiskPerTrade = performance.Rolling.EffectiveMaxRiskPerTrade
-		}
+	}
+	lossMode := decision.BuildLossModeState(performanceGates, time.Now())
+	if lossMode != nil && lossMode.Active && lossMode.MaxRiskPerTrade > 0 && lossMode.MaxRiskPerTrade < effectiveMaxRiskPerTrade {
+		effectiveMaxRiskPerTrade = lossMode.MaxRiskPerTrade
 	}
 	var executionQuality *logger.ExecutionQualityStats
 	if performance != nil {
@@ -1014,6 +1036,7 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		AnalysisIntervalMin:      frequencyPolicy.AnalysisIntervalMin,
 		FrequencyPolicy:          &frequencyPolicy,
 		FrequencyState:           &frequencyState,
+		LossMode:                 lossMode,
 		Account: decision.AccountInfo{
 			TotalEquity:      totalEquity,
 			AvailableBalance: availableBalance,
@@ -1485,6 +1508,7 @@ func (at *AutoTrader) executeCloseLongWithRecord(d *decision.Decision, actionRec
 	// ✅ 新增：调用平仓回调（更新统计和夏普比率）
 
 	decision.OnPositionClosedScoped(at.id, d.Symbol, "long", marketData.CurrentPrice, pnlPercent, pnlUSD, d.Reasoning)
+	at.markPositionLifecycleClosed(d.Symbol, "long", time.Now())
 
 	log.Printf("  ✓ 平仓成功 (盈亏: %.2f%%, 持仓: %.0f分钟)", pnlPercent, holdTimeMinutes)
 	return nil
@@ -1540,6 +1564,7 @@ func (at *AutoTrader) executeCloseShortWithRecord(d *decision.Decision, actionRe
 
 	// ✅ 新增：调用平仓回调
 	decision.OnPositionClosedScoped(at.id, d.Symbol, "short", marketData.CurrentPrice, pnlPercent, pnlUSD, d.Reasoning)
+	at.markPositionLifecycleClosed(d.Symbol, "short", time.Now())
 
 	log.Printf("  ✓ 平仓成功 (盈亏: %.2f%%, 持仓: %.0f分钟)", pnlPercent, holdTimeMinutes)
 	return nil
@@ -2426,6 +2451,7 @@ func sortDecisionsByPriority(decisions []decision.Decision) []decision.Decision 
 // detectAutoClosedPositions 检测自动平仓的持仓（止损/止盈触发）
 func (at *AutoTrader) detectAutoClosedPositions(currentPositions []decision.PositionInfo) []logger.DecisionAction {
 	var autoClosedActions []logger.DecisionAction
+	now := time.Now()
 
 	// 创建当前持仓的map便于查找
 	currentPosMap := make(map[string]bool)
@@ -2437,6 +2463,12 @@ func (at *AutoTrader) detectAutoClosedPositions(currentPositions []decision.Posi
 	// 检查上一个周期的持仓，哪些现在消失了
 	for posKey, lastPos := range at.lastPositions {
 		if !currentPosMap[posKey] {
+			if at.wasPositionLifecycleRecentlyClosed(lastPos.Symbol, lastPos.Side, now) {
+				log.Printf("[AUTO-CLOSE] 跳过近期已确认平仓的快照事件: %s %s", lastPos.Symbol, lastPos.Side)
+				delete(at.lastPositions, posKey)
+				continue
+			}
+
 			// 这个持仓消失了，说明被自动平仓了（止损/止盈触发）
 			// 获取当前价格作为平仓价格的近似值
 			marketData, err := getMarketData(lastPos.Symbol)
@@ -2456,8 +2488,9 @@ func (at *AutoTrader) detectAutoClosedPositions(currentPositions []decision.Posi
 				action = "auto_close_short"
 			}
 
-			if !at.claimAutoCloseEvent(lastPos.Symbol, lastPos.Side, 0, time.Now()) {
+			if !at.claimAutoCloseEvent(lastPos.Symbol, lastPos.Side, 0, now) {
 				log.Printf("[AUTO-CLOSE] 跳过重复快照事件: %s %s", lastPos.Symbol, lastPos.Side)
+				delete(at.lastPositions, posKey)
 				continue
 			}
 
@@ -2465,6 +2498,7 @@ func (at *AutoTrader) detectAutoClosedPositions(currentPositions []decision.Posi
 			autoClosedAction := at.handleAutoCloseEvent(autoCloseEvent{
 				Symbol:      lastPos.Symbol,
 				Side:        lastPos.Side,
+				Source:      autoCloseSourceSnapshot,
 				ExitPrice:   closePrice,
 				EntryPrice:  lastPos.EntryPrice,
 				Quantity:    lastPos.Quantity,
@@ -2472,11 +2506,12 @@ func (at *AutoTrader) detectAutoClosedPositions(currentPositions []decision.Posi
 				RealizedPnL: pnlUSD,
 				PnLPercent:  pnlPercent,
 				CloseReason: at.inferAutoCloseReason(lastPos.Symbol, lastPos.Side, closePrice),
-				CloseTime:   time.Now(),
+				CloseTime:   now,
 			}, false)
 			autoClosedAction.Action = action
 
 			autoClosedActions = append(autoClosedActions, autoClosedAction)
+			delete(at.lastPositions, posKey)
 			log.Printf("[AUTO-CLOSE] 检测到自动平仓: %s %s @ %.4f (可能由止损/止盈触发)",
 				lastPos.Symbol, action, closePrice)
 		}
@@ -2530,6 +2565,7 @@ func (at *AutoTrader) reconcileStaleTradePlans(currentPositions []decision.Posit
 		action := at.handleAutoCloseEvent(autoCloseEvent{
 			Symbol:      plan.Symbol,
 			Side:        side,
+			Source:      autoCloseSourceStalePlan,
 			EntryPrice:  entryPrice,
 			ExitPrice:   closePrice,
 			Quantity:    quantity,

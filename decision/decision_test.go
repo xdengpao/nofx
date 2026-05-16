@@ -59,6 +59,26 @@ func newTestMarketData(price float64) *market.Data {
 	}
 }
 
+func supportiveBTCMarketData(price float64) *market.Data {
+	return &market.Data{
+		Symbol:          "BTCUSDT",
+		CurrentPrice:    price,
+		PriceChange1h:   0.8,
+		PriceChange4h:   2.0,
+		CurrentADX:      30,
+		CurrentDIPlus:   25,
+		CurrentDIMinus:  10,
+		BollingerWidth:  5,
+		MidTermSeries1h: &market.MidTermData1h{EMA20Values: []float64{price * 0.99}, EMA50Values: []float64{price * 0.95}, MACDHist: []float64{1}},
+		LongerTermContext: &market.LongerTermData{
+			EMA20:    price * 0.98,
+			EMA50:    price * 0.94,
+			ATR14:    price * 0.02,
+			MACDHist: []float64{1},
+		},
+	}
+}
+
 // newOpenLongDecision 构造一个合法的做多开仓决策
 func newOpenLongDecision(symbol string, price float64) *Decision {
 	return &Decision{
@@ -245,6 +265,56 @@ func TestBuildUserPrompt_PrioritizesCoreSymbolsWhenBTCGateActive(t *testing.T) {
 	}
 }
 
+func TestBuildUserPrompt_ExcludesHighBetaLongCandidatesWhenBTCGateBlocks(t *testing.T) {
+	ctx := newTestContext()
+	ctx.CurrentTime = "2026-05-09 20:15:00"
+	ctx.CallCount = 1010
+	ctx.CandidateCoins = []CandidateCoin{
+		{Symbol: "SOLUSDT", Sources: []string{"ai500"}, IncludedInPrompt: true, DataQuality: "ok"},
+		{Symbol: "BTCUSDT", Sources: []string{"ai500"}, IncludedInPrompt: true, DataQuality: "ok"},
+		{Symbol: "ETHUSDT", Sources: []string{"ai500"}, IncludedInPrompt: true, DataQuality: "ok"},
+	}
+	ctx.MarketDataMap["SOLUSDT"] = newTestMarketData(100)
+	ctx.MarketDataMap["ETHUSDT"] = newTestMarketData(2000)
+	ctx.MarketDataMap["BTCUSDT"] = &market.Data{
+		Symbol:         "BTCUSDT",
+		CurrentPrice:   100000,
+		PriceChange1h:  -0.5,
+		CurrentDIPlus:  10,
+		CurrentDIMinus: 25,
+		LongerTermContext: &market.LongerTermData{
+			EMA20:    101000,
+			EMA50:    102000,
+			ATR14:    1500,
+			MACDHist: []float64{-1},
+		},
+		MidTermSeries1h: &market.MidTermData1h{
+			EMA20Values: []float64{98000},
+			EMA50Values: []float64{99000},
+			MACDHist:    []float64{-1},
+		},
+	}
+
+	prompt := buildUserPrompt(ctx, 0.08)
+	if strings.Contains(prompt, "SOLUSDT") {
+		t.Fatalf("BTC硬阻断时高beta山寨候选不应进入prompt: %s", prompt)
+	}
+	if !strings.Contains(prompt, "### 1. BTCUSDT") || !strings.Contains(prompt, "### 2. ETHUSDT") {
+		t.Fatalf("BTC硬阻断时仍应展示核心候选: %s", prompt)
+	}
+	if !strings.Contains(prompt, "最低TP距离") {
+		t.Fatalf("候选prompt应包含最低TP距离指导")
+	}
+}
+
+func TestBuildSystemPrompt_UsesExactNetRRFormula(t *testing.T) {
+	ctx := newTestContext()
+	prompt := buildSystemPrompt(ctx)
+	if !strings.Contains(prompt, "(止盈距离% - 0.2) / 止损距离% >= 2.5") {
+		t.Fatalf("system prompt应包含实盘净RR公式: %s", prompt)
+	}
+}
+
 func TestValidateOpenDecision_IgnoresRollingGateConfidenceForFreshStrategy(t *testing.T) {
 	ctx := newTestContext()
 	ctx.MarketDataMap["BCHUSDT"] = newTestMarketData(100)
@@ -293,6 +363,79 @@ func TestValidateOpenDecision_IgnoresRollingGateBlockForFreshStrategy(t *testing
 	}
 }
 
+func TestBuildLossModeState_TriggersAndRecovers(t *testing.T) {
+	now := time.Date(2026, 5, 16, 10, 0, 0, 0, time.UTC)
+	triggered := BuildLossModeState(&logger.RollingPerformanceSnapshot{
+		RecentLossStreak: 2,
+		Recent3:          logger.RollingStats{TradeCount: 2, TotalPnL: -3},
+		Recent3Losses:    2,
+	}, now)
+	if triggered == nil || !triggered.Active || triggered.MaxRiskPerTrade != 0.005 ||
+		triggered.MaxPositions != 1 || triggered.DailyOpenLimit != 1 || triggered.MinConfidence != 90 {
+		t.Fatalf("连续亏损应进入亏损模式并设置默认风控: %+v", triggered)
+	}
+	if !triggered.CooldownUntil.Equal(now.Add(24 * time.Hour)) {
+		t.Fatalf("亏损模式冷却时间错误: %+v", triggered)
+	}
+
+	recovered := BuildLossModeState(&logger.RollingPerformanceSnapshot{
+		RecentLossStreak: 0,
+		Recent3:          logger.RollingStats{TradeCount: 3, TotalPnL: 2, ProfitFactor: 1.5},
+		Recent3Losses:    1,
+	}, now)
+	if recovered == nil || recovered.Active {
+		t.Fatalf("恢复样本不应进入亏损模式: %+v", recovered)
+	}
+}
+
+func TestValidateOpenDecision_LossModeRequiresHigherConfidence(t *testing.T) {
+	ctx := newTestContext()
+	ctx.MarketDataMap["BTCUSDT"] = newTestMarketData(100)
+	ctx.LossMode = &LossModeState{
+		Active:          true,
+		Reason:          "test",
+		MaxRiskPerTrade: 0.005,
+		MaxPositions:    1,
+		DailyOpenLimit:  1,
+		MinConfidence:   90,
+	}
+
+	d := newOpenLongDecision("BTCUSDT", 100)
+	d.Confidence = 85
+	if err := validateOpenDecision(d, ctx); err == nil || !strings.Contains(err.Error(), "亏损模式置信度要求") {
+		t.Fatalf("亏损模式应提高最低置信度: %v", err)
+	}
+}
+
+func TestValidateOpenDecision_LossModeBlocksHighBetaLongWithoutBTCSupport(t *testing.T) {
+	ctx := newTestContext()
+	ctx.MarketDataMap["XAGUSDT"] = newTestMarketData(100)
+	ctx.MarketDataMap["BTCUSDT"] = newTestMarketData(100000)
+	ctx.LossMode = &LossModeState{Active: true, MaxRiskPerTrade: 0.005, MaxPositions: 1, DailyOpenLimit: 1, MinConfidence: 90}
+
+	d := newOpenLongDecision("XAGUSDT", 100)
+	d.Confidence = 95
+	if err := validateOpenDecision(d, ctx); err == nil || !strings.Contains(err.Error(), "亏损模式") {
+		t.Fatalf("BTC高周期未支持时应阻止高beta多单: %v", err)
+	}
+}
+
+func TestValidateOpenDecision_LossModeAllowsHighBetaLongWithBTCSupport(t *testing.T) {
+	ctx := newTestContext()
+	ctx.MarketDataMap["XAGUSDT"] = newTestMarketData(100)
+	ctx.MarketDataMap["BTCUSDT"] = supportiveBTCMarketData(100000)
+	ctx.LossMode = &LossModeState{Active: true, MaxRiskPerTrade: 0.005, MaxPositions: 1, DailyOpenLimit: 1, MinConfidence: 90}
+
+	d := newOpenLongDecision("XAGUSDT", 100)
+	d.Confidence = 95
+	if err := validateOpenDecision(d, ctx); err != nil {
+		t.Fatalf("BTC高周期支持时亏损模式不应阻止高beta多单: %v", err)
+	}
+	if d.EffectiveRiskPct > 0.005 {
+		t.Fatalf("亏损模式应限制单笔风险: %+v", d)
+	}
+}
+
 func TestEnforceFinalDecisionLimits_DropsExcessOpens(t *testing.T) {
 	ctx := newTestContext()
 	ctx.Account.PositionCount = 3
@@ -311,6 +454,28 @@ func TestEnforceFinalDecisionLimits_DropsExcessOpens(t *testing.T) {
 	}
 	if len(filtered) != 1 || filtered[0].Action != "hold" {
 		t.Fatalf("应保留非开仓决策并丢弃新增开仓: %+v", filtered)
+	}
+}
+
+func TestEnforceFinalDecisionLimits_LossModeCapsPositionsAndDailyOpens(t *testing.T) {
+	ctx := newTestContext()
+	ctx.Account.PositionCount = 1
+	ctx.LossMode = &LossModeState{Active: true, MaxPositions: 1, DailyOpenLimit: 1, MinConfidence: 90}
+
+	filtered, rejected := enforceFinalDecisionLimits([]Decision{
+		{Symbol: "ETHUSDT", Action: "open_long", Reasoning: "新机会"},
+	}, ctx)
+	if len(rejected) != 1 || !strings.Contains(rejected[0].Reason, "持仓上限1个") {
+		t.Fatalf("亏损模式应限制最大持仓为1: filtered=%+v rejected=%+v", filtered, rejected)
+	}
+
+	ctx.Account.PositionCount = 0
+	ctx.FrequencyState = &FrequencyState{OpenCount24h: 1}
+	filtered, rejected = enforceFinalDecisionLimits([]Decision{
+		{Symbol: "ETHUSDT", Action: "open_long", Reasoning: "新机会"},
+	}, ctx)
+	if len(rejected) != 1 || !strings.Contains(rejected[0].Reason, "24小时新增开仓上限1笔") {
+		t.Fatalf("亏损模式应限制每日开仓为1: filtered=%+v rejected=%+v", filtered, rejected)
 	}
 }
 
@@ -668,6 +833,21 @@ func TestShouldCallAI_FullPositions_ReturnsFalse(t *testing.T) {
 	ctx.Account.PositionCount = 3
 	if shouldCallAIForNewOpportunities(ctx) {
 		t.Error("持仓已满(3)时应返回 false")
+	}
+}
+
+func TestShouldCallAI_LossModePositionAndDailyCaps(t *testing.T) {
+	ctx := newTestContext()
+	ctx.LossMode = &LossModeState{Active: true, MaxPositions: 1, DailyOpenLimit: 1, MinConfidence: 90}
+	ctx.Account.PositionCount = 1
+	if shouldCallAIForNewOpportunities(ctx) {
+		t.Error("亏损模式持仓达到1个时应跳过AI新机会搜索")
+	}
+
+	ctx.Account.PositionCount = 0
+	ctx.FrequencyState = &FrequencyState{OpenCount24h: 1}
+	if shouldCallAIForNewOpportunities(ctx) {
+		t.Error("亏损模式每日开仓达到1笔时应跳过AI新机会搜索")
 	}
 }
 
