@@ -102,8 +102,8 @@
 
 ## Phase 10: 部署准备
 
-- [ ] 确认生产 `config.json` 可继续保持 `trade=1h`。
-- [ ] 确认不提交 `data/programmatic_strategy_state.json`、`decision_logs/`、真实密钥或服务器运行时配置。
-- [ ] 部署前备份服务器 `config.json`。
-- [ ] 部署后验证 `/health`、`/api/traders`、`/api/status?trader_id=...`。
-- [ ] 部署后检查首个程序化周期日志，确认无新闭合 K 线不再阻断已有持仓管理诊断。
+- [x] 确认生产 `config.json` 可继续保持 `trade=1h`。
+- [x] 确认不提交 `data/programmatic_strategy_state.json`、`decision_logs/`、真实密钥或服务器运行时配置。
+- [x] 部署前备份服务器 `config.json`。
+- [x] 部署后验证 `/health`、`/api/traders`、`/api/status?trader_id=...`。
+- [x] 部署后检查首个程序化周期日志，确认无新闭合 K 线不再阻断已有持仓管理诊断。
