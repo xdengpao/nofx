@@ -92,4 +92,4 @@
 - [!] 使用浏览器或截图检查策略检查区：当前环境未提供可用浏览器会话；已通过 `npm run build` 验证组件可编译，后续部署或本地浏览器中复核视觉细节。
 - [!] 手动验证主交易级别为 `1h` 时展示 1h K 线：当前环境未提供可用浏览器会话；代码路径使用 `trade_timeframe` 请求对应级别，需在浏览器中复核。
 - [!] 如配置或测试环境允许，手动验证主交易级别为 `15m` 时展示 15m K 线：已用 API fake fetcher 验证 `15m` 使用 `history_depth["15m"]`，浏览器视觉复核待部署/本地打开后完成。
-- [ ] 若后续部署 161，验证线上 `/api/market/klines` 返回 `configured_limit` 和 `limit_source`，策略检查区展示蜡烛图。
+- [x] 若后续部署 161，验证线上 `/api/market/klines` 返回 `configured_limit` 和 `limit_source`，策略检查区展示蜡烛图。
