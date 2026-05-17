@@ -280,7 +280,7 @@ func (e *Engine) LatestSignals(traderID, symbol string) (*SignalReport, bool) {
 		return nil, false
 	}
 	copied := *report
-	copied.Signals = append([]ChanlunSignal(nil), report.Signals...)
+	copied.Signals = append([]ChanlunSignal{}, report.Signals...)
 	copied.SignalMarkers = mergeSignalMarkers(e.StateStore.RecentSignalMarkers(traderID, symbol, maxRecentSignalMarkers), report.SignalMarkers)
 	return &copied, true
 }
@@ -649,7 +649,7 @@ func (e *Engine) setLatestSignals(traderID, symbol string, signals []ChanlunSign
 		TradeTimeframe:     e.Policy.Timeframes.Trade,
 		ComponentTimeframe: e.Policy.Timeframes.Sub,
 		MicroTimeframe:     e.Policy.Timeframes.Micro,
-		Signals:            append([]ChanlunSignal(nil), signals...),
+		Signals:            append([]ChanlunSignal{}, signals...),
 		SignalMarkers:      markers,
 		LatestDiagnostics: map[string]any{
 			"messages": diagnostics,
