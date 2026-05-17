@@ -275,7 +275,11 @@ func (s *Server) handleMarketKlines(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "symbol不能为空"})
 		return
 	}
-	timeframe := strings.TrimSpace(c.DefaultQuery("timeframe", "1h"))
+	timeframe := strings.ToLower(strings.TrimSpace(c.DefaultQuery("timeframe", "1h")))
+	if !isSupportedMarketKlineTimeframe(timeframe) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "timeframe仅支持3m、15m、1h或4h"})
+		return
+	}
 	limit := parsePositiveInt(c.DefaultQuery("limit", "240"), 240)
 	if limit > 1000 {
 		limit = 1000
@@ -303,6 +307,15 @@ func (s *Server) handleMarketKlines(c *gin.Context) {
 		"limit":     limit,
 		"klines":    response,
 	})
+}
+
+func isSupportedMarketKlineTimeframe(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "3m", "15m", "1h", "4h":
+		return true
+	default:
+		return false
+	}
 }
 
 func parsePositiveInt(value string, fallback int) int {

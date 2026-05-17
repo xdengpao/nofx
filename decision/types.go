@@ -266,6 +266,25 @@ type Decision struct {
 	StructureTarget          float64                `json:"structure_target,omitempty"`
 	StrategyMetadata         map[string]any         `json:"strategy_metadata,omitempty"`
 	StrategyDiagnosis        map[string]any         `json:"strategy_diagnostics,omitempty"`
+	Explanation              *DecisionExplanation   `json:"explanation,omitempty"`
+}
+
+// DecisionExplanation 是交易动作的人类可读和机器可消费原因说明。
+type DecisionExplanation struct {
+	Summary        string           `json:"summary,omitempty"`
+	Layer          string           `json:"layer,omitempty"`
+	Rule           string           `json:"rule,omitempty"`
+	ReasonCode     string           `json:"reason_code,omitempty"`
+	Timeframe      string           `json:"timeframe,omitempty"`
+	SignalType     string           `json:"signal_type,omitempty"`
+	SignalID       string           `json:"signal_id,omitempty"`
+	TriggerPrice   float64          `json:"trigger_price,omitempty"`
+	ReferencePrice float64          `json:"reference_price,omitempty"`
+	Threshold      float64          `json:"threshold,omitempty"`
+	CooldownStatus map[string]any   `json:"cooldown_status,omitempty"`
+	BudgetStatus   map[string]any   `json:"budget_status,omitempty"`
+	RiskChecks     []map[string]any `json:"risk_checks,omitempty"`
+	Details        map[string]any   `json:"details,omitempty"`
 }
 
 // FullDecision AI的完整决策
@@ -469,12 +488,13 @@ type ProgrammaticPositionPolicy struct {
 }
 
 type ProgrammaticPositionManagementPolicy struct {
-	Enabled          bool
-	Timeframes       ProgrammaticManagementTFPolicy
-	Breakeven        ProgrammaticBreakevenPolicy
-	FloatingDrawdown ProgrammaticFloatingDrawdownPolicy
-	StructureBreak   ProgrammaticStructureBreakPolicy
-	ShortTrade       ProgrammaticShortTradePolicy
+	Enabled           bool
+	Timeframes        ProgrammaticManagementTFPolicy
+	Breakeven         ProgrammaticBreakevenPolicy
+	FloatingDrawdown  ProgrammaticFloatingDrawdownPolicy
+	StructureBreak    ProgrammaticStructureBreakPolicy
+	ShortTrade        ProgrammaticShortTradePolicy
+	PartialCloseGuard ProgrammaticPartialCloseGuardPolicy
 }
 
 type ProgrammaticManagementTFPolicy struct {
@@ -498,14 +518,22 @@ type ProgrammaticFloatingDrawdownPolicy struct {
 }
 
 type ProgrammaticStructureBreakPolicy struct {
-	Enabled     bool
-	ConfirmBars int
-	Action      string
+	Enabled                 bool
+	ConfirmBars             int
+	Action                  string
+	PartialCloseGuardAction string
 }
 
 type ProgrammaticShortTradePolicy struct {
 	Enabled         bool
 	PartialClosePct float64
+}
+
+type ProgrammaticPartialCloseGuardPolicy struct {
+	CooldownMinutes     int
+	MaxCountPerPosition int
+	MaxTotalRatio       float64
+	CooldownEnabled     bool
 }
 
 type ProgrammaticTPPolicy struct {

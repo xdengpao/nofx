@@ -50,6 +50,37 @@ func newTestServerWithTrader(t *testing.T) *Server {
 	return NewServer(tm, 8080)
 }
 
+func newProgrammaticTestServer(t *testing.T) *Server {
+	t.Helper()
+	tm := manager.NewTraderManager()
+	cfg := config.TraderConfig{
+		ID:                  "programmatic-trader",
+		Name:                "Programmatic Trader",
+		DecisionMode:        config.DecisionModeProgrammatic,
+		Exchange:            "binance",
+		BinanceAPIKey:       "fake-api-key-for-test",
+		BinanceSecretKey:    "fake-secret-key-for-test",
+		InitialBalance:      10000.0,
+		ScanIntervalMinutes: 3,
+	}
+	root := &config.Config{Traders: []config.TraderConfig{cfg}}
+	root.Traders[0].ProgrammaticStrategy.Timeframes.Trade = "4h"
+	root.Traders[0].ProgrammaticStrategy.State.Path = t.TempDir() + "/state.json"
+	profiles, err := root.NormalizeProgrammaticStrategies()
+	if err != nil {
+		t.Fatalf("归一化程序化策略失败: %v", err)
+	}
+	if err := tm.AddTraderWithPolicies(cfg, "", 10, 20, 60,
+		config.LeverageConfig{BTCETHLeverage: 5, AltcoinLeverage: 5},
+		config.TradingFrequencyProfile{Legacy: true, Mode: config.TradingFrequencyModeLegacy, EffectiveMode: config.TradingFrequencyModeLegacy, AnalysisIntervalMinutes: 15, PromptCandidateLimit: 8},
+		config.StrategyRiskProfile{Legacy: true, RollbackLegacyValidation: true, FeeSlippagePct: 0.002, DefaultMinNetRR: 2.5, ADXTimeframe: "1h"},
+		profiles["programmatic-trader"],
+	); err != nil {
+		t.Fatalf("添加程序化trader失败: %v", err)
+	}
+	return NewServer(tm, 8080)
+}
+
 // doRequest 执行 HTTP 请求并返回 recorder
 func doRequest(s *Server, method, path string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, nil)
@@ -421,6 +452,30 @@ func TestFilterDisplayableDecisionRecords_DropsEmptySuccessfulRecords(t *testing
 	}
 	if records[0] != failedRecord || records[1] != validWait {
 		t.Fatalf("应保留失败排障记录和带 wait 原因的有效决策")
+	}
+}
+
+func TestStrategySignalsEmptyReportIncludesTimeframes(t *testing.T) {
+	s := newProgrammaticTestServer(t)
+	w := doRequest(s, "GET", "/api/strategy/signals?trader_id=programmatic-trader&symbol=ETHUSDT")
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/strategy/signals: 期望200，实际=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSON(t, w)
+	if body["trade_timeframe"] != "4h" || body["micro_timeframe"] != "3m" {
+		t.Fatalf("空信号报告应返回timeframe元数据: %+v", body)
+	}
+}
+
+func TestMarketKlinesRejectsUnsupportedTimeframe(t *testing.T) {
+	s := newTestServerWithTrader(t)
+	w := doRequest(s, "GET", "/api/market/klines?trader_id=test-trader-1&symbol=ETHUSDT&timeframe=5m")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("非法timeframe应返回400，实际=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSON(t, w)
+	if body["error"] == "" {
+		t.Fatalf("应返回中文错误: %+v", body)
 	}
 }
 

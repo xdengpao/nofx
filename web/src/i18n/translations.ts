@@ -50,6 +50,7 @@ export const translations = {
     failed: 'Failed',
     inputPrompt: 'Input Prompt',
     aiThinking: 'AI Chain of Thought',
+    strategyAnalysis: 'Strategy Analysis',
     collapse: 'Collapse',
     expand: 'Expand',
 
@@ -180,6 +181,7 @@ export const translations = {
     failed: '失败',
     inputPrompt: '输入提示',
     aiThinking: '💭 AI思维链分析',
+    strategyAnalysis: '策略分析',
     collapse: '▼ 收起',
     expand: '▶ 展开',
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type CSSProperties } from 'react';
 import useSWR from 'swr';
 import { api } from './lib/api';
 import { EquityChart } from './components/EquityChart';
@@ -17,6 +17,7 @@ import type {
   MarketKlineResponse,
   StrategySignalReport,
   StrategySymbolsResponse,
+  SignalMarker,
 } from './types';
 
 type Page = 'competition' | 'trader';
@@ -390,8 +391,9 @@ function TraderDetailsPage({
 }) {
   const [strategySymbol, setStrategySymbol] = useState('');
   const traderId = selectedTrader?.trader_id;
+  const isProgrammaticTrader = status?.decision_mode === 'programmatic';
   const { data: strategySymbols } = useSWR<StrategySymbolsResponse>(
-    traderId ? `strategy-symbols-${traderId}` : null,
+    traderId && isProgrammaticTrader ? `strategy-symbols-${traderId}` : null,
     () => api.getStrategySymbols(traderId),
     { refreshInterval: 30000, revalidateOnFocus: false }
   );
@@ -404,14 +406,15 @@ function TraderDetailsPage({
   }, [strategySymbol, symbolOptions]);
 
   const { data: strategySignals } = useSWR<StrategySignalReport>(
-    traderId && strategySymbol ? `strategy-signals-${traderId}-${strategySymbol}` : null,
+    traderId && isProgrammaticTrader && strategySymbol ? `strategy-signals-${traderId}-${strategySymbol}` : null,
     () => api.getStrategySignals(traderId, strategySymbol),
     { refreshInterval: 30000, revalidateOnFocus: false }
   );
+  const strategyTradeTimeframe = normalizeStrategyTimeframe(strategySignals?.trade_timeframe);
 
   const { data: strategyKlines } = useSWR<MarketKlineResponse>(
-    traderId && strategySymbol ? `market-klines-${traderId}-${strategySymbol}-1h` : null,
-    () => api.getMarketKlines(traderId, strategySymbol, '1h', 80),
+    traderId && isProgrammaticTrader && strategySymbol ? `market-klines-${traderId}-${strategySymbol}-${strategyTradeTimeframe}` : null,
+    () => api.getMarketKlines(traderId, strategySymbol, strategyTradeTimeframe, 80),
     { refreshInterval: 30000, revalidateOnFocus: false }
   );
 
@@ -667,9 +670,14 @@ function StrategyInspector({
   signals?: StrategySignalReport;
   klines?: MarketKlineResponse;
 }) {
-  const latestSignal = signals?.signals?.[0];
+  const tradeTimeframe = normalizeStrategyTimeframe(signals?.trade_timeframe);
+  const latestSignal = signals?.signals?.find((signal) => signal.source_layer !== 'position_management') ?? signals?.signals?.[0];
+  const markers = signals?.signal_markers ?? [];
+  const mainMarkers = markers.filter((marker) => marker.source_layer === 'main_signal');
+  const positionMarkers = markers.filter((marker) => marker.source_layer === 'position_management').slice(-3).reverse();
   const recentKlines = (klines?.klines ?? []).slice(-8).reverse();
   const isProgrammatic = status?.decision_mode === 'programmatic';
+  const hasTimeframeFallback = isProgrammatic && !signals?.trade_timeframe;
 
   return (
     <div className="binance-card p-6 mb-6 animate-slide-in" style={{ animationDelay: '0.25s' }}>
@@ -715,8 +723,11 @@ function StrategyInspector({
                 <div className="font-mono" style={{ color: '#EAECEF' }}>价格 {latestSignal.price?.toFixed(4)}</div>
                 <div className="font-mono" style={{ color: '#F6465D' }}>SL {latestSignal.stop_loss?.toFixed(4)}</div>
                 <div className="font-mono" style={{ color: '#0ECB81' }}>TP {latestSignal.take_profit?.toFixed(4)}</div>
+                {latestSignal.structure_target > 0 && (
+                  <div className="font-mono" style={{ color: '#F0B90B' }}>目标 {latestSignal.structure_target.toFixed(4)}</div>
+                )}
                 <div className="text-xs" style={{ color: '#848E9C' }}>
-                  {latestSignal.analysis_timeframe} / {latestSignal.trigger_timeframe} · {latestSignal.center_id || '--'}
+                  {latestSignal.analysis_timeframe} / {latestSignal.trigger_timeframe} · {formatMarkerTime(latestSignal.trigger_close_time)} · {latestSignal.center_id || '--'}
                 </div>
               </div>
             ) : (
@@ -724,41 +735,64 @@ function StrategyInspector({
                 {diagnosticText(signals?.latest_diagnostics) || '暂无信号'}
               </div>
             )}
+            {positionMarkers.length > 0 && (
+              <div className="mt-4 space-y-1">
+                {positionMarkers.map((marker) => (
+                  <div key={`${marker.signal_id}-${marker.status}`} className="text-xs flex flex-wrap gap-2" style={{ color: '#848E9C' }}>
+                    <SignalBadge marker={marker} />
+                    <span>{marker.action || '--'} · {marker.reason || marker.status}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="rounded p-4" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
             <div className="text-xs mb-3" style={{ color: '#848E9C' }}>信号诊断</div>
             <div className="text-sm break-words" style={{ color: '#EAECEF' }}>
-              {diagnosticText(signals?.latest_diagnostics) || latestSignal?.signal_id || '--'}
+              {hasTimeframeFallback ? '未获取主交易级别，使用1h回退；' : ''}{diagnosticText(signals?.latest_diagnostics) || latestSignal?.signal_id || '--'}
             </div>
             {signals?.config_hash && (
               <div className="text-xs font-mono mt-3" style={{ color: '#848E9C' }}>config {signals.config_hash}</div>
             )}
+            <div className="text-xs font-mono mt-2" style={{ color: '#848E9C' }}>
+              trade {tradeTimeframe} · component {signals?.component_timeframe || '--'} · micro {signals?.micro_timeframe || '--'}
+            </div>
           </div>
 
           <div className="rounded p-4 overflow-x-auto" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
-            <div className="text-xs mb-3" style={{ color: '#848E9C' }}>1h K线</div>
+            <div className="text-xs mb-3" style={{ color: '#848E9C' }}>{tradeTimeframe} K线</div>
             <table className="w-full text-xs">
               <thead>
                 <tr style={{ color: '#848E9C' }}>
                   <th className="text-left pb-2">时间</th>
+                  <th className="text-left pb-2">信号</th>
                   <th className="text-right pb-2">H</th>
                   <th className="text-right pb-2">L</th>
                   <th className="text-right pb-2">C</th>
                 </tr>
               </thead>
               <tbody>
-                {recentKlines.map((kline) => (
-                  <tr key={kline.close_time} style={{ color: '#EAECEF' }}>
-                    <td className="py-1">{new Date(kline.close_time).toLocaleString()}</td>
-                    <td className="py-1 text-right font-mono">{kline.high.toFixed(4)}</td>
-                    <td className="py-1 text-right font-mono">{kline.low.toFixed(4)}</td>
-                    <td className="py-1 text-right font-mono">{kline.close.toFixed(4)}</td>
-                  </tr>
-                ))}
+                {recentKlines.map((kline) => {
+                  const rowMarkers = mainMarkers.filter((marker) => marker.timeframe === tradeTimeframe && marker.close_time === kline.close_time);
+                  return (
+                    <tr key={kline.close_time} style={{ color: '#EAECEF' }}>
+                      <td className="py-1 whitespace-nowrap">{new Date(kline.close_time).toLocaleString()}</td>
+                      <td className="py-1 min-w-[96px]">
+                        <div className="flex flex-wrap gap-1">
+                          {rowMarkers.map((marker) => <SignalBadge key={marker.signal_id} marker={marker} />)}
+                          {rowMarkers.length === 0 && <span style={{ color: '#2B3139' }}>--</span>}
+                        </div>
+                      </td>
+                      <td className="py-1 text-right font-mono">{kline.high.toFixed(4)}</td>
+                      <td className="py-1 text-right font-mono">{kline.low.toFixed(4)}</td>
+                      <td className="py-1 text-right font-mono">{kline.close.toFixed(4)}</td>
+                    </tr>
+                  );
+                })}
                 {recentKlines.length === 0 && (
                   <tr>
-                    <td className="py-4 text-center" colSpan={4} style={{ color: '#848E9C' }}>暂无K线</td>
+                    <td className="py-4 text-center" colSpan={5} style={{ color: '#848E9C' }}>暂无K线</td>
                   </tr>
                 )}
               </tbody>
@@ -776,6 +810,48 @@ function diagnosticText(value?: Record<string, unknown>) {
     return messages.map(String).join('；');
   }
   return '';
+}
+
+function normalizeStrategyTimeframe(value?: string) {
+  return value === '15m' || value === '1h' || value === '4h' ? value : '1h';
+}
+
+function markerLabel(marker: SignalMarker) {
+  const label = marker.signal_type?.replace('buy', 'B').replace('sell', 'S').toUpperCase();
+  return label || marker.signal_type || '--';
+}
+
+function markerStyle(marker: SignalMarker): CSSProperties {
+  const isBuy = marker.signal_type?.startsWith('buy') || marker.direction === 'long';
+  const base = isBuy
+    ? { background: 'rgba(14, 203, 129, 0.12)', color: '#0ECB81', border: '1px solid rgba(14, 203, 129, 0.3)' }
+    : { background: 'rgba(246, 70, 93, 0.12)', color: '#F6465D', border: '1px solid rgba(246, 70, 93, 0.3)' };
+  if (marker.status === 'executed') {
+    return { ...base, boxShadow: '0 0 0 1px rgba(240, 185, 11, 0.35)' };
+  }
+  if (marker.status === 'rejected' || marker.status === 'failed') {
+    return { background: 'rgba(132, 142, 156, 0.12)', color: '#848E9C', border: '1px solid rgba(132, 142, 156, 0.3)' };
+  }
+  return base;
+}
+
+function SignalBadge({ marker }: { marker: SignalMarker }) {
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold whitespace-nowrap"
+      style={markerStyle(marker)}
+      title={`${marker.source_layer} · ${marker.status} · ${marker.reason || marker.signal_id}`}
+    >
+      {marker.source_layer === 'position_management' ? 'PM' : 'M'} {markerLabel(marker)}
+    </span>
+  );
+}
+
+function formatMarkerTime(value?: number) {
+  if (!value) {
+    return '--';
+  }
+  return new Date(value).toLocaleString();
 }
 
 // Stat Card Component - Binance Style Enhanced
@@ -866,7 +942,7 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
             className="flex items-center gap-2 text-sm transition-colors"
             style={{ color: '#F0B90B' }}
           >
-            <span className="font-semibold">📤 {t('aiThinking', language)}</span>
+            <span className="font-semibold">📤 {t(decision.decision_mode === 'programmatic' ? 'strategyAnalysis' : 'aiThinking', language)}</span>
             <span className="text-xs">{showCoT ? t('collapse', language) : t('expand', language)}</span>
           </button>
           {showCoT && (

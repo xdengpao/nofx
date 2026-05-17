@@ -75,33 +75,57 @@ type SignalDiagnostics struct {
 }
 
 type ChanlunSignal struct {
-	SignalID        string            `json:"signal_id"`
-	Symbol          string            `json:"symbol"`
-	Direction       string            `json:"direction"`
-	SignalType      string            `json:"signal_type"`
-	ActionHint      string            `json:"action_hint"`
-	AnalysisTF      string            `json:"analysis_timeframe"`
-	TriggerTF       string            `json:"trigger_timeframe"`
-	Level           string            `json:"level"`
-	Price           float64           `json:"price"`
-	StopLoss        float64           `json:"stop_loss"`
-	TakeProfit      float64           `json:"take_profit"`
-	StructureTarget float64           `json:"structure_target"`
-	CenterID        string            `json:"center_id,omitempty"`
-	Confidence      int               `json:"confidence,omitempty"`
-	ConfirmedAt     time.Time         `json:"confirmed_at,omitempty"`
-	Diagnostics     SignalDiagnostics `json:"diagnostics,omitempty"`
+	SignalID         string            `json:"signal_id"`
+	Symbol           string            `json:"symbol"`
+	Direction        string            `json:"direction"`
+	SignalType       string            `json:"signal_type"`
+	ActionHint       string            `json:"action_hint"`
+	AnalysisTF       string            `json:"analysis_timeframe"`
+	TriggerTF        string            `json:"trigger_timeframe"`
+	Level            string            `json:"level"`
+	Price            float64           `json:"price"`
+	StopLoss         float64           `json:"stop_loss"`
+	TakeProfit       float64           `json:"take_profit"`
+	StructureTarget  float64           `json:"structure_target"`
+	CenterID         string            `json:"center_id,omitempty"`
+	Confidence       int               `json:"confidence,omitempty"`
+	ConfirmedAt      time.Time         `json:"confirmed_at,omitempty"`
+	Diagnostics      SignalDiagnostics `json:"diagnostics,omitempty"`
+	TriggerCloseTime int64             `json:"trigger_close_time,omitempty"`
+	SegmentStartTime int64             `json:"segment_start_time,omitempty"`
+	SegmentEndTime   int64             `json:"segment_end_time,omitempty"`
+	Status           string            `json:"status,omitempty"`
+	SourceLayer      string            `json:"source_layer,omitempty"`
 }
 
 type SignalReport struct {
-	TraderID          string          `json:"trader_id"`
-	Symbol            string          `json:"symbol"`
-	DecisionMode      string          `json:"decision_mode"`
-	StrategyName      string          `json:"strategy_name"`
-	StrategyVersion   string          `json:"strategy_version"`
-	ConfigHash        string          `json:"config_hash"`
-	Signals           []ChanlunSignal `json:"signals"`
-	LatestDiagnostics map[string]any  `json:"latest_diagnostics,omitempty"`
+	TraderID           string          `json:"trader_id"`
+	Symbol             string          `json:"symbol"`
+	DecisionMode       string          `json:"decision_mode"`
+	StrategyName       string          `json:"strategy_name"`
+	StrategyVersion    string          `json:"strategy_version"`
+	ConfigHash         string          `json:"config_hash"`
+	TradeTimeframe     string          `json:"trade_timeframe,omitempty"`
+	ComponentTimeframe string          `json:"component_timeframe,omitempty"`
+	MicroTimeframe     string          `json:"micro_timeframe,omitempty"`
+	Signals            []ChanlunSignal `json:"signals"`
+	SignalMarkers      []SignalMarker  `json:"signal_markers,omitempty"`
+	LatestDiagnostics  map[string]any  `json:"latest_diagnostics,omitempty"`
+}
+
+type SignalMarker struct {
+	Symbol      string  `json:"symbol"`
+	Timeframe   string  `json:"timeframe"`
+	CloseTime   int64   `json:"close_time"`
+	SignalType  string  `json:"signal_type"`
+	Direction   string  `json:"direction"`
+	Level       string  `json:"level"`
+	SourceLayer string  `json:"source_layer"`
+	Status      string  `json:"status"`
+	SignalID    string  `json:"signal_id"`
+	Action      string  `json:"action,omitempty"`
+	Price       float64 `json:"price,omitempty"`
+	Reason      string  `json:"reason,omitempty"`
 }
 
 type StrategySymbol struct {

@@ -255,6 +255,49 @@ func TestDeterminePartialClosePlan_SmallPositionTwentyPct_FullClose(t *testing.T
 	}
 }
 
+func TestExecutePartialCloseWithRecordWritesFinalExecutionFields(t *testing.T) {
+	originalGetter := getMarketData
+	getMarketData = func(symbol string) (*market.Data, error) {
+		return &market.Data{Symbol: symbol, CurrentPrice: 100}, nil
+	}
+	t.Cleanup(func() { getMarketData = originalGetter })
+	if err := decision.InitPlanManager(t.TempDir()); err != nil {
+		t.Fatalf("初始化计划管理器失败: %v", err)
+	}
+
+	m := &mockTrader{positions: []map[string]interface{}{
+		{"symbol": "ETHUSDT", "side": "long", "positionAmt": 1.0, "markPrice": 100.0},
+	}}
+	at := &AutoTrader{
+		id:                    "t1",
+		exchange:              "aster",
+		trader:                m,
+		orderTracker:          NewOrderTracker(m),
+		positionFirstSeenTime: make(map[string]int64),
+	}
+	d := &decision.Decision{
+		Symbol:           "ETHUSDT",
+		Action:           "partial_close",
+		ClosePercentage:  30,
+		NewStopLoss:      95,
+		StrategyMode:     "programmatic",
+		StrategyMetadata: map[string]any{"layer": "position_management", "rule": "short_trade", "side": "long"},
+	}
+	record := &logger.DecisionAction{StrategyMetadata: map[string]any{}}
+	if err := at.executePartialCloseWithRecord(d, record); err != nil {
+		t.Fatalf("partial_close不应失败: %v", err)
+	}
+	if record.FinalAction != "partial_close" || record.RequestedClosePercentage != 30 {
+		t.Fatalf("final/requested字段错误: %+v", record)
+	}
+	if math.Abs(record.ExecutedClosePercentage-30) > 0.0001 || math.Abs(record.CloseQuantity-0.3) > 0.0001 {
+		t.Fatalf("执行比例和数量记录错误: %+v", record)
+	}
+	if got := actionRecordMetadataFloat(record.StrategyMetadata, "position_quantity_before"); got != 1 {
+		t.Fatalf("应记录平仓前数量: %.4f", got)
+	}
+}
+
 func TestCalibratedMinOrderValue_BinanceBTC(t *testing.T) {
 	if got := calibratedOpenMinOrderValueUSDT("binance", "BTCUSDT"); got != 50 {
 		t.Fatalf("Binance BTCUSDT开仓最小名义额应按外部校准提高到50，实际=%.2f", got)

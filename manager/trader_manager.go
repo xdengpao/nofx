@@ -292,13 +292,20 @@ func decisionProgrammaticStrategyPolicy(profile config.ProgrammaticStrategyProfi
 				Action:              profile.PositionManagement.FloatingDrawdown.Action,
 			},
 			StructureBreak: decision.ProgrammaticStructureBreakPolicy{
-				Enabled:     profile.PositionManagement.StructureBreak.Enabled,
-				ConfirmBars: profile.PositionManagement.StructureBreak.ConfirmBars,
-				Action:      profile.PositionManagement.StructureBreak.Action,
+				Enabled:                 profile.PositionManagement.StructureBreak.Enabled,
+				ConfirmBars:             profile.PositionManagement.StructureBreak.ConfirmBars,
+				Action:                  profile.PositionManagement.StructureBreak.Action,
+				PartialCloseGuardAction: profile.PositionManagement.StructureBreak.PartialCloseGuardAction,
 			},
 			ShortTrade: decision.ProgrammaticShortTradePolicy{
 				Enabled:         profile.PositionManagement.ShortTrade.Enabled,
 				PartialClosePct: profile.PositionManagement.ShortTrade.PartialClosePct,
+			},
+			PartialCloseGuard: decision.ProgrammaticPartialCloseGuardPolicy{
+				CooldownMinutes:     profile.PositionManagement.PartialCloseGuard.CooldownMinutes,
+				MaxCountPerPosition: profile.PositionManagement.PartialCloseGuard.MaxCountPerPosition,
+				MaxTotalRatio:       profile.PositionManagement.PartialCloseGuard.MaxTotalRatio,
+				CooldownEnabled:     profile.PositionManagement.PartialCloseGuard.CooldownEnabled,
 			},
 		},
 		TakeProfit: decision.ProgrammaticTPPolicy{

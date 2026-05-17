@@ -65,6 +65,28 @@ export interface DecisionAction {
   structure_target?: number;
   strategy_metadata?: Record<string, unknown>;
   strategy_diagnostics?: Record<string, unknown>;
+  requested_close_percentage?: number;
+  executed_close_percentage?: number;
+  final_action?: string;
+  close_quantity?: number;
+  explanation?: DecisionExplanation;
+}
+
+export interface DecisionExplanation {
+  summary?: string;
+  layer?: string;
+  rule?: string;
+  reason_code?: string;
+  timeframe?: string;
+  signal_type?: string;
+  signal_id?: string;
+  trigger_price?: number;
+  reference_price?: number;
+  threshold?: number;
+  cooldown_status?: Record<string, unknown>;
+  budget_status?: Record<string, unknown>;
+  risk_checks?: Array<Record<string, unknown>>;
+  details?: Record<string, unknown>;
 }
 
 export interface AccountSnapshot {
@@ -159,12 +181,32 @@ export interface ChanlunSignal {
   center_id?: string;
   confidence?: number;
   confirmed_at?: string;
+  trigger_close_time?: number;
+  segment_start_time?: number;
+  segment_end_time?: number;
+  status?: string;
+  source_layer?: string;
   diagnostics?: {
     reasons?: string[];
     metrics?: Record<string, unknown>;
     state_source?: string;
     bootstrap?: boolean;
   };
+}
+
+export interface SignalMarker {
+  symbol: string;
+  timeframe: string;
+  close_time: number;
+  signal_type: string;
+  direction: string;
+  level: string;
+  source_layer: string;
+  status: string;
+  signal_id: string;
+  action?: string;
+  price?: number;
+  reason?: string;
 }
 
 export interface StrategySignalReport {
@@ -174,7 +216,11 @@ export interface StrategySignalReport {
   strategy_name?: string;
   strategy_version?: string;
   config_hash?: string;
+  trade_timeframe?: string;
+  component_timeframe?: string;
+  micro_timeframe?: string;
   signals: ChanlunSignal[];
+  signal_markers?: SignalMarker[];
   latest_diagnostics?: Record<string, unknown>;
 }
 

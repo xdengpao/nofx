@@ -104,6 +104,10 @@ type ProgrammaticPositionManagementConfig struct {
 	FloatingDrawdown ProgrammaticFloatingDrawdownConfig `json:"floating_drawdown,omitempty"`
 	StructureBreak   ProgrammaticStructureBreakConfig   `json:"structure_break,omitempty"`
 	ShortTrade       ProgrammaticShortTradeConfig       `json:"short_trade,omitempty"`
+
+	PartialCloseCooldownMinutes     *int    `json:"partial_close_cooldown_minutes,omitempty"`
+	MaxPartialCloseCountPerPosition int     `json:"max_partial_close_count_per_position,omitempty"`
+	MaxTotalPartialClosePct         float64 `json:"max_total_partial_close_pct,omitempty"`
 }
 
 type ProgrammaticManagementTFConfig struct {
@@ -127,9 +131,10 @@ type ProgrammaticFloatingDrawdownConfig struct {
 }
 
 type ProgrammaticStructureBreakConfig struct {
-	Enabled     *bool  `json:"enabled,omitempty"`
-	ConfirmBars int    `json:"confirm_bars,omitempty"`
-	Action      string `json:"action,omitempty"`
+	Enabled                 *bool  `json:"enabled,omitempty"`
+	ConfirmBars             int    `json:"confirm_bars,omitempty"`
+	Action                  string `json:"action,omitempty"`
+	PartialCloseGuardAction string `json:"partial_close_guard_action,omitempty"`
 }
 
 type ProgrammaticShortTradeConfig struct {
@@ -220,12 +225,13 @@ type ProgrammaticPositionProfile struct {
 }
 
 type ProgrammaticPositionManagementProfile struct {
-	Enabled          bool
-	Timeframes       ProgrammaticManagementTFProfile
-	Breakeven        ProgrammaticBreakevenProfile
-	FloatingDrawdown ProgrammaticFloatingDrawdownProfile
-	StructureBreak   ProgrammaticStructureBreakProfile
-	ShortTrade       ProgrammaticShortTradeProfile
+	Enabled           bool
+	Timeframes        ProgrammaticManagementTFProfile
+	Breakeven         ProgrammaticBreakevenProfile
+	FloatingDrawdown  ProgrammaticFloatingDrawdownProfile
+	StructureBreak    ProgrammaticStructureBreakProfile
+	ShortTrade        ProgrammaticShortTradeProfile
+	PartialCloseGuard ProgrammaticPartialCloseGuardProfile
 }
 
 type ProgrammaticManagementTFProfile struct {
@@ -249,14 +255,22 @@ type ProgrammaticFloatingDrawdownProfile struct {
 }
 
 type ProgrammaticStructureBreakProfile struct {
-	Enabled     bool
-	ConfirmBars int
-	Action      string
+	Enabled                 bool
+	ConfirmBars             int
+	Action                  string
+	PartialCloseGuardAction string
 }
 
 type ProgrammaticShortTradeProfile struct {
 	Enabled         bool
 	PartialClosePct float64
+}
+
+type ProgrammaticPartialCloseGuardProfile struct {
+	CooldownMinutes     int
+	MaxCountPerPosition int
+	MaxTotalRatio       float64
+	CooldownEnabled     bool
 }
 
 type ProgrammaticTPProfile struct {
@@ -635,13 +649,18 @@ func normalizeProgrammaticPositionManagement(cfg ProgrammaticPositionManagementC
 	if err != nil {
 		return ProgrammaticPositionManagementProfile{}, err
 	}
+	partialCloseGuard, err := normalizeProgrammaticPartialCloseGuard(cfg)
+	if err != nil {
+		return ProgrammaticPositionManagementProfile{}, err
+	}
 	return ProgrammaticPositionManagementProfile{
-		Enabled:          enabled,
-		Timeframes:       timeframes,
-		Breakeven:        breakeven,
-		FloatingDrawdown: drawdown,
-		StructureBreak:   structureBreak,
-		ShortTrade:       shortTrade,
+		Enabled:           enabled,
+		Timeframes:        timeframes,
+		Breakeven:         breakeven,
+		FloatingDrawdown:  drawdown,
+		StructureBreak:    structureBreak,
+		ShortTrade:        shortTrade,
+		PartialCloseGuard: partialCloseGuard,
 	}, nil
 }
 
@@ -744,7 +763,21 @@ func normalizeProgrammaticStructureBreak(cfg ProgrammaticStructureBreakConfig) (
 	if action != "partial_close" && action != "close" {
 		return ProgrammaticStructureBreakProfile{}, fmt.Errorf("position_management.structure_break.action必须是 partial_close 或 close: %q", action)
 	}
-	return ProgrammaticStructureBreakProfile{Enabled: enabled, ConfirmBars: confirmBars, Action: action}, nil
+	guardAction := strings.TrimSpace(strings.ToLower(cfg.PartialCloseGuardAction))
+	if guardAction == "" {
+		guardAction = "bypass_cooldown_clip_budget"
+	}
+	switch guardAction {
+	case "respect_guard", "bypass_cooldown_clip_budget", "close_on_budget_exhausted":
+	default:
+		return ProgrammaticStructureBreakProfile{}, fmt.Errorf("position_management.structure_break.partial_close_guard_action必须是 respect_guard、bypass_cooldown_clip_budget 或 close_on_budget_exhausted: %q", guardAction)
+	}
+	return ProgrammaticStructureBreakProfile{
+		Enabled:                 enabled,
+		ConfirmBars:             confirmBars,
+		Action:                  action,
+		PartialCloseGuardAction: guardAction,
+	}, nil
 }
 
 func normalizeProgrammaticShortTrade(cfg ProgrammaticShortTradeConfig, fallbackPct float64) (ProgrammaticShortTradeProfile, error) {
@@ -760,6 +793,40 @@ func normalizeProgrammaticShortTrade(cfg ProgrammaticShortTradeConfig, fallbackP
 		return ProgrammaticShortTradeProfile{}, fmt.Errorf("position_management.short_trade.partial_close_pct必须在0-100之间: %.2f", partialClosePct)
 	}
 	return ProgrammaticShortTradeProfile{Enabled: enabled, PartialClosePct: partialClosePct}, nil
+}
+
+func normalizeProgrammaticPartialCloseGuard(cfg ProgrammaticPositionManagementConfig) (ProgrammaticPartialCloseGuardProfile, error) {
+	cooldownMinutes := 15
+	cooldownEnabled := true
+	if cfg.PartialCloseCooldownMinutes != nil {
+		cooldownMinutes = *cfg.PartialCloseCooldownMinutes
+	}
+	if cooldownMinutes < 0 || cooldownMinutes > 1440 {
+		return ProgrammaticPartialCloseGuardProfile{}, fmt.Errorf("position_management.partial_close_cooldown_minutes必须在0-1440之间: %d", cooldownMinutes)
+	}
+	if cooldownMinutes == 0 {
+		cooldownEnabled = false
+	}
+	maxCount := cfg.MaxPartialCloseCountPerPosition
+	if maxCount <= 0 {
+		maxCount = 2
+	}
+	if maxCount < 1 || maxCount > 10 {
+		return ProgrammaticPartialCloseGuardProfile{}, fmt.Errorf("position_management.max_partial_close_count_per_position必须在1-10之间: %d", maxCount)
+	}
+	maxTotalRatio, err := normalizeHumanPercentRatio(cfg.MaxTotalPartialClosePct, 50, "position_management.max_total_partial_close_pct")
+	if err != nil {
+		return ProgrammaticPartialCloseGuardProfile{}, err
+	}
+	if maxTotalRatio <= 0 || maxTotalRatio > 1 {
+		return ProgrammaticPartialCloseGuardProfile{}, fmt.Errorf("position_management.max_total_partial_close_pct必须在1-100之间: %.2f", cfg.MaxTotalPartialClosePct)
+	}
+	return ProgrammaticPartialCloseGuardProfile{
+		CooldownMinutes:     cooldownMinutes,
+		MaxCountPerPosition: maxCount,
+		MaxTotalRatio:       maxTotalRatio,
+		CooldownEnabled:     cooldownEnabled,
+	}, nil
 }
 
 func normalizeHumanPercentValue(value, fallback float64, field string) (float64, error) {

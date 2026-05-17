@@ -314,6 +314,15 @@ func TestNormalizeProgrammaticStrategies_ProgrammaticDefaults(t *testing.T) {
 	if profile.PositionManagement.FloatingDrawdown.DrawdownRatio != 0.35 {
 		t.Fatalf("drawdown_pct默认35应归一化为0.35，实际=%.8f", profile.PositionManagement.FloatingDrawdown.DrawdownRatio)
 	}
+	if profile.PositionManagement.PartialCloseGuard.CooldownMinutes != 15 || !profile.PositionManagement.PartialCloseGuard.CooldownEnabled {
+		t.Fatalf("partial close cooldown默认应为15分钟且启用: %+v", profile.PositionManagement.PartialCloseGuard)
+	}
+	if profile.PositionManagement.PartialCloseGuard.MaxCountPerPosition != 2 || profile.PositionManagement.PartialCloseGuard.MaxTotalRatio != 0.5 {
+		t.Fatalf("partial close预算默认错误: %+v", profile.PositionManagement.PartialCloseGuard)
+	}
+	if profile.PositionManagement.StructureBreak.PartialCloseGuardAction != "bypass_cooldown_clip_budget" {
+		t.Fatalf("structure_break guard默认动作错误: %+v", profile.PositionManagement.StructureBreak)
+	}
 	if profile.MovingAverage.ShortPeriod != 20 || profile.MovingAverage.LongPeriod != 50 {
 		t.Fatalf("默认均线周期错误: %+v", profile.MovingAverage)
 	}
@@ -325,6 +334,41 @@ func TestNormalizeProgrammaticStrategies_ProgrammaticDefaults(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("programmatic模式不应要求AI key: %v", err)
+	}
+}
+
+func TestNormalizeProgrammaticStrategies_PartialCloseGuardConfig(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].DecisionMode = DecisionModeProgrammatic
+	disabledCooldown := 0
+	cfg.Traders[0].ProgrammaticStrategy.PositionManagement.PartialCloseCooldownMinutes = &disabledCooldown
+	cfg.Traders[0].ProgrammaticStrategy.PositionManagement.MaxPartialCloseCountPerPosition = 3
+	cfg.Traders[0].ProgrammaticStrategy.PositionManagement.MaxTotalPartialClosePct = 60
+	cfg.Traders[0].ProgrammaticStrategy.PositionManagement.StructureBreak.PartialCloseGuardAction = "close_on_budget_exhausted"
+
+	profiles, err := cfg.NormalizeProgrammaticStrategies()
+	if err != nil {
+		t.Fatalf("合法partial close guard配置不应失败: %v", err)
+	}
+	guard := profiles["trader1"].PositionManagement.PartialCloseGuard
+	if guard.CooldownEnabled || guard.CooldownMinutes != 0 {
+		t.Fatalf("显式cooldown=0应关闭冷却: %+v", guard)
+	}
+	if guard.MaxCountPerPosition != 3 || guard.MaxTotalRatio != 0.6 {
+		t.Fatalf("guard预算归一化错误: %+v", guard)
+	}
+	if profiles["trader1"].PositionManagement.StructureBreak.PartialCloseGuardAction != "close_on_budget_exhausted" {
+		t.Fatalf("structure_break guard action未生效: %+v", profiles["trader1"].PositionManagement.StructureBreak)
+	}
+
+	firstHash := profiles["trader1"].ConfigHash
+	cfg.Traders[0].ProgrammaticStrategy.PositionManagement.MaxTotalPartialClosePct = 50
+	profiles, err = cfg.NormalizeProgrammaticStrategies()
+	if err != nil {
+		t.Fatalf("修改guard配置后归一化不应失败: %v", err)
+	}
+	if profiles["trader1"].ConfigHash == firstHash {
+		t.Fatal("guard配置变化后config_hash应变化")
 	}
 }
 
@@ -391,6 +435,19 @@ func TestNormalizeProgrammaticStrategies_InvalidValues(t *testing.T) {
 		{name: "bad symbol", mutate: func(t *TraderConfig) { t.ProgrammaticStrategy.SymbolPool.Symbols = []string{"bad symbol"} }},
 		{name: "bad position management action", mutate: func(t *TraderConfig) {
 			t.ProgrammaticStrategy.PositionManagement.StructureBreak.Action = "trim"
+		}},
+		{name: "bad partial close cooldown", mutate: func(t *TraderConfig) {
+			v := -1
+			t.ProgrammaticStrategy.PositionManagement.PartialCloseCooldownMinutes = &v
+		}},
+		{name: "bad partial close count", mutate: func(t *TraderConfig) {
+			t.ProgrammaticStrategy.PositionManagement.MaxPartialCloseCountPerPosition = 11
+		}},
+		{name: "bad partial close total pct", mutate: func(t *TraderConfig) {
+			t.ProgrammaticStrategy.PositionManagement.MaxTotalPartialClosePct = 101
+		}},
+		{name: "bad structure guard action", mutate: func(t *TraderConfig) {
+			t.ProgrammaticStrategy.PositionManagement.StructureBreak.PartialCloseGuardAction = "panic"
 		}},
 	}
 	for _, tt := range tests {

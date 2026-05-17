@@ -190,6 +190,11 @@ type DecisionAction struct {
 	StructureTarget          float64                           `json:"structure_target,omitempty"`
 	StrategyMetadata         map[string]any                    `json:"strategy_metadata,omitempty"`
 	StrategyDiagnostics      map[string]any                    `json:"strategy_diagnostics,omitempty"`
+	RequestedClosePercentage float64                           `json:"requested_close_percentage,omitempty"`
+	ExecutedClosePercentage  float64                           `json:"executed_close_percentage,omitempty"`
+	FinalAction              string                            `json:"final_action,omitempty"`
+	CloseQuantity            float64                           `json:"close_quantity,omitempty"`
+	Explanation              any                               `json:"explanation,omitempty"`
 }
 
 // OpenFrequencySimulationSnapshot 是日志层的 report-only 开仓频率模拟结果。

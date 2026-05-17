@@ -103,9 +103,8 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		strategyDecisions = append(strategyDecisions, mainDecisions...)
 		diagnostics = append(diagnostics, mainDiagnostics...)
 	}
-	_ = e.StateStore.Save()
-
 	validDecisions, rejections := e.validateProgrammaticDecisions(ctx, strategyDecisions, prep)
+	_ = e.StateStore.Save()
 	allDecisions := decision.MergePublicAndStrategyDecisionsWithContext(ctx, prep.PositionDecisions, validDecisions)
 	if len(allDecisions) == 0 {
 		reason := "程序化策略未发现可执行信号"
@@ -197,6 +196,7 @@ func (e *Engine) validateProgrammaticDecisions(ctx *decision.Context, strategyDe
 				Reason: fmt.Sprintf("%s %s 被拒绝: %s", d.Symbol, d.Action, prep.StopReason),
 			})
 		}
+		e.markRejectedStrategyDecisions(ctx, strategyDecisions, validRiskReducing, rejections)
 		return validRiskReducing, rejections
 	}
 	validOpenLike, openRejections := decision.ValidateStrategyDecisions(ctx, openLike, decision.StrategyValidationOptions{
@@ -204,7 +204,35 @@ func (e *Engine) validateProgrammaticDecisions(ctx *decision.Context, strategyDe
 		AllowAdd: true,
 	})
 	rejections = append(rejections, openRejections...)
-	return append(validRiskReducing, validOpenLike...), rejections
+	valid := append(validRiskReducing, validOpenLike...)
+	e.markRejectedStrategyDecisions(ctx, strategyDecisions, valid, rejections)
+	return valid, rejections
+}
+
+func (e *Engine) markRejectedStrategyDecisions(ctx *decision.Context, candidates, valid []decision.Decision, rejections []decision.OpenRejection) {
+	if ctx == nil {
+		return
+	}
+	validIDs := map[string]bool{}
+	for _, d := range valid {
+		if d.SignalID != "" {
+			validIDs[d.SignalID] = true
+		}
+	}
+	reasonBySymbolAction := map[string]string{}
+	for _, rejection := range rejections {
+		reasonBySymbolAction[market.Normalize(rejection.Symbol)+"|"+rejection.Action] = rejection.Reason
+	}
+	for _, d := range candidates {
+		if d.SignalID == "" || validIDs[d.SignalID] {
+			continue
+		}
+		reason := reasonBySymbolAction[market.Normalize(d.Symbol)+"|"+d.Action]
+		if reason == "" {
+			reason = "程序化动作被验证层拒绝"
+		}
+		e.StateStore.UpdateSignalMarkerStatus(ctx.TraderID, market.Normalize(d.Symbol), d.SignalID, "rejected", reason)
+	}
 }
 
 func (e *Engine) applyDecisionMetadata(fullDecision *decision.FullDecision, diagnostics []string) {
@@ -246,9 +274,140 @@ func (e *Engine) applyDecisionMetadata(fullDecision *decision.FullDecision, diag
 
 func (e *Engine) LatestSignals(traderID, symbol string) (*SignalReport, bool) {
 	e.mu.RLock()
-	defer e.mu.RUnlock()
 	report, ok := e.latestSignals[traderID+"|"+symbol]
-	return report, ok
+	e.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	copied := *report
+	copied.Signals = append([]ChanlunSignal(nil), report.Signals...)
+	copied.SignalMarkers = mergeSignalMarkers(e.StateStore.RecentSignalMarkers(traderID, symbol, maxRecentSignalMarkers), report.SignalMarkers)
+	return &copied, true
+}
+
+func (e *Engine) EmptySignalReport(traderID, symbol string) *SignalReport {
+	symbol = market.Normalize(symbol)
+	return &SignalReport{
+		TraderID:           traderID,
+		Symbol:             symbol,
+		DecisionMode:       "programmatic",
+		StrategyName:       e.Policy.StrategyName,
+		StrategyVersion:    e.Policy.StrategyVersion,
+		ConfigHash:         e.Policy.ConfigHash,
+		TradeTimeframe:     e.Policy.Timeframes.Trade,
+		ComponentTimeframe: e.Policy.Timeframes.Sub,
+		MicroTimeframe:     e.Policy.Timeframes.Micro,
+		Signals:            []ChanlunSignal{},
+		SignalMarkers:      e.StateStore.RecentSignalMarkers(traderID, symbol, maxRecentSignalMarkers),
+		LatestDiagnostics: map[string]any{
+			"messages": []string{"暂无该标的的程序化策略信号"},
+		},
+	}
+}
+
+type ProgrammaticExecutionResult struct {
+	TraderID                 string
+	Decision                 decision.Decision
+	Success                  bool
+	FinalAction              string
+	RequestedClosePercentage float64
+	ExecutedClosePercentage  float64
+	ExecutedQuantity         float64
+	PositionQuantityBefore   float64
+	Price                    float64
+	Error                    string
+	ExecutedAt               time.Time
+}
+
+func (e *Engine) OnExecutionResult(result ProgrammaticExecutionResult) {
+	d := result.Decision
+	if d.StrategyMode != "programmatic" || d.SignalID == "" || d.Symbol == "" {
+		return
+	}
+	symbol := market.Normalize(d.Symbol)
+	status := "executed"
+	if !result.Success {
+		status = "failed"
+	}
+	reason := result.Error
+	if reason == "" {
+		reason = d.Reasoning
+	}
+	if marker, ok := e.decisionToMarker(d, status); ok {
+		marker.Action = firstNonEmptyString(result.FinalAction, d.Action)
+		marker.Reason = reason
+		e.StateStore.StoreSignalMarker(result.TraderID, symbol, marker)
+	}
+	if !result.Success {
+		_ = e.StateStore.Save()
+		return
+	}
+	finalAction := firstNonEmptyString(result.FinalAction, d.Action)
+	if finalAction == "hold" || finalAction == "partial_close_skipped" {
+		e.StateStore.UpdateSignalMarkerStatus(result.TraderID, symbol, d.SignalID, "rejected", reason)
+		_ = e.StateStore.Save()
+		return
+	}
+	rule := metadataString(d.StrategyMetadata, "rule")
+	side := metadataString(d.StrategyMetadata, "side")
+	if side == "" {
+		side = directionForAction(finalAction)
+	}
+	if side != "" && rule != "" {
+		e.StateStore.MarkPositionSignal(result.TraderID, symbol, side, rule, d.SignalID)
+	}
+	switch finalAction {
+	case "partial_close":
+		if result.ExecutedQuantity > 0 || result.ExecutedClosePercentage > 0 {
+			e.StateStore.RecordProgrammaticPartialClose(ProgrammaticPartialCloseRecord{
+				TraderID:                 result.TraderID,
+				Symbol:                   symbol,
+				Side:                     side,
+				Rule:                     rule,
+				SignalID:                 d.SignalID,
+				RequestedClosePercentage: result.RequestedClosePercentage,
+				ExecutedClosePercentage:  result.ExecutedClosePercentage,
+				ExecutedQuantity:         result.ExecutedQuantity,
+				PositionQuantityBefore:   result.PositionQuantityBefore,
+				Price:                    result.Price,
+				Estimated:                result.ExecutedQuantity <= 0,
+				ExecutedAt:               result.ExecutedAt,
+				PeakPrice:                metadataFloat64(d.StrategyMetadata, "peak_price"),
+				PeakPnLPct:               metadataFloat64(d.StrategyMetadata, "peak_pnl_pct"),
+				PeakR:                    metadataFloat64(d.StrategyMetadata, "peak_r"),
+			})
+		}
+	case "close_long", "close_short":
+		e.StateStore.RecordProgrammaticFullClose(result.TraderID, symbol, side)
+	}
+	_ = e.StateStore.Save()
+}
+
+func metadataFloat64(values map[string]any, key string) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	switch value := values[key].(type) {
+	case float64:
+		return value
+	case float32:
+		return float64(value)
+	case int:
+		return float64(value)
+	case int64:
+		return float64(value)
+	default:
+		return 0
+	}
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (e *Engine) SymbolUniverse(traderID string) []StrategySymbol {
@@ -351,12 +510,32 @@ func (e *Engine) signalToMainDecision(ctx *decision.Context, signal ChanlunSigna
 		SignalTimeframe: signal.AnalysisTF,
 		StructureTarget: signal.StructureTarget,
 		StrategyMetadata: map[string]any{
-			"center_id":         signal.CenterID,
-			"trigger_timeframe": signal.TriggerTF,
-			"level":             signal.Level,
+			"layer":              "main_signal",
+			"rule":               signal.SignalType,
+			"center_id":          signal.CenterID,
+			"trigger_timeframe":  signal.TriggerTF,
+			"level":              signal.Level,
+			"trigger_close_time": signal.TriggerCloseTime,
 		},
 		StrategyDiagnosis: map[string]any{
 			"diagnostics": signal.Diagnostics,
+		},
+	}
+	d.Explanation = &decision.DecisionExplanation{
+		Summary:        d.Reasoning,
+		Layer:          "main_signal",
+		Rule:           signal.SignalType,
+		ReasonCode:     "chanlun_signal_detected",
+		Timeframe:      signal.AnalysisTF,
+		SignalType:     signal.SignalType,
+		SignalID:       signal.SignalID,
+		TriggerPrice:   signal.Price,
+		ReferencePrice: signal.StructureTarget,
+		Details: map[string]any{
+			"center_id":          signal.CenterID,
+			"trigger_timeframe":  signal.TriggerTF,
+			"trigger_close_time": signal.TriggerCloseTime,
+			"level":              signal.Level,
 		},
 	}
 	if action == "partial_close" {
@@ -451,20 +630,166 @@ func ResolveProgrammaticSymbols(candidates []decision.CandidateCoin, positions [
 }
 
 func (e *Engine) setLatestSignals(traderID, symbol string, signals []ChanlunSignal, diagnostics []string) {
+	markers := make([]SignalMarker, 0, len(signals))
+	for _, signal := range signals {
+		marker := signalToMarker(signal, "main_signal", "detected", "", "")
+		markers = append(markers, marker)
+		e.StateStore.StoreSignalMarker(traderID, symbol, marker)
+	}
+	markers = mergeSignalMarkers(e.StateStore.RecentSignalMarkers(traderID, symbol, maxRecentSignalMarkers), markers)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.latestSignals[traderID+"|"+symbol] = &SignalReport{
-		TraderID:        traderID,
-		Symbol:          symbol,
-		DecisionMode:    "programmatic",
-		StrategyName:    e.Policy.StrategyName,
-		StrategyVersion: e.Policy.StrategyVersion,
-		ConfigHash:      e.Policy.ConfigHash,
-		Signals:         append([]ChanlunSignal(nil), signals...),
+		TraderID:           traderID,
+		Symbol:             symbol,
+		DecisionMode:       "programmatic",
+		StrategyName:       e.Policy.StrategyName,
+		StrategyVersion:    e.Policy.StrategyVersion,
+		ConfigHash:         e.Policy.ConfigHash,
+		TradeTimeframe:     e.Policy.Timeframes.Trade,
+		ComponentTimeframe: e.Policy.Timeframes.Sub,
+		MicroTimeframe:     e.Policy.Timeframes.Micro,
+		Signals:            append([]ChanlunSignal(nil), signals...),
+		SignalMarkers:      markers,
 		LatestDiagnostics: map[string]any{
 			"messages": diagnostics,
 		},
 	}
+}
+
+func signalToMarker(signal ChanlunSignal, sourceLayer, status, action, reason string) SignalMarker {
+	if sourceLayer == "" {
+		sourceLayer = signal.SourceLayer
+	}
+	if sourceLayer == "" {
+		sourceLayer = "main_signal"
+	}
+	if status == "" {
+		status = signal.Status
+	}
+	if status == "" {
+		status = "detected"
+	}
+	timeframe := signal.AnalysisTF
+	if sourceLayer == "position_management" && signal.TriggerTF != "" {
+		timeframe = signal.TriggerTF
+	}
+	closeTime := signal.TriggerCloseTime
+	if closeTime == 0 {
+		closeTime = signal.SegmentEndTime
+	}
+	return SignalMarker{
+		Symbol:      signal.Symbol,
+		Timeframe:   timeframe,
+		CloseTime:   closeTime,
+		SignalType:  signal.SignalType,
+		Direction:   signal.Direction,
+		Level:       signal.Level,
+		SourceLayer: sourceLayer,
+		Status:      status,
+		SignalID:    signal.SignalID,
+		Action:      action,
+		Price:       signal.Price,
+		Reason:      reason,
+	}
+}
+
+func (e *Engine) decisionToMarker(d decision.Decision, status string) (SignalMarker, bool) {
+	if d.SignalID == "" || d.Symbol == "" {
+		return SignalMarker{}, false
+	}
+	layer := metadataString(d.StrategyMetadata, "layer")
+	if layer == "" {
+		layer = "position_management"
+	}
+	rule := metadataString(d.StrategyMetadata, "rule")
+	signalType := d.SignalType
+	if signalType == "" {
+		signalType = metadataString(d.StrategyMetadata, "signal_type")
+	}
+	if signalType == "" {
+		signalType = rule
+	}
+	timeframe := d.SignalTimeframe
+	if timeframe == "" {
+		timeframe = metadataString(d.StrategyMetadata, "timeframe")
+	}
+	if timeframe == "" {
+		timeframe = metadataString(d.StrategyMetadata, "structure_timeframe")
+	}
+	if timeframe == "" {
+		timeframe = e.Policy.Timeframes.Trade
+	}
+	closeTime, _ := metadataInt64(d.StrategyMetadata, "trigger_close_time")
+	direction := metadataString(d.StrategyMetadata, "side")
+	if direction == "" {
+		direction = directionForAction(d.Action)
+	}
+	price := d.StopLoss
+	if d.Action == "update_stop_loss" {
+		price = d.NewStopLoss
+	}
+	return SignalMarker{
+		Symbol:      market.Normalize(d.Symbol),
+		Timeframe:   timeframe,
+		CloseTime:   closeTime,
+		SignalType:  signalType,
+		Direction:   direction,
+		Level:       timeframe,
+		SourceLayer: layer,
+		Status:      status,
+		SignalID:    d.SignalID,
+		Action:      d.Action,
+		Price:       price,
+		Reason:      d.Reasoning,
+	}, true
+}
+
+func metadataInt64(values map[string]any, key string) (int64, bool) {
+	if len(values) == 0 {
+		return 0, false
+	}
+	switch value := values[key].(type) {
+	case int64:
+		return value, true
+	case int:
+		return int64(value), true
+	case float64:
+		return int64(value), true
+	default:
+		return 0, false
+	}
+}
+
+func directionForAction(action string) string {
+	switch action {
+	case "open_long", "add_long", "close_long":
+		return SideLong
+	case "open_short", "add_short", "close_short":
+		return SideShort
+	default:
+		return ""
+	}
+}
+
+func mergeSignalMarkers(first, second []SignalMarker) []SignalMarker {
+	seen := map[string]bool{}
+	out := make([]SignalMarker, 0, len(first)+len(second))
+	for _, marker := range append(append([]SignalMarker(nil), first...), second...) {
+		if marker.SignalID == "" {
+			continue
+		}
+		key := signalMarkerKey(marker)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, marker)
+	}
+	if len(out) > maxRecentSignalMarkers {
+		out = out[len(out)-maxRecentSignalMarkers:]
+	}
+	return out
 }
 
 func (e *Engine) setUniverse(traderID string, universe []StrategySymbol) {

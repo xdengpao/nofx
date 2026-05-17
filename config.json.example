@@ -103,6 +103,9 @@
         "position_management": {
           // 无新 trade 级别闭合K线时仍每个scan_interval管理已有持仓。
           "enabled": true,
+          "partial_close_cooldown_minutes": 15,
+          "max_partial_close_count_per_position": 2,
+          "max_total_partial_close_pct": 50,
           "timeframes": {
             "structure": "15m",
             "micro": "3m"
@@ -123,7 +126,8 @@
           "structure_break": {
             "enabled": true,
             "confirm_bars": 2,
-            "action": "partial_close"
+            "action": "partial_close",
+            "partial_close_guard_action": "bypass_cooldown_clip_budget"
           },
           "short_trade": {
             "enabled": true,

@@ -3,8 +3,10 @@ package chanlun
 import (
 	"encoding/json"
 	"log"
+	"nofx/decision"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +17,8 @@ type StateStore struct {
 	mu   sync.Mutex
 	data ProgrammaticStateFile
 }
+
+const maxRecentSignalMarkers = 200
 
 type ProgrammaticStateFile struct {
 	Version   int                                `json:"version"`
@@ -34,17 +38,38 @@ type ProgrammaticSymbolState struct {
 	AddCountBySide          map[string]int                       `json:"add_count_by_side,omitempty"`
 	ShortTradeState         *ShortTradeState                     `json:"short_trade_state,omitempty"`
 	PositionStates          map[string]ProgrammaticPositionState `json:"position_states,omitempty"`
+	RecentSignalMarkers     []SignalMarker                       `json:"recent_signal_markers,omitempty"`
 }
 
 type ProgrammaticPositionState struct {
-	Side                   string    `json:"side"`
-	PeakPrice              float64   `json:"peak_price,omitempty"`
-	PeakR                  float64   `json:"peak_r,omitempty"`
-	LastBreakevenSignalID  string    `json:"last_breakeven_signal_id,omitempty"`
-	LastDrawdownSignalID   string    `json:"last_drawdown_signal_id,omitempty"`
-	LastStructureSignalID  string    `json:"last_structure_signal_id,omitempty"`
-	LastShortTradeSignalID string    `json:"last_short_trade_signal_id,omitempty"`
-	LastManagedAt          time.Time `json:"last_managed_at,omitempty"`
+	Side                   string                 `json:"side"`
+	PeakPrice              float64                `json:"peak_price,omitempty"`
+	PeakR                  float64                `json:"peak_r,omitempty"`
+	LastBreakevenSignalID  string                 `json:"last_breakeven_signal_id,omitempty"`
+	LastDrawdownSignalID   string                 `json:"last_drawdown_signal_id,omitempty"`
+	LastStructureSignalID  string                 `json:"last_structure_signal_id,omitempty"`
+	LastShortTradeSignalID string                 `json:"last_short_trade_signal_id,omitempty"`
+	LastManagedAt          time.Time              `json:"last_managed_at,omitempty"`
+	PartialCloseGuard      PartialCloseGuardState `json:"partial_close_guard,omitempty"`
+}
+
+type PartialCloseGuardState struct {
+	LastPartialCloseAt        time.Time `json:"last_partial_close_at,omitempty"`
+	LastPartialCloseRule      string    `json:"last_partial_close_rule,omitempty"`
+	LastPartialCloseSignalID  string    `json:"last_partial_close_signal_id,omitempty"`
+	LastPartialClosePct       float64   `json:"last_partial_close_pct,omitempty"`
+	PartialCloseCount         int       `json:"partial_close_count,omitempty"`
+	TotalPartialClosePct      float64   `json:"total_partial_close_pct,omitempty"`
+	InitialTrackedQuantity    float64   `json:"initial_tracked_quantity,omitempty"`
+	InitialTrackedValueUSD    float64   `json:"initial_tracked_value_usd,omitempty"`
+	LastKnownQuantity         float64   `json:"last_known_quantity,omitempty"`
+	TotalPartialCloseQuantity float64   `json:"total_partial_close_quantity,omitempty"`
+	QuantityEstimated         bool      `json:"quantity_estimated,omitempty"`
+
+	LastDrawdownPeakPrice     float64 `json:"last_drawdown_peak_price,omitempty"`
+	LastDrawdownPeakPnLPct    float64 `json:"last_drawdown_peak_pnl_pct,omitempty"`
+	LastDrawdownPeakR         float64 `json:"last_drawdown_peak_r,omitempty"`
+	RequireNewPeakForDrawdown bool    `json:"require_new_peak_for_drawdown,omitempty"`
 }
 
 type StoredSignal struct {
@@ -233,6 +258,208 @@ func (s *StateStore) MarkPositionSignal(traderID, symbol, side, rule, signalID s
 		marked = true
 	})
 	return marked
+}
+
+func (s *StateStore) HasPositionSignal(traderID, symbol, side, rule, signalID string) bool {
+	if signalID == "" {
+		return false
+	}
+	state := s.PositionState(traderID, symbol, side)
+	switch rule {
+	case "breakeven":
+		return state.LastBreakevenSignalID == signalID
+	case "floating_drawdown":
+		return state.LastDrawdownSignalID == signalID
+	case "structure_break":
+		return state.LastStructureSignalID == signalID
+	case "short_trade":
+		return state.LastShortTradeSignalID == signalID
+	default:
+		return false
+	}
+}
+
+func (s *StateStore) PartialCloseGuardState(traderID, symbol, side string) PartialCloseGuardState {
+	return s.PositionState(traderID, symbol, side).PartialCloseGuard
+}
+
+type ProgrammaticPartialCloseRecord struct {
+	TraderID                 string
+	Symbol                   string
+	Side                     string
+	Rule                     string
+	SignalID                 string
+	RequestedClosePercentage float64
+	ExecutedClosePercentage  float64
+	ExecutedQuantity         float64
+	PositionQuantityBefore   float64
+	Price                    float64
+	Estimated                bool
+	ExecutedAt               time.Time
+	PeakPrice                float64
+	PeakPnLPct               float64
+	PeakR                    float64
+}
+
+func (s *StateStore) RecordProgrammaticPartialClose(record ProgrammaticPartialCloseRecord) ProgrammaticPositionState {
+	executedAt := record.ExecutedAt
+	if executedAt.IsZero() {
+		executedAt = time.Now()
+	}
+	return s.UpdatePositionState(record.TraderID, record.Symbol, record.Side, func(state *ProgrammaticPositionState) {
+		guard := state.PartialCloseGuard
+		executedQty := record.ExecutedQuantity
+		estimated := record.Estimated
+		if executedQty <= 0 && record.PositionQuantityBefore > 0 && record.ExecutedClosePercentage > 0 {
+			executedQty = record.PositionQuantityBefore * record.ExecutedClosePercentage / 100
+			estimated = true
+		}
+		if executedQty <= 0 && guard.LastKnownQuantity > 0 && record.RequestedClosePercentage > 0 {
+			executedQty = guard.LastKnownQuantity * record.RequestedClosePercentage / 100
+			estimated = true
+		}
+		if guard.InitialTrackedQuantity <= 0 {
+			switch {
+			case record.PositionQuantityBefore > 0:
+				guard.InitialTrackedQuantity = record.PositionQuantityBefore
+			case executedQty > 0 && record.ExecutedClosePercentage > 0:
+				guard.InitialTrackedQuantity = executedQty / (record.ExecutedClosePercentage / 100)
+			case guard.LastKnownQuantity > 0:
+				guard.InitialTrackedQuantity = guard.LastKnownQuantity + executedQty
+			default:
+				guard.InitialTrackedQuantity = executedQty
+			}
+			if record.Price > 0 {
+				guard.InitialTrackedValueUSD = guard.InitialTrackedQuantity * record.Price
+			}
+		}
+		if record.PositionQuantityBefore > 0 {
+			guard.LastKnownQuantity = record.PositionQuantityBefore - executedQty
+			if guard.LastKnownQuantity < 0 {
+				guard.LastKnownQuantity = 0
+			}
+		} else if guard.LastKnownQuantity > 0 && executedQty > 0 {
+			guard.LastKnownQuantity -= executedQty
+			if guard.LastKnownQuantity < 0 {
+				guard.LastKnownQuantity = 0
+			}
+		}
+		guard.TotalPartialCloseQuantity += executedQty
+		if guard.InitialTrackedQuantity > 0 {
+			guard.TotalPartialClosePct = guard.TotalPartialCloseQuantity / guard.InitialTrackedQuantity * 100
+			if guard.TotalPartialClosePct > 100 {
+				guard.TotalPartialClosePct = 100
+			}
+		}
+		lastPct := record.ExecutedClosePercentage
+		if lastPct <= 0 {
+			lastPct = record.RequestedClosePercentage
+		}
+		guard.LastPartialCloseAt = executedAt
+		guard.LastPartialCloseRule = record.Rule
+		guard.LastPartialCloseSignalID = record.SignalID
+		guard.LastPartialClosePct = lastPct
+		guard.PartialCloseCount++
+		guard.QuantityEstimated = estimated
+		if record.Rule == "floating_drawdown" {
+			guard.RequireNewPeakForDrawdown = true
+			guard.LastDrawdownPeakPrice = record.PeakPrice
+			guard.LastDrawdownPeakPnLPct = record.PeakPnLPct
+			guard.LastDrawdownPeakR = record.PeakR
+		}
+		state.PartialCloseGuard = guard
+	})
+}
+
+func (s *StateStore) RecordProgrammaticFullClose(traderID, symbol, side string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	delete(state.PositionStates, normalizeSideKey(side))
+	s.setSymbolLocked(traderID, symbol, state)
+}
+
+func (s *StateStore) ResetPositionGuardIfMissing(traderID string, activePositions []decision.PositionInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	active := map[string]bool{}
+	for _, pos := range activePositions {
+		symbol := strings.ToUpper(strings.TrimSpace(pos.Symbol))
+		if symbol == "" {
+			continue
+		}
+		active[symbol+"|"+normalizeSideKey(pos.Side)] = true
+	}
+	trader := s.data.Traders[traderID]
+	for symbol, state := range trader.Symbols {
+		for side := range state.PositionStates {
+			if !active[strings.ToUpper(symbol)+"|"+normalizeSideKey(side)] {
+				delete(state.PositionStates, side)
+			}
+		}
+		trader.Symbols[symbol] = state
+	}
+	s.data.Traders[traderID] = trader
+}
+
+func (s *StateStore) StoreSignalMarker(traderID, symbol string, marker SignalMarker) {
+	if marker.SignalID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	state.RecentSignalMarkers = upsertSignalMarker(state.RecentSignalMarkers, marker)
+	s.setSymbolLocked(traderID, symbol, state)
+}
+
+func (s *StateStore) UpdateSignalMarkerStatus(traderID, symbol, signalID, status, reason string) {
+	if signalID == "" || status == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	for i := range state.RecentSignalMarkers {
+		if state.RecentSignalMarkers[i].SignalID != signalID {
+			continue
+		}
+		state.RecentSignalMarkers[i].Status = status
+		if reason != "" {
+			state.RecentSignalMarkers[i].Reason = reason
+		}
+	}
+	s.setSymbolLocked(traderID, symbol, state)
+}
+
+func (s *StateStore) RecentSignalMarkers(traderID, symbol string, limit int) []SignalMarker {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	markers := append([]SignalMarker(nil), state.RecentSignalMarkers...)
+	if limit <= 0 || len(markers) <= limit {
+		return markers
+	}
+	return markers[len(markers)-limit:]
+}
+
+func upsertSignalMarker(markers []SignalMarker, marker SignalMarker) []SignalMarker {
+	key := signalMarkerKey(marker)
+	for i := range markers {
+		if signalMarkerKey(markers[i]) == key {
+			markers[i] = marker
+			return markers
+		}
+	}
+	markers = append(markers, marker)
+	if len(markers) > maxRecentSignalMarkers {
+		markers = markers[len(markers)-maxRecentSignalMarkers:]
+	}
+	return markers
+}
+
+func signalMarkerKey(marker SignalMarker) string {
+	return marker.SignalID + "|" + marker.Timeframe + "|" + strconv.FormatInt(marker.CloseTime, 10)
 }
 
 func (s *StateStore) ensureSymbolLocked(traderID, symbol string) ProgrammaticSymbolState {

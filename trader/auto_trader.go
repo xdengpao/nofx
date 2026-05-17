@@ -571,6 +571,7 @@ func (at *AutoTrader) runCycle() error {
 			// 成功执行后短暂延迟
 			time.Sleep(1 * time.Second)
 		}
+		at.reportProgrammaticExecutionResult(&d, &actionRecord)
 
 		record.Decisions = append(record.Decisions, actionRecord)
 	}
@@ -658,6 +659,50 @@ func applyDecisionSizingToActionRecord(d *decision.Decision, actionRecord *logge
 	actionRecord.StructureTarget = d.StructureTarget
 	actionRecord.StrategyMetadata = copyAnyMap(d.StrategyMetadata)
 	actionRecord.StrategyDiagnostics = copyAnyMap(d.StrategyDiagnosis)
+	actionRecord.RequestedClosePercentage = d.ClosePercentage
+	actionRecord.FinalAction = d.Action
+	actionRecord.Explanation = d.Explanation
+}
+
+func (at *AutoTrader) reportProgrammaticExecutionResult(d *decision.Decision, actionRecord *logger.DecisionAction) {
+	if at == nil || at.programmaticEngine == nil || d == nil || actionRecord == nil || d.StrategyMode != "programmatic" {
+		return
+	}
+	finalAction := actionRecord.FinalAction
+	if strings.TrimSpace(finalAction) == "" {
+		finalAction = d.Action
+	}
+	at.programmaticEngine.OnExecutionResult(chanlun.ProgrammaticExecutionResult{
+		TraderID:                 at.id,
+		Decision:                 *d,
+		Success:                  actionRecord.Success,
+		FinalAction:              finalAction,
+		RequestedClosePercentage: actionRecord.RequestedClosePercentage,
+		ExecutedClosePercentage:  actionRecord.ExecutedClosePercentage,
+		ExecutedQuantity:         actionRecord.CloseQuantity,
+		PositionQuantityBefore:   actionRecordMetadataFloat(actionRecord.StrategyMetadata, "position_quantity_before"),
+		Price:                    actionRecord.Price,
+		Error:                    actionRecord.Error,
+		ExecutedAt:               actionRecord.Timestamp,
+	})
+}
+
+func actionRecordMetadataFloat(values map[string]any, key string) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	switch value := values[key].(type) {
+	case float64:
+		return value
+	case float32:
+		return float64(value)
+	case int:
+		return float64(value)
+	case int64:
+		return float64(value)
+	default:
+		return 0
+	}
 }
 
 func (at *AutoTrader) applyAICallState(fullDecision *decision.FullDecision) {
@@ -2187,6 +2232,8 @@ func determinePartialClosePlan(totalQuantity, closePercentage, markPrice, minPar
 // executePartialCloseWithRecord 执行部分平仓并记录详细信息
 func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, actionRecord *logger.DecisionAction) error {
 	log.Printf("  📊 部分平仓: %s %.1f%%", d.Symbol, d.ClosePercentage)
+	actionRecord.FinalAction = "partial_close"
+	actionRecord.RequestedClosePercentage = d.ClosePercentage
 
 	// 验证百分比范围
 	if d.ClosePercentage <= 0 || d.ClosePercentage > 100 {
@@ -2244,6 +2291,11 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 	totalQuantity := math.Abs(positionAmt)
 	closeQuantity := totalQuantity * (d.ClosePercentage / 100.0)
 	actionRecord.Quantity = closeQuantity
+	actionRecord.CloseQuantity = closeQuantity
+	if actionRecord.StrategyMetadata == nil {
+		actionRecord.StrategyMetadata = map[string]any{}
+	}
+	actionRecord.StrategyMetadata["position_quantity_before"] = totalQuantity
 
 	// ✅ Layer 2: 最小仓位检查（防止产生小额剩余）
 	markPrice, ok := targetPosition["markPrice"].(float64)
@@ -2257,6 +2309,7 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 	closeQuantity = plan.CloseQuantity
 	remainingQuantity := plan.RemainingQuantity
 	actionRecord.Quantity = closeQuantity
+	actionRecord.CloseQuantity = closeQuantity
 
 	if plan.Mode == partialCloseModeFull {
 		log.Printf("⚠️ 检测到 partial_close 后剩余仓位 %.2f USDT < %.0f USDT",
@@ -2268,10 +2321,18 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 		// 🔄 自动修正为全部平仓
 		if positionSide == "LONG" {
 			d.Action = "close_long"
+			actionRecord.FinalAction = "close_long"
+			actionRecord.ExecutedClosePercentage = 100
+			actionRecord.CloseQuantity = totalQuantity
+			actionRecord.Quantity = totalQuantity
 			log.Printf("  ✓ 已修正为: close_long")
 			return at.executeCloseLongWithRecord(d, actionRecord)
 		} else {
 			d.Action = "close_short"
+			actionRecord.FinalAction = "close_short"
+			actionRecord.ExecutedClosePercentage = 100
+			actionRecord.CloseQuantity = totalQuantity
+			actionRecord.Quantity = totalQuantity
 			log.Printf("  ✓ 已修正为: close_short")
 			return at.executeCloseShortWithRecord(d, actionRecord)
 		}
@@ -2283,6 +2344,9 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 		log.Printf("  → 当前仓位价值: %.2f USDT, 平仓 %.1f%%, 预计剩余: %.2f USDT",
 			plan.CurrentPositionValue, d.ClosePercentage, plan.RemainingValue)
 		actionRecord.Quantity = 0
+		actionRecord.CloseQuantity = 0
+		actionRecord.ExecutedClosePercentage = 0
+		actionRecord.FinalAction = "partial_close_skipped"
 		actionRecord.Reasoning = fmt.Sprintf("跳过小额部分平仓: 名义额 %.2f USDT < %.2f USDT",
 			plan.CloseValue, minPartialCloseValue)
 
@@ -2319,6 +2383,11 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 
 	log.Printf("  ✓ 部分平仓成功: 平仓 %.4f (%.1f%%), 剩余 %.4f",
 		closeQuantity, d.ClosePercentage, remainingQuantity)
+	actionRecord.FinalAction = "partial_close"
+	actionRecord.CloseQuantity = closeQuantity
+	if totalQuantity > 0 {
+		actionRecord.ExecutedClosePercentage = closeQuantity / totalQuantity * 100
+	}
 
 	// 🔧 FIX: 部分平仓后重新设置止盈止损（基于剩余数量）
 	// 币安会自动取消原来的止盈止损订单（因为数量不匹配），所以必须重新设置。
@@ -2390,7 +2459,11 @@ func (at *AutoTrader) GetLatestStrategySignals(symbol string) (*chanlun.SignalRe
 	if at.programmaticEngine == nil {
 		return nil, false
 	}
-	return at.programmaticEngine.LatestSignals(at.id, market.Normalize(symbol))
+	normalized := market.Normalize(symbol)
+	if report, ok := at.programmaticEngine.LatestSignals(at.id, normalized); ok {
+		return report, true
+	}
+	return at.programmaticEngine.EmptySignalReport(at.id, normalized), true
 }
 
 // GetMarketKlines 返回闭合 K 线，供策略检查区使用。
