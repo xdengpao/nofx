@@ -1,5 +1,21 @@
 import type { MarketKline, SignalMarker } from '../types';
 
+export type VisualMarkerKind = 'signal' | 'decision' | 'merged';
+export type MarkerPlacement = 'buy' | 'sell';
+
+export type VisualSignalMarker = {
+  id: string;
+  marker: SignalMarker;
+  kind: VisualMarkerKind;
+  anchorCloseTime: number;
+  pairCloseTime?: number;
+  pairInRange?: boolean;
+  pairOutOfRange?: boolean;
+  label: string;
+  placement: MarkerPlacement;
+  stackKey: string;
+};
+
 export type TradeIntent =
   | 'open_long'
   | 'open_short'
@@ -89,10 +105,144 @@ export function markerDisplayLabel(marker: SignalMarker): string {
   return intent ? `${label} · ${intent}` : label;
 }
 
-export function markerBelongsToKline(marker: Pick<SignalMarker, 'close_time'>, kline: Pick<MarketKline, 'close_time'>): boolean {
-  const markerClose = normalizeEpochMs(marker.close_time);
+export function resolveSignalCloseTime(marker: Pick<SignalMarker, 'signal_close_time' | 'close_time'>): number {
+  return normalizeEpochMs(marker.signal_close_time || marker.close_time);
+}
+
+export function resolveDecisionCloseTime(marker: Pick<SignalMarker, 'decision_close_time'>): number {
+  return normalizeEpochMs(marker.decision_close_time);
+}
+
+export function isActionMarker(marker: Partial<Pick<SignalMarker, 'trade_intent' | 'action' | 'final_action' | 'status'>>): boolean {
+  if ((marker.trade_intent || marker.action || marker.final_action || '').trim() !== '') return true;
+  const status = (marker.status || '').trim().toLowerCase();
+  return status === 'rejected' || status === 'executed' || status === 'failed';
+}
+
+export function resolveDisplayCloseTime(marker: Partial<SignalMarker> & Pick<SignalMarker, 'close_time'>): number {
+  const displayClose = normalizeEpochMs(marker.display_close_time);
+  if (displayClose > 0) return displayClose;
+  const decisionClose = resolveDecisionCloseTime(marker);
+  if (isActionMarker(marker) && decisionClose > 0) return decisionClose;
+  return resolveSignalCloseTime(marker);
+}
+
+export function markerBelongsToKlineAt(anchorCloseTime: number | string | undefined | null, kline: Pick<MarketKline, 'close_time'>): boolean {
+  const markerClose = normalizeEpochMs(anchorCloseTime);
   const klineClose = normalizeEpochMs(kline.close_time);
-  return markerClose > 0 && klineClose > 0 && markerClose === klineClose;
+  return markerClose > 0 && klineClose > 0 && Math.abs(markerClose - klineClose) <= 1000;
+}
+
+export function markerBelongsToKline(marker: Partial<SignalMarker> & Pick<SignalMarker, 'close_time'>, kline: Pick<MarketKline, 'close_time'>): boolean {
+  return markerBelongsToKlineAt(resolveDisplayCloseTime(marker), kline);
+}
+
+export function markerPlacement(marker: Pick<SignalMarker, 'signal_type' | 'direction' | 'trade_intent' | 'action' | 'final_action' | 'position_side'>): MarkerPlacement {
+  const signalType = (marker.signal_type || '').toLowerCase();
+  if (signalType.startsWith('buy')) return 'buy';
+  if (signalType.startsWith('sell')) return 'sell';
+
+  switch (resolveTradeIntent(marker)) {
+    case 'open_long':
+    case 'add_long':
+    case 'reduce_short':
+    case 'close_short':
+      return 'buy';
+    case 'open_short':
+    case 'add_short':
+    case 'reduce_long':
+    case 'close_long':
+      return 'sell';
+    default:
+      return marker.direction === 'short' ? 'sell' : 'buy';
+  }
+}
+
+export function expandVisualMarkers(markers: SignalMarker[], klines: Pick<MarketKline, 'close_time'>[]): VisualSignalMarker[] {
+  const result: VisualSignalMarker[] = [];
+  for (const marker of markers) {
+    const signalClose = resolveSignalCloseTime(marker);
+    const decisionClose = resolveDecisionCloseTime(marker);
+    const hasAction = isActionMarker(marker);
+    const signalVisible = signalClose > 0 && klines.some((kline) => markerBelongsToKlineAt(signalClose, kline));
+    const decisionVisible = decisionClose > 0 && klines.some((kline) => markerBelongsToKlineAt(decisionClose, kline));
+
+    if (!hasAction) {
+      if (signalVisible) result.push(buildVisualMarker(marker, 'signal', signalClose));
+      continue;
+    }
+
+    if (signalClose > 0 && decisionClose > 0 && Math.abs(signalClose - decisionClose) <= 1000) {
+      if (signalVisible || decisionVisible) {
+        result.push(buildVisualMarker(marker, 'merged', decisionClose || signalClose, signalClose));
+      }
+      continue;
+    }
+
+    if (signalVisible) {
+      result.push(buildVisualMarker(marker, 'signal', signalClose, decisionClose, decisionVisible, decisionClose > 0 && !decisionVisible));
+    }
+    if (decisionVisible) {
+      result.push(buildVisualMarker(marker, 'decision', decisionClose, signalClose, signalVisible, signalClose > 0 && !signalVisible));
+    }
+    if (!signalVisible && !decisionVisible && signalClose === 0 && decisionClose > 0) {
+      result.push(buildVisualMarker(marker, 'decision', decisionClose));
+    }
+  }
+  return result.sort(compareVisualMarkers);
+}
+
+export function compareVisualMarkers(a: VisualSignalMarker, b: VisualSignalMarker): number {
+  return visualMarkerSortKey(a).localeCompare(visualMarkerSortKey(b));
+}
+
+function buildVisualMarker(
+  marker: SignalMarker,
+  kind: VisualMarkerKind,
+  anchorCloseTime: number,
+  pairCloseTime = 0,
+  pairInRange = false,
+  pairOutOfRange = false,
+): VisualSignalMarker {
+  const placement = markerPlacement(marker);
+  return {
+    id: `${marker.signal_id || 'signal'}-${kind}-${anchorCloseTime}`,
+    marker,
+    kind,
+    anchorCloseTime,
+    pairCloseTime: pairCloseTime || undefined,
+    pairInRange,
+    pairOutOfRange,
+    label: visualMarkerLabel(marker, kind),
+    placement,
+    stackKey: `${normalizeEpochMs(anchorCloseTime)}-${placement}`,
+  };
+}
+
+function visualMarkerLabel(marker: SignalMarker, kind: VisualMarkerKind): string {
+  if (kind === 'signal' && isActionMarker(marker)) return `${signalLabel(marker.signal_type)} · 结构点`;
+  const base = markerDisplayLabel(marker);
+  const status = markerStatusLabel(marker.status);
+  if (kind === 'decision' || kind === 'merged') {
+    return status && status !== '--' ? `${base} · ${status}` : base;
+  }
+  return base;
+}
+
+function visualMarkerSortKey(visual: VisualSignalMarker): string {
+  const marker = visual.marker;
+  const placementRank = visual.placement === 'sell' ? '0' : '1';
+  const actionRank = isActionMarker(marker) && visual.kind !== 'signal' ? '0' : '1';
+  const kindRank = visual.kind === 'decision' ? '0' : visual.kind === 'merged' ? '1' : '2';
+  return [
+    normalizeEpochMs(visual.anchorCloseTime).toString().padStart(16, '0'),
+    placementRank,
+    actionRank,
+    kindRank,
+    signalLabel(marker.signal_type),
+    resolveTradeIntent(marker),
+    marker.signal_id || '',
+  ].join('|');
 }
 
 export function markerStatusLabel(status?: string): string {

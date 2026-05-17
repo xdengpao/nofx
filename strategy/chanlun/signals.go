@@ -154,6 +154,7 @@ func buildSignal(input SignalInput, signalType, direction string, segment Segmen
 		ConfirmedAt:      input.Now,
 		Diagnostics:      diagnostics,
 		TriggerCloseTime: segment.EndTime,
+		SignalCloseTime:  segment.EndTime,
 		SegmentStartTime: segment.StartTime,
 		SegmentEndTime:   segment.EndTime,
 		Status:           "detected",

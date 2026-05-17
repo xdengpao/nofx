@@ -617,6 +617,35 @@ func TestBuildOpenRejection_ReportOnlySimulations(t *testing.T) {
 	}
 }
 
+func TestNewOpenRejectionFromDecisionCopiesProgrammaticSignalMetadata(t *testing.T) {
+	d := Decision{
+		Symbol:          "BCHUSDT",
+		Action:          "open_short",
+		StrategyMode:    "programmatic",
+		StrategyName:    "chanlun_programmatic",
+		StrategyVersion: "v1",
+		ConfigHash:      "hash",
+		SignalID:        "sig-sell2",
+		SignalType:      "sell2",
+		SignalTimeframe: "1h",
+		StrategyMetadata: map[string]any{
+			"signal_close_time":   int64(18_599_900),
+			"decision_close_time": float64(21_599_900),
+			"trade_intent":        "open_short",
+		},
+	}
+	rejection := NewOpenRejectionFromDecision(d, "open gate要求更高置信度")
+	if rejection.SignalID != d.SignalID || rejection.SignalType != d.SignalType || rejection.SignalTimeframe != d.SignalTimeframe {
+		t.Fatalf("应复制信号元数据: %+v", rejection)
+	}
+	if rejection.SignalCloseTime != 18_599_900 || rejection.DecisionCloseTime != 21_599_900 || rejection.TradeIntent != "open_short" {
+		t.Fatalf("应复制时间和交易意图: %+v", rejection)
+	}
+	if rejection.StrategyMetadata == nil || rejection.StrategyMetadata["trade_intent"] != "open_short" {
+		t.Fatalf("应复制strategy_metadata: %+v", rejection)
+	}
+}
+
 func TestEffectiveOpenGate_AppliesGlobalPenalty(t *testing.T) {
 	ctx := newTestContext()
 	ctx.PerformanceGates = &logger.RollingPerformanceSnapshot{

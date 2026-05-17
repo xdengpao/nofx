@@ -746,7 +746,8 @@ function StrategyInspector({
                     <div style={{ color: '#F0B90B' }}>目标 {formatOptionalPrice(latestSignal.structure_target)}</div>
                   </div>
                   <div className="text-xs" style={{ color: '#848E9C' }}>
-                    {latestSignal.analysis_timeframe || '--'} / {latestSignal.trigger_timeframe || '--'} · {formatMarkerTime(latestSignal.trigger_close_time)} · {latestSignal.center_id || '--'}
+                    {latestSignal.analysis_timeframe || '--'} / {latestSignal.trigger_timeframe || '--'} · 结构 {formatMarkerTime(latestSignal.signal_close_time || latestSignal.trigger_close_time)}
+                    {latestSignal.decision_close_time ? ` · 决策 ${formatMarkerTime(latestSignal.decision_close_time)}` : ''} · {latestSignal.center_id || '--'}
                   </div>
                 </div>
               ) : (

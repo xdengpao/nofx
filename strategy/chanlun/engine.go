@@ -190,11 +190,8 @@ func (e *Engine) validateProgrammaticDecisions(ctx *decision.Context, strategyDe
 	rejections = append(rejections, rrRejections...)
 	if prep != nil && prep.RiskIncreaseBlocked {
 		for _, d := range openLike {
-			rejections = append(rejections, decision.OpenRejection{
-				Symbol: d.Symbol,
-				Action: d.Action,
-				Reason: fmt.Sprintf("%s %s 被拒绝: %s", d.Symbol, d.Action, prep.StopReason),
-			})
+			reason := fmt.Sprintf("%s %s 被拒绝: %s", d.Symbol, d.Action, prep.StopReason)
+			rejections = append(rejections, decision.NewOpenRejectionFromDecision(d, reason))
 		}
 		e.markRejectedStrategyDecisions(ctx, strategyDecisions, validRiskReducing, rejections)
 		return validRiskReducing, rejections
@@ -220,14 +217,21 @@ func (e *Engine) markRejectedStrategyDecisions(ctx *decision.Context, candidates
 		}
 	}
 	reasonBySymbolAction := map[string]string{}
+	reasonBySignalID := map[string]string{}
 	for _, rejection := range rejections {
+		if rejection.SignalID != "" {
+			reasonBySignalID[rejection.SignalID] = rejection.Reason
+		}
 		reasonBySymbolAction[market.Normalize(rejection.Symbol)+"|"+rejection.Action] = rejection.Reason
 	}
 	for _, d := range candidates {
 		if d.SignalID == "" || validIDs[d.SignalID] {
 			continue
 		}
-		reason := reasonBySymbolAction[market.Normalize(d.Symbol)+"|"+d.Action]
+		reason := reasonBySignalID[d.SignalID]
+		if reason == "" {
+			reason = reasonBySymbolAction[market.Normalize(d.Symbol)+"|"+d.Action]
+		}
 		if reason == "" {
 			reason = "程序化动作被验证层拒绝"
 		}
@@ -474,12 +478,31 @@ func (e *Engine) analyzeMainSignal(traderID, symbol string, data *market.Data, n
 		RequireBZeroAxis:  e.Policy.Divergence.RequireBZeroAxis,
 		MAKiss:            maKiss,
 	})
+	var timeDiagnostics []string
+	for i := range signals {
+		signalClose := signals[i].SignalCloseTime
+		if signalClose == 0 {
+			signalClose = signals[i].TriggerCloseTime
+		}
+		if signalClose == 0 {
+			signalClose = signals[i].SegmentEndTime
+		}
+		signals[i].SignalCloseTime = signalClose
+		signals[i].TriggerCloseTime = signalClose
+		signals[i].DecisionCloseTime = lastClosed
+		if signalClose > 0 && lastClosed > 0 && lastClosed < signalClose {
+			timeDiagnostics = append(timeDiagnostics, fmt.Sprintf("%s %s 时间锚点异常: decision_close_time早于signal_close_time", symbol, signals[i].SignalType))
+			signals[i].DecisionCloseTime = signalClose
+		}
+	}
 	if len(signals) == 0 {
 		e.StateStore.SetLastAnalyzedClosedKline(traderID, symbol, tradeTF, lastClosed)
 		return nil, []string{fmt.Sprintf("%s 无买卖点信号", symbol)}
 	}
 	e.StateStore.SetLastAnalyzedClosedKline(traderID, symbol, tradeTF, lastClosed)
-	return signals, []string{fmt.Sprintf("%s 识别到%d个信号", symbol, len(signals))}
+	diagnostics := []string{fmt.Sprintf("%s 识别到%d个信号", symbol, len(signals))}
+	diagnostics = append(diagnostics, timeDiagnostics...)
+	return signals, diagnostics
 }
 
 func (e *Engine) signalToMainDecision(ctx *decision.Context, signal ChanlunSignal) decision.Decision {
@@ -497,6 +520,17 @@ func (e *Engine) signalToMainDecision(ctx *decision.Context, signal ChanlunSigna
 	}
 	if action == "" {
 		return decision.Decision{}
+	}
+	signalClose := signal.SignalCloseTime
+	if signalClose == 0 {
+		signalClose = signal.TriggerCloseTime
+	}
+	if signalClose == 0 {
+		signalClose = signal.SegmentEndTime
+	}
+	decisionClose := signal.DecisionCloseTime
+	if decisionClose > 0 && signalClose > 0 && decisionClose < signalClose {
+		decisionClose = signalClose
 	}
 	d := decision.Decision{
 		Symbol:          signal.Symbol,
@@ -516,12 +550,18 @@ func (e *Engine) signalToMainDecision(ctx *decision.Context, signal ChanlunSigna
 		SignalTimeframe: signal.AnalysisTF,
 		StructureTarget: signal.StructureTarget,
 		StrategyMetadata: map[string]any{
-			"layer":              "main_signal",
-			"rule":               signal.SignalType,
-			"center_id":          signal.CenterID,
-			"trigger_timeframe":  signal.TriggerTF,
-			"level":              signal.Level,
-			"trigger_close_time": signal.TriggerCloseTime,
+			"layer":               "main_signal",
+			"rule":                signal.SignalType,
+			"signal_type":         signal.SignalType,
+			"center_id":           signal.CenterID,
+			"trigger_timeframe":   signal.TriggerTF,
+			"level":               signal.Level,
+			"signal_close_time":   signalClose,
+			"decision_close_time": decisionClose,
+			"trigger_close_time":  signalClose,
+			"segment_start_time":  signal.SegmentStartTime,
+			"segment_end_time":    signal.SegmentEndTime,
+			"trade_intent":        action,
 		},
 		StrategyDiagnosis: map[string]any{
 			"diagnostics": signal.Diagnostics,
@@ -538,10 +578,15 @@ func (e *Engine) signalToMainDecision(ctx *decision.Context, signal ChanlunSigna
 		TriggerPrice:   signal.Price,
 		ReferencePrice: signal.StructureTarget,
 		Details: map[string]any{
-			"center_id":          signal.CenterID,
-			"trigger_timeframe":  signal.TriggerTF,
-			"trigger_close_time": signal.TriggerCloseTime,
-			"level":              signal.Level,
+			"center_id":           signal.CenterID,
+			"trigger_timeframe":   signal.TriggerTF,
+			"signal_close_time":   signalClose,
+			"decision_close_time": decisionClose,
+			"trigger_close_time":  signalClose,
+			"segment_start_time":  signal.SegmentStartTime,
+			"segment_end_time":    signal.SegmentEndTime,
+			"trade_intent":        action,
+			"level":               signal.Level,
 		},
 	}
 	if action == "partial_close" {
@@ -680,24 +725,29 @@ func signalToMarker(signal ChanlunSignal, sourceLayer, status, action, reason st
 	if sourceLayer == "position_management" && signal.TriggerTF != "" {
 		timeframe = signal.TriggerTF
 	}
-	closeTime := signal.TriggerCloseTime
+	closeTime := signal.SignalCloseTime
+	if closeTime == 0 {
+		closeTime = signal.TriggerCloseTime
+	}
 	if closeTime == 0 {
 		closeTime = signal.SegmentEndTime
 	}
 	return SignalMarker{
-		Symbol:      signal.Symbol,
-		Timeframe:   timeframe,
-		CloseTime:   closeTime,
-		SignalType:  signal.SignalType,
-		Direction:   signal.Direction,
-		Level:       signal.Level,
-		SourceLayer: sourceLayer,
-		Status:      status,
-		SignalID:    signal.SignalID,
-		Action:      action,
-		TradeIntent: deriveTradeIntent(action, "", "", signal.Direction),
-		Price:       signal.Price,
-		Reason:      reason,
+		Symbol:           signal.Symbol,
+		Timeframe:        timeframe,
+		CloseTime:        closeTime,
+		SignalCloseTime:  closeTime,
+		DisplayCloseTime: closeTime,
+		SignalType:       signal.SignalType,
+		Direction:        signal.Direction,
+		Level:            signal.Level,
+		SourceLayer:      sourceLayer,
+		Status:           status,
+		SignalID:         signal.SignalID,
+		Action:           action,
+		TradeIntent:      deriveTradeIntent(action, "", "", signal.Direction),
+		Price:            signal.Price,
+		Reason:           reason,
 	}
 }
 
@@ -727,31 +777,50 @@ func (e *Engine) decisionToMarker(d decision.Decision, status string) (SignalMar
 	if timeframe == "" {
 		timeframe = e.Policy.Timeframes.Trade
 	}
-	closeTime, _ := metadataInt64(d.StrategyMetadata, "trigger_close_time")
+	signalClose, _ := metadataInt64Any(d.StrategyMetadata, "signal_close_time", "trigger_close_time", "segment_end_time")
+	decisionClose, _ := metadataInt64(d.StrategyMetadata, "decision_close_time")
+	metadataDisplayClose, _ := metadataInt64(d.StrategyMetadata, "display_close_time")
+	closeTime := signalClose
+	displayClose := signalClose
+	if metadataDisplayClose > 0 {
+		displayClose = metadataDisplayClose
+	}
+	if isTradeActionMarker(d, status) && decisionClose > 0 {
+		if signalClose == 0 || decisionClose >= signalClose {
+			displayClose = decisionClose
+		}
+	}
 	direction := metadataString(d.StrategyMetadata, "side")
 	if direction == "" {
 		direction = directionForAction(d.Action)
 	}
 	positionSide := derivePositionSide(d, "")
+	tradeIntent := metadataString(d.StrategyMetadata, "trade_intent")
+	if tradeIntent == "" {
+		tradeIntent = deriveTradeIntent(d.Action, "", positionSide, direction)
+	}
 	price := d.StopLoss
 	if d.Action == "update_stop_loss" {
 		price = d.NewStopLoss
 	}
 	return SignalMarker{
-		Symbol:       market.Normalize(d.Symbol),
-		Timeframe:    timeframe,
-		CloseTime:    closeTime,
-		SignalType:   signalType,
-		Direction:    direction,
-		Level:        timeframe,
-		SourceLayer:  layer,
-		Status:       status,
-		SignalID:     d.SignalID,
-		Action:       d.Action,
-		TradeIntent:  deriveTradeIntent(d.Action, "", positionSide, direction),
-		PositionSide: positionSide,
-		Price:        price,
-		Reason:       d.Reasoning,
+		Symbol:            market.Normalize(d.Symbol),
+		Timeframe:         timeframe,
+		CloseTime:         closeTime,
+		SignalCloseTime:   signalClose,
+		DecisionCloseTime: decisionClose,
+		DisplayCloseTime:  displayClose,
+		SignalType:        signalType,
+		Direction:         direction,
+		Level:             timeframe,
+		SourceLayer:       layer,
+		Status:            status,
+		SignalID:          d.SignalID,
+		Action:            d.Action,
+		TradeIntent:       tradeIntent,
+		PositionSide:      positionSide,
+		Price:             price,
+		Reason:            d.Reasoning,
 	}, true
 }
 
@@ -772,6 +841,18 @@ func derivePositionSide(d decision.Decision, finalAction string) string {
 		return side
 	}
 	return ""
+}
+
+func isTradeActionMarker(d decision.Decision, status string) bool {
+	if strings.TrimSpace(d.Action) != "" {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "rejected", "executed", "failed":
+		return true
+	default:
+		return false
+	}
 }
 
 func deriveTradeIntent(action, finalAction, positionSide, direction string) string {
@@ -828,6 +909,15 @@ func metadataInt64(values map[string]any, key string) (int64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func metadataInt64Any(values map[string]any, keys ...string) (int64, bool) {
+	for _, key := range keys {
+		if value, ok := metadataInt64(values, key); ok && value != 0 {
+			return value, true
+		}
+	}
+	return 0, false
 }
 
 func directionForAction(action string) string {

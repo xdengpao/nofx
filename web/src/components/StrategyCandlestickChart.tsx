@@ -1,14 +1,18 @@
 import { useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import type { MarketKline, SignalMarker } from '../types';
 import {
-  markerBelongsToKline,
-  markerDisplayLabel,
+  compareVisualMarkers,
+  expandVisualMarkers,
+  markerBelongsToKlineAt,
   markerStatusLabel,
   markerTone,
   normalizeEpochMs,
+  resolveDecisionCloseTime,
+  resolveSignalCloseTime,
   resolveTradeIntent,
   signalLabel,
   tradeIntentLabel,
+  type VisualSignalMarker,
 } from '../utils/strategyMarkers';
 
 type StrategyCandlestickChartProps = {
@@ -26,7 +30,7 @@ type HoverState = {
   x: number;
   y: number;
   kline: MarketKline;
-  markers: SignalMarker[];
+  markers: VisualSignalMarker[];
 };
 
 const chartHeight = 420;
@@ -52,10 +56,14 @@ export function StrategyCandlestickChart({
     () => markers.filter((marker) => marker.source_layer === 'main_signal' && marker.timeframe === timeframe),
     [markers, timeframe],
   );
+  const visualMarkers = useMemo(
+    () => expandVisualMarkers(mainMarkers, klines ?? []),
+    [mainMarkers, klines],
+  );
 
   const chart = useMemo(() => {
     const candles = klines ?? [];
-    const markerPrices = mainMarkers.map((marker) => marker.price).filter((price): price is number => typeof price === 'number' && Number.isFinite(price) && price > 0);
+    const markerPrices = visualMarkers.map((visual) => visual.marker.price).filter((price): price is number => typeof price === 'number' && Number.isFinite(price) && price > 0);
     const lows = candles.map((kline) => kline.low);
     const highs = candles.map((kline) => kline.high);
     const minPrice = Math.min(...lows, ...markerPrices);
@@ -74,11 +82,13 @@ export function StrategyCandlestickChart({
     };
     const points = candles.map((kline, index) => {
       const x = leftPad + index * barStep + barStep / 2;
-      const rowMarkers = mainMarkers.filter((marker) => markerBelongsToKline(marker, kline));
+      const rowMarkers = visualMarkers
+        .filter((visual) => markerBelongsToKlineAt(visual.anchorCloseTime, kline))
+        .sort(compareVisualMarkers);
       return { kline, index, x, markers: rowMarkers };
     });
     return { candleWidth, points, priceToY, width, min: paddedMin, max: paddedMax };
-  }, [klines, mainMarkers]);
+  }, [klines, visualMarkers]);
 
   if (error) {
     return <ChartShell symbol={symbol} timeframe={timeframe} meta="K线接口异常">
@@ -100,7 +110,7 @@ export function StrategyCandlestickChart({
     limitSourceLabel(limitSource),
   ].filter(Boolean).join(' · ');
 
-  const updateHover = (event: MouseEvent, kline: MarketKline, rowMarkers: SignalMarker[]) => {
+  const updateHover = (event: MouseEvent, kline: MarketKline, rowMarkers: VisualSignalMarker[]) => {
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return;
     setHover({
@@ -166,13 +176,13 @@ export function StrategyCandlestickChart({
                       {formatShortTime(kline.close_time)}
                     </text>
                   )}
-                  {rowMarkers.map((marker, markerIndex) => (
+                  {rowMarkers.map((visual, markerIndex) => (
                     <MarkerGlyph
-                      key={`${marker.signal_id}-${marker.status}-${markerIndex}`}
-                      marker={marker}
+                      key={`${visual.id}-${markerIndex}`}
+                      visual={visual}
                       x={x}
-                      y={markerY(marker, kline, chart.priceToY, markerStackIndex(rowMarkers, markerIndex))}
-                      placement={markerPlacement(marker)}
+                      y={markerY(visual, kline, chart.priceToY, markerStackIndex(rowMarkers, markerIndex))}
+                      placement={visual.placement}
                       onMouseMove={(event) => updateHover(event, kline, rowMarkers)}
                     />
                   ))}
@@ -203,16 +213,28 @@ export function StrategyCandlestickChart({
             </div>
             {hover.markers.length > 0 && (
               <div className="mt-3 space-y-2">
-                {hover.markers.map((marker) => (
-                  <div key={marker.signal_id} className="border-t pt-2" style={{ borderColor: '#2B3139' }}>
-                    <div className="font-semibold">{markerDisplayLabel(marker)} · {markerStatusLabel(marker.status)}</div>
+                {hover.markers.map((visual) => {
+                  const marker = visual.marker;
+                  const signalClose = resolveSignalCloseTime(marker);
+                  const decisionClose = resolveDecisionCloseTime(marker);
+                  return (
+                  <div key={visual.id} className="border-t pt-2" style={{ borderColor: '#2B3139' }}>
+                    <div className="font-semibold">{visual.label}</div>
                     <div style={{ color: '#848E9C' }}>
-                      {marker.level || marker.timeframe} · {marker.action || '--'}{marker.final_action ? ` -> ${marker.final_action}` : ''}
+                      {visualKindLabel(visual.kind)} · {marker.level || marker.timeframe} · {marker.action || '--'}{marker.final_action ? ` -> ${marker.final_action}` : ''}
                     </div>
+                    <div className="mt-1 grid grid-cols-[64px_1fr] gap-x-2 font-mono" style={{ color: '#848E9C' }}>
+                      <span>结构</span><span>{formatFullTime(signalClose)}</span>
+                      <span>决策</span><span>{decisionClose ? formatFullTime(decisionClose) : '缺少确认时间'}</span>
+                    </div>
+                    {visual.pairOutOfRange && visual.pairCloseTime && (
+                      <div className="mt-1" style={{ color: '#F0B90B' }}>配对时间 {formatFullTime(visual.pairCloseTime)} 不在当前图表范围内</div>
+                    )}
                     {marker.reason && <div className="mt-1 break-words" style={{ color: '#B7BDC6' }}>{marker.reason}</div>}
                     <div className="mt-1 font-mono" style={{ color: '#848E9C' }}>{marker.signal_id}</div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -245,19 +267,20 @@ function ChartShell({ symbol, timeframe, meta, children }: { symbol: string; tim
 }
 
 function MarkerGlyph({
-  marker,
+  visual,
   x,
   y,
   placement,
   onMouseMove,
 }: {
-  marker: SignalMarker;
+  visual: VisualSignalMarker;
   x: number;
   y: number;
   placement: 'buy' | 'sell';
   onMouseMove: (event: MouseEvent) => void;
 }) {
-  const label = markerDisplayLabel(marker);
+  const marker = visual.marker;
+  const label = visual.label;
   const tone = markerTone(marker);
   const fill = tone === 'buy' ? '#0ECB81' : tone === 'sell' ? '#F6465D' : '#848E9C';
   const textWidth = Math.max(34, label.length * 11 + 12);
@@ -297,8 +320,8 @@ function MarkerGlyph({
   );
 }
 
-function markerY(marker: SignalMarker, kline: MarketKline, priceToY: (price: number) => number, index: number) {
-  const placement = markerPlacement(marker);
+function markerY(visual: VisualSignalMarker, kline: MarketKline, priceToY: (price: number) => number, index: number) {
+  const placement = visual.placement;
   const offset = 22 + index * 24;
   const rawY = placement === 'buy'
     ? priceToY(kline.low) + offset
@@ -306,33 +329,12 @@ function markerY(marker: SignalMarker, kline: MarketKline, priceToY: (price: num
   return Math.max(topPad + 10, Math.min(chartHeight - bottomPad - 8, rawY));
 }
 
-function markerStackIndex(markers: SignalMarker[], markerIndex: number) {
-  const placement = markerPlacement(markers[markerIndex]);
+function markerStackIndex(markers: VisualSignalMarker[], markerIndex: number) {
+  const placement = markers[markerIndex].placement;
   return markers
     .slice(0, markerIndex)
-    .filter((marker) => markerPlacement(marker) === placement)
+    .filter((marker) => marker.placement === placement)
     .length;
-}
-
-function markerPlacement(marker: SignalMarker): 'buy' | 'sell' {
-  const signalType = (marker.signal_type || '').toLowerCase();
-  if (signalType.startsWith('buy')) return 'buy';
-  if (signalType.startsWith('sell')) return 'sell';
-
-  switch (resolveTradeIntent(marker)) {
-    case 'open_long':
-    case 'add_long':
-    case 'reduce_short':
-    case 'close_short':
-      return 'buy';
-    case 'open_short':
-    case 'add_short':
-    case 'reduce_long':
-    case 'close_long':
-      return 'sell';
-    default:
-      return marker.direction === 'short' ? 'sell' : 'buy';
-  }
 }
 
 function LegendSwatch({ color, label }: { color: string; label: string }) {
@@ -361,6 +363,19 @@ function limitSourceLabel(source?: string) {
   }
 }
 
+function visualKindLabel(kind: 'signal' | 'decision' | 'merged') {
+  switch (kind) {
+    case 'signal':
+      return '结构点';
+    case 'decision':
+      return '决策点';
+    case 'merged':
+      return '结构/决策';
+    default:
+      return '';
+  }
+}
+
 function formatPrice(value: number) {
   const abs = Math.abs(value);
   if (abs >= 1000) return value.toFixed(2);
@@ -380,4 +395,9 @@ function formatShortTime(value: number) {
   const hour = String(date.getHours()).padStart(2, '0');
   const minute = String(date.getMinutes()).padStart(2, '0');
   return `${month}-${day} ${hour}:${minute}`;
+}
+
+function formatFullTime(value?: number) {
+  if (!value) return '--';
+  return new Date(normalizeEpochMs(value)).toLocaleString();
 }

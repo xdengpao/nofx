@@ -189,6 +189,9 @@ type DecisionAction struct {
 	SignalType               string                            `json:"signal_type,omitempty"`
 	SignalTimeframe          string                            `json:"signal_timeframe,omitempty"`
 	StructureTarget          float64                           `json:"structure_target,omitempty"`
+	TradeIntent              string                            `json:"trade_intent,omitempty"`
+	SignalCloseTime          int64                             `json:"signal_close_time,omitempty"`
+	DecisionCloseTime        int64                             `json:"decision_close_time,omitempty"`
 	StrategyMetadata         map[string]any                    `json:"strategy_metadata,omitempty"`
 	StrategyDiagnostics      map[string]any                    `json:"strategy_diagnostics,omitempty"`
 	RequestedClosePercentage float64                           `json:"requested_close_percentage,omitempty"`

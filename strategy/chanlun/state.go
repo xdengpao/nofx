@@ -447,7 +447,7 @@ func upsertSignalMarker(markers []SignalMarker, marker SignalMarker) []SignalMar
 	key := signalMarkerKey(marker)
 	for i := range markers {
 		if signalMarkerKey(markers[i]) == key {
-			markers[i] = marker
+			markers[i] = mergeSignalMarkerLifecycle(markers[i], marker)
 			return markers
 		}
 	}
@@ -460,6 +460,57 @@ func upsertSignalMarker(markers []SignalMarker, marker SignalMarker) []SignalMar
 
 func signalMarkerKey(marker SignalMarker) string {
 	return marker.SignalID + "|" + marker.Timeframe + "|" + strconv.FormatInt(marker.CloseTime, 10)
+}
+
+func mergeSignalMarkerLifecycle(existing, incoming SignalMarker) SignalMarker {
+	if isProcessedSignalMarker(existing) && isDetectedOnlyMarker(incoming) {
+		if existing.SignalCloseTime == 0 {
+			existing.SignalCloseTime = incoming.SignalCloseTime
+		}
+		if existing.DecisionCloseTime == 0 {
+			existing.DecisionCloseTime = incoming.DecisionCloseTime
+		}
+		if existing.DisplayCloseTime == 0 {
+			existing.DisplayCloseTime = incoming.DisplayCloseTime
+		}
+		if existing.Price == 0 {
+			existing.Price = incoming.Price
+		}
+		if existing.Direction == "" {
+			existing.Direction = incoming.Direction
+		}
+		if existing.SignalType == "" {
+			existing.SignalType = incoming.SignalType
+		}
+		if existing.Level == "" {
+			existing.Level = incoming.Level
+		}
+		if existing.SourceLayer == "" {
+			existing.SourceLayer = incoming.SourceLayer
+		}
+		return existing
+	}
+	return incoming
+}
+
+func isProcessedSignalMarker(marker SignalMarker) bool {
+	if marker.Action != "" || marker.FinalAction != "" || marker.TradeIntent != "" {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(marker.Status)) {
+	case "rejected", "executed", "failed", "deduped":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDetectedOnlyMarker(marker SignalMarker) bool {
+	if marker.Action != "" || marker.FinalAction != "" || marker.TradeIntent != "" {
+		return false
+	}
+	status := strings.ToLower(strings.TrimSpace(marker.Status))
+	return status == "" || status == "detected"
 }
 
 func (s *StateStore) ensureSymbolLocked(traderID, symbol string) ProgrammaticSymbolState {

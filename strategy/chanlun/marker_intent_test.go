@@ -90,17 +90,26 @@ func TestRejectedStrategyDecisionMarkerRetainsActionAndTradeIntent(t *testing.T)
 		SignalType:      SignalSell1,
 		SignalTimeframe: "1h",
 		StrategyMetadata: map[string]any{
-			"layer":              "main_signal",
-			"rule":               SignalSell1,
-			"signal_type":        SignalSell1,
-			"timeframe":          "1h",
-			"trigger_close_time": int64(654321),
+			"layer":               "main_signal",
+			"rule":                SignalSell1,
+			"signal_type":         SignalSell1,
+			"timeframe":           "1h",
+			"signal_close_time":   int64(654321),
+			"decision_close_time": int64(777777),
+			"trigger_close_time":  int64(654321),
+			"trade_intent":        "open_short",
 		},
 	}
 	engine.markRejectedStrategyDecisions(&decision.Context{TraderID: "t1"}, []decision.Decision{candidate}, nil, []decision.OpenRejection{{
-		Symbol: "ETHUSDT",
-		Action: "open_short",
-		Reason: "ADX不足",
+		Symbol:   "ETHUSDT",
+		Action:   "open_short",
+		Reason:   "通用原因",
+		SignalID: "other-sig",
+	}, {
+		Symbol:   "ETHUSDT",
+		Action:   "open_short",
+		Reason:   "ADX不足",
+		SignalID: "sig-open-short",
 	}})
 
 	markers := engine.StateStore.RecentSignalMarkers("t1", "ETHUSDT", 10)
@@ -110,5 +119,52 @@ func TestRejectedStrategyDecisionMarkerRetainsActionAndTradeIntent(t *testing.T)
 	got := markers[0]
 	if got.Status != "rejected" || got.Action != "open_short" || got.TradeIntent != "open_short" || got.Reason != "ADX不足" {
 		t.Fatalf("rejected marker应保留动作和交易意图: %+v", got)
+	}
+	if got.SignalCloseTime != 654321 || got.DecisionCloseTime != 777777 || got.DisplayCloseTime != 777777 || got.CloseTime != 654321 {
+		t.Fatalf("rejected marker应保留结构时间和决策时间: %+v", got)
+	}
+}
+
+func TestMainSignalDecisionCarriesSignalAndDecisionCloseTime(t *testing.T) {
+	engine, err := NewEngine(testProgrammaticPolicy(filepath.Join(t.TempDir(), "state.json")))
+	if err != nil {
+		t.Fatalf("创建engine失败: %v", err)
+	}
+	signal := ChanlunSignal{
+		SignalID:          "sig-sell2",
+		Symbol:            "BCHUSDT",
+		Direction:         SideShort,
+		SignalType:        SignalSell2,
+		AnalysisTF:        "1h",
+		TriggerTF:         "15m",
+		Level:             "1h",
+		Price:             100,
+		StopLoss:          105,
+		TakeProfit:        90,
+		StructureTarget:   90,
+		Confidence:        75,
+		SignalCloseTime:   18_599_900,
+		TriggerCloseTime:  18_599_900,
+		SegmentStartTime:  17_599_900,
+		SegmentEndTime:    18_599_900,
+		DecisionCloseTime: 21_599_900,
+	}
+	d := engine.signalToMainDecision(&decision.Context{AltcoinLeverage: 5}, signal)
+	if d.Action != "open_short" {
+		t.Fatalf("应生成开空决策: %+v", d)
+	}
+	if got, _ := metadataInt64(d.StrategyMetadata, "signal_close_time"); got != signal.SignalCloseTime {
+		t.Fatalf("决策应写入signal_close_time: %+v", d.StrategyMetadata)
+	}
+	if got, _ := metadataInt64(d.StrategyMetadata, "decision_close_time"); got != signal.DecisionCloseTime {
+		t.Fatalf("决策应写入decision_close_time: %+v", d.StrategyMetadata)
+	}
+	marker, ok := engine.decisionToMarker(d, "rejected")
+	if !ok {
+		t.Fatalf("应生成marker")
+	}
+	if marker.CloseTime != signal.SignalCloseTime || marker.SignalCloseTime != signal.SignalCloseTime ||
+		marker.DecisionCloseTime != signal.DecisionCloseTime || marker.DisplayCloseTime != signal.DecisionCloseTime {
+		t.Fatalf("marker时间锚点错误: %+v", marker)
 	}
 }

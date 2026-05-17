@@ -307,13 +307,24 @@ type FullDecision struct {
 
 // OpenRejection 记录开仓建议被确定性风控拒绝的原因。
 type OpenRejection struct {
-	Symbol          string                    `json:"symbol"`
-	Action          string                    `json:"action"`
-	Reason          string                    `json:"reason"`
-	GateState       string                    `json:"gate_state,omitempty"`
-	GateReasons     []string                  `json:"gate_reasons,omitempty"`
-	GateDiagnostics map[string]any            `json:"gate_diagnostics,omitempty"`
-	Simulations     []OpenFrequencySimulation `json:"simulations,omitempty"`
+	Symbol            string                    `json:"symbol"`
+	Action            string                    `json:"action"`
+	Reason            string                    `json:"reason"`
+	GateState         string                    `json:"gate_state,omitempty"`
+	GateReasons       []string                  `json:"gate_reasons,omitempty"`
+	GateDiagnostics   map[string]any            `json:"gate_diagnostics,omitempty"`
+	Simulations       []OpenFrequencySimulation `json:"simulations,omitempty"`
+	StrategyMode      string                    `json:"strategy_mode,omitempty"`
+	StrategyName      string                    `json:"strategy_name,omitempty"`
+	StrategyVersion   string                    `json:"strategy_version,omitempty"`
+	ConfigHash        string                    `json:"config_hash,omitempty"`
+	SignalID          string                    `json:"signal_id,omitempty"`
+	SignalType        string                    `json:"signal_type,omitempty"`
+	SignalTimeframe   string                    `json:"signal_timeframe,omitempty"`
+	SignalCloseTime   int64                     `json:"signal_close_time,omitempty"`
+	DecisionCloseTime int64                     `json:"decision_close_time,omitempty"`
+	TradeIntent       string                    `json:"trade_intent,omitempty"`
+	StrategyMetadata  map[string]any            `json:"strategy_metadata,omitempty"`
 }
 
 // OpenFrequencySimulation 记录软风控放宽的只观测模拟结果。

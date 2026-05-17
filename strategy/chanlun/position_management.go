@@ -552,6 +552,14 @@ func (e *Engine) positionDecision(ctx *decision.Context, pos decision.PositionIn
 	metadata["layer"] = "position_management"
 	metadata["rule"] = rule
 	metadata["side"] = strings.ToLower(pos.Side)
+	if triggerClose, ok := metadataInt64(metadata, "trigger_close_time"); ok && triggerClose > 0 {
+		if _, exists := metadata["signal_close_time"]; !exists {
+			metadata["signal_close_time"] = triggerClose
+		}
+		if _, exists := metadata["display_close_time"]; !exists {
+			metadata["display_close_time"] = triggerClose
+		}
+	}
 	d := decision.Decision{
 		Symbol:           symbol,
 		Action:           action,

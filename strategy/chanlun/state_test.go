@@ -104,6 +104,50 @@ func TestStateStoreSignalMarkersBoundedAndRecovered(t *testing.T) {
 	}
 }
 
+func TestStateStoreDetectedMarkerDoesNotDowngradeProcessedMarker(t *testing.T) {
+	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"))
+	processed := SignalMarker{
+		Symbol:            "ETHUSDT",
+		Timeframe:         "1h",
+		CloseTime:         100,
+		SignalCloseTime:   100,
+		DecisionCloseTime: 200,
+		DisplayCloseTime:  200,
+		SignalType:        SignalSell2,
+		Direction:         SideShort,
+		Level:             "1h",
+		SourceLayer:       "main_signal",
+		Status:            "rejected",
+		SignalID:          "sig-processed",
+		Action:            "open_short",
+		TradeIntent:       "open_short",
+		Reason:            "ADX不足",
+	}
+	store.StoreSignalMarker("t1", "ETHUSDT", processed)
+	store.StoreSignalMarker("t1", "ETHUSDT", SignalMarker{
+		Symbol:           "ETHUSDT",
+		Timeframe:        "1h",
+		CloseTime:        100,
+		SignalCloseTime:  100,
+		DisplayCloseTime: 100,
+		SignalType:       SignalSell2,
+		Direction:        SideShort,
+		Level:            "1h",
+		SourceLayer:      "main_signal",
+		Status:           "detected",
+		SignalID:         "sig-processed",
+	})
+
+	markers := store.RecentSignalMarkers("t1", "ETHUSDT", 10)
+	if len(markers) != 1 {
+		t.Fatalf("应保持单条逻辑marker: %+v", markers)
+	}
+	got := markers[0]
+	if got.Status != "rejected" || got.Action != "open_short" || got.DisplayCloseTime != 200 || got.Reason != "ADX不足" {
+		t.Fatalf("detected不应降级已处理marker: %+v", got)
+	}
+}
+
 func TestStateStoreResetPositionGuardIfMissing(t *testing.T) {
 	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"))
 	store.RecordProgrammaticPartialClose(ProgrammaticPartialCloseRecord{

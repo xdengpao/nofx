@@ -327,6 +327,45 @@ func TestExecutePartialCloseWithRecordWritesFinalExecutionFields(t *testing.T) {
 	}
 }
 
+func TestAppendOpenRejectionsToRecordCopiesSignalMetadata(t *testing.T) {
+	at := &AutoTrader{}
+	record := &logger.DecisionRecord{}
+	at.appendOpenRejectionsToRecord(record, []decision.OpenRejection{{
+		Symbol:            "BCHUSDT",
+		Action:            "open_short",
+		Reason:            "open gate要求更高置信度",
+		StrategyMode:      "programmatic",
+		StrategyName:      "chanlun_programmatic",
+		StrategyVersion:   "v1",
+		ConfigHash:        "hash",
+		SignalID:          "sig-sell2",
+		SignalType:        "sell2",
+		SignalTimeframe:   "1h",
+		SignalCloseTime:   18_599_900,
+		DecisionCloseTime: 21_599_900,
+		TradeIntent:       "open_short",
+		StrategyMetadata: map[string]any{
+			"signal_close_time":   int64(18_599_900),
+			"decision_close_time": int64(21_599_900),
+			"trade_intent":        "open_short",
+		},
+	}})
+
+	if len(record.Decisions) != 1 {
+		t.Fatalf("应追加open_rejected动作: %+v", record.Decisions)
+	}
+	got := record.Decisions[0]
+	if got.Action != "open_rejected" || got.Symbol != "BCHUSDT" || got.SignalID != "sig-sell2" || got.TradeIntent != "open_short" {
+		t.Fatalf("open_rejected应保留动作和信号元数据: %+v", got)
+	}
+	if got.SignalCloseTime != 18_599_900 || got.DecisionCloseTime != 21_599_900 {
+		t.Fatalf("open_rejected应保留结构和决策时间: %+v", got)
+	}
+	if got.StrategyMetadata == nil || got.StrategyMetadata["trade_intent"] != "open_short" {
+		t.Fatalf("open_rejected应复制strategy_metadata: %+v", got)
+	}
+}
+
 func TestCalibratedMinOrderValue_BinanceBTC(t *testing.T) {
 	if got := calibratedOpenMinOrderValueUSDT("binance", "BTCUSDT"); got != 50 {
 		t.Fatalf("Binance BTCUSDT开仓最小名义额应按外部校准提高到50，实际=%.2f", got)

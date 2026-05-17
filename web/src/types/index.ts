@@ -72,6 +72,9 @@ export interface DecisionAction {
   signal_type?: string;
   signal_timeframe?: string;
   structure_target?: number;
+  trade_intent?: string;
+  signal_close_time?: number;
+  decision_close_time?: number;
   strategy_metadata?: Record<string, unknown>;
   strategy_diagnostics?: Record<string, unknown>;
   requested_close_percentage?: number;
@@ -275,6 +278,8 @@ export interface ChanlunSignal {
   confidence?: number;
   confirmed_at?: string;
   trigger_close_time?: number;
+  signal_close_time?: number;
+  decision_close_time?: number;
   segment_start_time?: number;
   segment_end_time?: number;
   status?: string;
@@ -291,6 +296,9 @@ export interface SignalMarker {
   symbol: string;
   timeframe: string;
   close_time: number;
+  signal_close_time?: number;
+  decision_close_time?: number;
+  display_close_time?: number;
   signal_type: string;
   direction: string;
   level: string;

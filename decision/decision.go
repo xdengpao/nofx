@@ -138,11 +138,7 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 							reason := fmt.Sprintf("%s %s 参数补充失败: %v", d.Symbol, d.Action, err)
 							log.Printf("⚠️ 决策%s", reason)
 							rejectedReasons = append(rejectedReasons, reason)
-							openRejections = append(openRejections, OpenRejection{
-								Symbol: d.Symbol,
-								Action: d.Action,
-								Reason: reason,
-							})
+							openRejections = append(openRejections, NewOpenRejectionFromDecision(d, reason))
 							continue
 						}
 
@@ -347,11 +343,7 @@ func openRejectionReasons(rejections []OpenRejection) []string {
 }
 
 func buildOpenRejection(d Decision, ctx *Context, reason string) OpenRejection {
-	rejection := OpenRejection{
-		Symbol: d.Symbol,
-		Action: d.Action,
-		Reason: reason,
-	}
+	rejection := NewOpenRejectionFromDecision(d, reason)
 	if ctx == nil || ctx.MarketDataMap == nil {
 		return rejection
 	}
@@ -381,6 +373,60 @@ func buildOpenRejection(d Decision, ctx *Context, reason string) OpenRejection {
 	return rejection
 }
 
+func NewOpenRejectionFromDecision(d Decision, reason string) OpenRejection {
+	signalClose, _ := decisionMetadataInt64Any(d.StrategyMetadata, "signal_close_time", "trigger_close_time", "segment_end_time")
+	decisionClose, _ := decisionMetadataInt64Any(d.StrategyMetadata, "decision_close_time")
+	tradeIntent, _ := d.StrategyMetadata["trade_intent"].(string)
+	if strings.TrimSpace(tradeIntent) == "" {
+		tradeIntent = d.Action
+	}
+	return OpenRejection{
+		Symbol:            d.Symbol,
+		Action:            d.Action,
+		Reason:            reason,
+		StrategyMode:      d.StrategyMode,
+		StrategyName:      d.StrategyName,
+		StrategyVersion:   d.StrategyVersion,
+		ConfigHash:        d.ConfigHash,
+		SignalID:          d.SignalID,
+		SignalType:        d.SignalType,
+		SignalTimeframe:   d.SignalTimeframe,
+		SignalCloseTime:   signalClose,
+		DecisionCloseTime: decisionClose,
+		TradeIntent:       tradeIntent,
+		StrategyMetadata:  copyStringAnyMap(d.StrategyMetadata),
+	}
+}
+
+func decisionMetadataInt64Any(values map[string]any, keys ...string) (int64, bool) {
+	for _, key := range keys {
+		if value, ok := decisionMetadataInt64(values, key); ok && value != 0 {
+			return value, true
+		}
+	}
+	return 0, false
+}
+
+func decisionMetadataInt64(values map[string]any, key string) (int64, bool) {
+	if len(values) == 0 {
+		return 0, false
+	}
+	switch value := values[key].(type) {
+	case int64:
+		return value, true
+	case int:
+		return int64(value), true
+	case int32:
+		return int64(value), true
+	case float64:
+		return int64(value), true
+	case float32:
+		return int64(value), true
+	default:
+		return 0, false
+	}
+}
+
 type StrategyValidationOptions struct {
 	Source              string
 	AllowAdd            bool
@@ -396,12 +442,12 @@ func ValidateStrategyDecisions(ctx *Context, decisions []Decision, opts Strategy
 		if IsOpenLikeAction(d.Action) {
 			if IsAddAction(d.Action) && !opts.AllowAdd {
 				reason := fmt.Sprintf("%s %s 被拒绝: 当前策略不允许加仓", d.Symbol, d.Action)
-				openRejections = append(openRejections, OpenRejection{Symbol: d.Symbol, Action: d.Action, Reason: reason})
+				openRejections = append(openRejections, NewOpenRejectionFromDecision(d, reason))
 				continue
 			}
 			if err := ValidateAndEnrichDecision(&d, ctx); err != nil {
 				reason := fmt.Sprintf("%s %s 参数补充失败: %v", d.Symbol, d.Action, err)
-				openRejections = append(openRejections, OpenRejection{Symbol: d.Symbol, Action: d.Action, Reason: reason})
+				openRejections = append(openRejections, NewOpenRejectionFromDecision(d, reason))
 				continue
 			}
 			validationOpts := openValidationOptions{}
@@ -1512,11 +1558,8 @@ func enforceFinalDecisionLimits(decisions []Decision, ctx *Context) ([]Decision,
 			continue
 		}
 		if IsOpenAction(d.Action) && keptOpens >= availableSlots {
-			rejections = append(rejections, OpenRejection{
-				Symbol: d.Symbol,
-				Action: d.Action,
-				Reason: fmt.Sprintf("%s %s 因持仓上限%d个被拒绝", d.Symbol, d.Action, maxPositions),
-			})
+			reason := fmt.Sprintf("%s %s 因持仓上限%d个被拒绝", d.Symbol, d.Action, maxPositions)
+			rejections = append(rejections, NewOpenRejectionFromDecision(d, reason))
 			continue
 		}
 		if dailyOpenRemaining > 0 && keptOpenLike >= dailyOpenRemaining ||
@@ -1534,12 +1577,9 @@ func enforceFinalDecisionLimits(decisions []Decision, ctx *Context) ([]Decision,
 				(limit == 0 || ctx.LossMode.DailyOpenLimit < limit) {
 				limit = ctx.LossMode.DailyOpenLimit
 			}
-			rejections = append(rejections, OpenRejection{
-				Symbol: d.Symbol,
-				Action: d.Action,
-				Reason: fmt.Sprintf("%s %s 因24小时新增开仓上限%d笔被拒绝(当前%d笔)",
-					d.Symbol, d.Action, limit, openCount+keptOpenLike),
-			})
+			reason := fmt.Sprintf("%s %s 因24小时新增开仓上限%d笔被拒绝(当前%d笔)",
+				d.Symbol, d.Action, limit, openCount+keptOpenLike)
+			rejections = append(rejections, NewOpenRejectionFromDecision(d, reason))
 			continue
 		}
 		result = append(result, d)

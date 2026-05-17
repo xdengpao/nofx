@@ -680,6 +680,12 @@ func applyDecisionSizingToActionRecord(d *decision.Decision, actionRecord *logge
 	actionRecord.SignalType = d.SignalType
 	actionRecord.SignalTimeframe = d.SignalTimeframe
 	actionRecord.StructureTarget = d.StructureTarget
+	actionRecord.TradeIntent = metadataStringValue(d.StrategyMetadata, "trade_intent")
+	if actionRecord.TradeIntent == "" {
+		actionRecord.TradeIntent = d.Action
+	}
+	actionRecord.SignalCloseTime = metadataInt64ValueAny(d.StrategyMetadata, "signal_close_time", "trigger_close_time", "segment_end_time")
+	actionRecord.DecisionCloseTime = metadataInt64ValueAny(d.StrategyMetadata, "decision_close_time")
 	actionRecord.StrategyMetadata = copyAnyMap(d.StrategyMetadata)
 	actionRecord.StrategyDiagnostics = copyAnyMap(d.StrategyDiagnosis)
 	actionRecord.RequestedClosePercentage = d.ClosePercentage
@@ -728,6 +734,43 @@ func actionRecordMetadataFloat(values map[string]any, key string) float64 {
 	}
 }
 
+func metadataStringValue(values map[string]any, key string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	value, _ := values[key].(string)
+	return value
+}
+
+func metadataInt64ValueAny(values map[string]any, keys ...string) int64 {
+	for _, key := range keys {
+		if value, ok := metadataInt64Value(values, key); ok && value != 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func metadataInt64Value(values map[string]any, key string) (int64, bool) {
+	if len(values) == 0 {
+		return 0, false
+	}
+	switch value := values[key].(type) {
+	case int64:
+		return value, true
+	case int:
+		return int64(value), true
+	case int32:
+		return int64(value), true
+	case float64:
+		return int64(value), true
+	case float32:
+		return int64(value), true
+	default:
+		return 0, false
+	}
+}
+
 func (at *AutoTrader) applyAICallState(fullDecision *decision.FullDecision) {
 	if fullDecision == nil || !fullDecision.AICallAttempted {
 		return
@@ -768,16 +811,27 @@ func (at *AutoTrader) appendOpenRejectionsToRecord(record *logger.DecisionRecord
 			reason = strings.Join(rejection.GateReasons, "; ")
 		}
 		record.Decisions = append(record.Decisions, logger.DecisionAction{
-			Action:          "open_rejected",
-			Symbol:          rejection.Symbol,
-			Timestamp:       time.Now(),
-			Success:         false,
-			Error:           reason,
-			Reasoning:       reason,
-			GateState:       rejection.GateState,
-			GateReasons:     append([]string(nil), rejection.GateReasons...),
-			GateDiagnostics: copyGateDiagnostics(rejection.GateDiagnostics),
-			Simulations:     copyOpenFrequencySimulations(rejection.Simulations),
+			Action:            "open_rejected",
+			Symbol:            rejection.Symbol,
+			Timestamp:         time.Now(),
+			Success:           false,
+			Error:             reason,
+			Reasoning:         reason,
+			GateState:         rejection.GateState,
+			GateReasons:       append([]string(nil), rejection.GateReasons...),
+			GateDiagnostics:   copyGateDiagnostics(rejection.GateDiagnostics),
+			Simulations:       copyOpenFrequencySimulations(rejection.Simulations),
+			StrategyMode:      rejection.StrategyMode,
+			StrategyName:      rejection.StrategyName,
+			StrategyVersion:   rejection.StrategyVersion,
+			ConfigHash:        rejection.ConfigHash,
+			SignalID:          rejection.SignalID,
+			SignalType:        rejection.SignalType,
+			SignalTimeframe:   rejection.SignalTimeframe,
+			TradeIntent:       rejection.TradeIntent,
+			SignalCloseTime:   rejection.SignalCloseTime,
+			DecisionCloseTime: rejection.DecisionCloseTime,
+			StrategyMetadata:  copyAnyMap(rejection.StrategyMetadata),
 		})
 		record.ExecutionLog = append(record.ExecutionLog,
 			fmt.Sprintf("⚠ %s %s 被开仓门控拒绝: %s", rejection.Symbol, rejection.Action, reason))
