@@ -272,6 +272,35 @@ func decisionProgrammaticStrategyPolicy(profile config.ProgrammaticStrategyProfi
 			PartialClosePct:   profile.Position.PartialClosePct,
 			AllowReversal:     profile.Position.AllowReversal,
 		},
+		PositionManagement: decision.ProgrammaticPositionManagementPolicy{
+			Enabled: profile.PositionManagement.Enabled,
+			Timeframes: decision.ProgrammaticManagementTFPolicy{
+				Structure: profile.PositionManagement.Timeframes.Structure,
+				Micro:     profile.PositionManagement.Timeframes.Micro,
+			},
+			Breakeven: decision.ProgrammaticBreakevenPolicy{
+				Enabled:          profile.PositionManagement.Breakeven.Enabled,
+				TriggerProfitPct: profile.PositionManagement.Breakeven.TriggerProfitPct,
+				TriggerR:         profile.PositionManagement.Breakeven.TriggerR,
+				BufferRatio:      profile.PositionManagement.Breakeven.BufferRatio,
+			},
+			FloatingDrawdown: decision.ProgrammaticFloatingDrawdownPolicy{
+				Enabled:             profile.PositionManagement.FloatingDrawdown.Enabled,
+				ActivationProfitPct: profile.PositionManagement.FloatingDrawdown.ActivationProfitPct,
+				ActivationR:         profile.PositionManagement.FloatingDrawdown.ActivationR,
+				DrawdownRatio:       profile.PositionManagement.FloatingDrawdown.DrawdownRatio,
+				Action:              profile.PositionManagement.FloatingDrawdown.Action,
+			},
+			StructureBreak: decision.ProgrammaticStructureBreakPolicy{
+				Enabled:     profile.PositionManagement.StructureBreak.Enabled,
+				ConfirmBars: profile.PositionManagement.StructureBreak.ConfirmBars,
+				Action:      profile.PositionManagement.StructureBreak.Action,
+			},
+			ShortTrade: decision.ProgrammaticShortTradePolicy{
+				Enabled:         profile.PositionManagement.ShortTrade.Enabled,
+				PartialClosePct: profile.PositionManagement.ShortTrade.PartialClosePct,
+			},
+		},
 		TakeProfit: decision.ProgrammaticTPPolicy{
 			Mode:         profile.TakeProfit.Mode,
 			FallbackMode: profile.TakeProfit.FallbackMode,

@@ -100,6 +100,36 @@
           "partial_close_pct": 30,
           "allow_reversal": false
         },
+        "position_management": {
+          // 无新 trade 级别闭合K线时仍每个scan_interval管理已有持仓。
+          "enabled": true,
+          "timeframes": {
+            "structure": "15m",
+            "micro": "3m"
+          },
+          "breakeven": {
+            "enabled": true,
+            "trigger_profit_pct": 1.0,
+            "trigger_r": 1.0,
+            "buffer_pct": 0.05
+          },
+          "floating_drawdown": {
+            "enabled": true,
+            "activation_profit_pct": 2.0,
+            "activation_r": 1.5,
+            "drawdown_pct": 35,
+            "action": "partial_close"
+          },
+          "structure_break": {
+            "enabled": true,
+            "confirm_bars": 2,
+            "action": "partial_close"
+          },
+          "short_trade": {
+            "enabled": true,
+            "partial_close_pct": 30
+          }
+        },
         "take_profit": {
           "mode": "structure",
           "fallback_mode": "reject",

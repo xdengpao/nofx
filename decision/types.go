@@ -391,23 +391,24 @@ type InstrumentProfile struct {
 
 // ProgrammaticStrategyPolicy 是程序化策略的运行时配置。
 type ProgrammaticStrategyPolicy struct {
-	DecisionMode    string
-	StrategyName    string
-	StrategyVersion string
-	ConfigHash      string
-	AllowLong       bool
-	AllowShort      bool
-	EnabledSignals  []string
-	Timeframes      ProgrammaticTimeframesPolicy
-	HistoryDepth    ProgrammaticHistoryDepth
-	SymbolPool      ProgrammaticSymbolPoolPolicy
-	MovingAverage   ProgrammaticMAPolicy
-	Structure       ProgrammaticStructurePolicy
-	Divergence      ProgrammaticDivergencePolicy
-	ADX             ProgrammaticADXPolicy
-	Position        ProgrammaticPositionPolicy
-	TakeProfit      ProgrammaticTPPolicy
-	State           ProgrammaticStatePolicy
+	DecisionMode       string
+	StrategyName       string
+	StrategyVersion    string
+	ConfigHash         string
+	AllowLong          bool
+	AllowShort         bool
+	EnabledSignals     []string
+	Timeframes         ProgrammaticTimeframesPolicy
+	HistoryDepth       ProgrammaticHistoryDepth
+	SymbolPool         ProgrammaticSymbolPoolPolicy
+	MovingAverage      ProgrammaticMAPolicy
+	Structure          ProgrammaticStructurePolicy
+	Divergence         ProgrammaticDivergencePolicy
+	ADX                ProgrammaticADXPolicy
+	Position           ProgrammaticPositionPolicy
+	PositionManagement ProgrammaticPositionManagementPolicy
+	TakeProfit         ProgrammaticTPPolicy
+	State              ProgrammaticStatePolicy
 }
 
 type ProgrammaticTimeframesPolicy struct {
@@ -465,6 +466,46 @@ type ProgrammaticPositionPolicy struct {
 	AddSizeMultiplier float64
 	PartialClosePct   float64
 	AllowReversal     bool
+}
+
+type ProgrammaticPositionManagementPolicy struct {
+	Enabled          bool
+	Timeframes       ProgrammaticManagementTFPolicy
+	Breakeven        ProgrammaticBreakevenPolicy
+	FloatingDrawdown ProgrammaticFloatingDrawdownPolicy
+	StructureBreak   ProgrammaticStructureBreakPolicy
+	ShortTrade       ProgrammaticShortTradePolicy
+}
+
+type ProgrammaticManagementTFPolicy struct {
+	Structure string
+	Micro     string
+}
+
+type ProgrammaticBreakevenPolicy struct {
+	Enabled          bool
+	TriggerProfitPct float64
+	TriggerR         float64
+	BufferRatio      float64
+}
+
+type ProgrammaticFloatingDrawdownPolicy struct {
+	Enabled             bool
+	ActivationProfitPct float64
+	ActivationR         float64
+	DrawdownRatio       float64
+	Action              string
+}
+
+type ProgrammaticStructureBreakPolicy struct {
+	Enabled     bool
+	ConfirmBars int
+	Action      string
+}
+
+type ProgrammaticShortTradePolicy struct {
+	Enabled         bool
+	PartialClosePct float64
 }
 
 type ProgrammaticTPPolicy struct {

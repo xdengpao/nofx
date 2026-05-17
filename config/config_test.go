@@ -305,6 +305,15 @@ func TestNormalizeProgrammaticStrategies_ProgrammaticDefaults(t *testing.T) {
 	if profile.HistoryDepth.M3 != 240 || profile.HistoryDepth.M15 != 192 || profile.HistoryDepth.H1 != 240 || profile.HistoryDepth.H4 != 180 {
 		t.Fatalf("默认history depth错误: %+v", profile.HistoryDepth)
 	}
+	if !profile.PositionManagement.Enabled || !profile.PositionManagement.Breakeven.Enabled {
+		t.Fatalf("持仓管理默认应启用: %+v", profile.PositionManagement)
+	}
+	if profile.PositionManagement.Breakeven.BufferRatio != 0.0005 {
+		t.Fatalf("buffer_pct默认0.05应归一化为0.0005，实际=%.8f", profile.PositionManagement.Breakeven.BufferRatio)
+	}
+	if profile.PositionManagement.FloatingDrawdown.DrawdownRatio != 0.35 {
+		t.Fatalf("drawdown_pct默认35应归一化为0.35，实际=%.8f", profile.PositionManagement.FloatingDrawdown.DrawdownRatio)
+	}
 	if profile.MovingAverage.ShortPeriod != 20 || profile.MovingAverage.LongPeriod != 50 {
 		t.Fatalf("默认均线周期错误: %+v", profile.MovingAverage)
 	}
@@ -319,6 +328,54 @@ func TestNormalizeProgrammaticStrategies_ProgrammaticDefaults(t *testing.T) {
 	}
 }
 
+func TestNormalizeProgrammaticStrategies_TradeTimeframeDefaults(t *testing.T) {
+	tests := []struct {
+		trade string
+		sub   string
+	}{
+		{trade: "15m", sub: "3m"},
+		{trade: "1h", sub: "15m"},
+		{trade: "4h", sub: "1h"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.trade, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Traders[0].DecisionMode = DecisionModeProgrammatic
+			cfg.Traders[0].ProgrammaticStrategy.Timeframes.Trade = tt.trade
+			profiles, err := cfg.NormalizeProgrammaticStrategies()
+			if err != nil {
+				t.Fatalf("trade=%s 不应失败: %v", tt.trade, err)
+			}
+			if got := profiles["trader1"].Timeframes.Sub; got != tt.sub {
+				t.Fatalf("trade=%s 默认sub错误: 期望%s 实际%s", tt.trade, tt.sub, got)
+			}
+		})
+	}
+}
+
+func TestNormalizeProgrammaticStrategies_PositionManagementPercentUnits(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].DecisionMode = DecisionModeProgrammatic
+	cfg.Traders[0].ProgrammaticStrategy.PositionManagement.Breakeven.BufferPct = 0.05
+	cfg.Traders[0].ProgrammaticStrategy.PositionManagement.FloatingDrawdown.DrawdownPct = 35
+	cfg.Traders[0].ProgrammaticStrategy.PositionManagement.ShortTrade.PartialClosePct = 25
+
+	profiles, err := cfg.NormalizeProgrammaticStrategies()
+	if err != nil {
+		t.Fatalf("持仓管理百分比配置不应失败: %v", err)
+	}
+	pm := profiles["trader1"].PositionManagement
+	if pm.Breakeven.BufferRatio != 0.0005 {
+		t.Fatalf("buffer_pct=0.05应表示0.05%%: %.8f", pm.Breakeven.BufferRatio)
+	}
+	if pm.FloatingDrawdown.DrawdownRatio != 0.35 {
+		t.Fatalf("drawdown_pct=35应表示35%%: %.8f", pm.FloatingDrawdown.DrawdownRatio)
+	}
+	if pm.ShortTrade.PartialClosePct != 25 {
+		t.Fatalf("short_trade.partial_close_pct应保持人类百分数: %.2f", pm.ShortTrade.PartialClosePct)
+	}
+}
+
 func TestNormalizeProgrammaticStrategies_InvalidValues(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -326,11 +383,15 @@ func TestNormalizeProgrammaticStrategies_InvalidValues(t *testing.T) {
 	}{
 		{name: "bad mode", mutate: func(t *TraderConfig) { t.ProgrammaticStrategy.SymbolPool.Mode = "bad" }},
 		{name: "bad timeframe", mutate: func(t *TraderConfig) { t.ProgrammaticStrategy.Timeframes.Trade = "5m" }},
+		{name: "bad trade timeframe 3m", mutate: func(t *TraderConfig) { t.ProgrammaticStrategy.Timeframes.Trade = "3m" }},
 		{name: "bad ma", mutate: func(t *TraderConfig) {
 			t.ProgrammaticStrategy.MovingAverage.ShortPeriod = 60
 			t.ProgrammaticStrategy.MovingAverage.LongPeriod = 20
 		}},
 		{name: "bad symbol", mutate: func(t *TraderConfig) { t.ProgrammaticStrategy.SymbolPool.Symbols = []string{"bad symbol"} }},
+		{name: "bad position management action", mutate: func(t *TraderConfig) {
+			t.ProgrammaticStrategy.PositionManagement.StructureBreak.Action = "trim"
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

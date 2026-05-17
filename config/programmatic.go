@@ -22,21 +22,22 @@ const (
 var programmaticSymbolPattern = regexp.MustCompile(`^[A-Z0-9]{2,30}USDT$`)
 
 type ProgrammaticStrategyConfig struct {
-	StrategyName    string                       `json:"strategy_name,omitempty"`
-	StrategyVersion string                       `json:"strategy_version,omitempty"`
-	AllowLong       *bool                        `json:"allow_long,omitempty"`
-	AllowShort      *bool                        `json:"allow_short,omitempty"`
-	EnabledSignals  []string                     `json:"enabled_signals,omitempty"`
-	Timeframes      ProgrammaticTimeframesConfig `json:"timeframes,omitempty"`
-	HistoryDepth    ProgrammaticHistoryDepth     `json:"history_depth,omitempty"`
-	SymbolPool      ProgrammaticSymbolPoolConfig `json:"symbol_pool,omitempty"`
-	MovingAverage   ProgrammaticMAConfig         `json:"moving_average,omitempty"`
-	Structure       ProgrammaticStructureConfig  `json:"structure,omitempty"`
-	Divergence      ProgrammaticDivergenceConfig `json:"divergence,omitempty"`
-	ADX             ProgrammaticADXConfig        `json:"adx,omitempty"`
-	Position        ProgrammaticPositionConfig   `json:"position,omitempty"`
-	TakeProfit      ProgrammaticTPConfig         `json:"take_profit,omitempty"`
-	State           ProgrammaticStateConfig      `json:"state,omitempty"`
+	StrategyName       string                               `json:"strategy_name,omitempty"`
+	StrategyVersion    string                               `json:"strategy_version,omitempty"`
+	AllowLong          *bool                                `json:"allow_long,omitempty"`
+	AllowShort         *bool                                `json:"allow_short,omitempty"`
+	EnabledSignals     []string                             `json:"enabled_signals,omitempty"`
+	Timeframes         ProgrammaticTimeframesConfig         `json:"timeframes,omitempty"`
+	HistoryDepth       ProgrammaticHistoryDepth             `json:"history_depth,omitempty"`
+	SymbolPool         ProgrammaticSymbolPoolConfig         `json:"symbol_pool,omitempty"`
+	MovingAverage      ProgrammaticMAConfig                 `json:"moving_average,omitempty"`
+	Structure          ProgrammaticStructureConfig          `json:"structure,omitempty"`
+	Divergence         ProgrammaticDivergenceConfig         `json:"divergence,omitempty"`
+	ADX                ProgrammaticADXConfig                `json:"adx,omitempty"`
+	Position           ProgrammaticPositionConfig           `json:"position,omitempty"`
+	PositionManagement ProgrammaticPositionManagementConfig `json:"position_management,omitempty"`
+	TakeProfit         ProgrammaticTPConfig                 `json:"take_profit,omitempty"`
+	State              ProgrammaticStateConfig              `json:"state,omitempty"`
 }
 
 type ProgrammaticTimeframesConfig struct {
@@ -96,6 +97,46 @@ type ProgrammaticPositionConfig struct {
 	AllowReversal     bool    `json:"allow_reversal,omitempty"`
 }
 
+type ProgrammaticPositionManagementConfig struct {
+	Enabled          *bool                              `json:"enabled,omitempty"`
+	Timeframes       ProgrammaticManagementTFConfig     `json:"timeframes,omitempty"`
+	Breakeven        ProgrammaticBreakevenConfig        `json:"breakeven,omitempty"`
+	FloatingDrawdown ProgrammaticFloatingDrawdownConfig `json:"floating_drawdown,omitempty"`
+	StructureBreak   ProgrammaticStructureBreakConfig   `json:"structure_break,omitempty"`
+	ShortTrade       ProgrammaticShortTradeConfig       `json:"short_trade,omitempty"`
+}
+
+type ProgrammaticManagementTFConfig struct {
+	Structure string `json:"structure,omitempty"`
+	Micro     string `json:"micro,omitempty"`
+}
+
+type ProgrammaticBreakevenConfig struct {
+	Enabled          *bool   `json:"enabled,omitempty"`
+	TriggerProfitPct float64 `json:"trigger_profit_pct,omitempty"`
+	TriggerR         float64 `json:"trigger_r,omitempty"`
+	BufferPct        float64 `json:"buffer_pct,omitempty"`
+}
+
+type ProgrammaticFloatingDrawdownConfig struct {
+	Enabled             *bool   `json:"enabled,omitempty"`
+	ActivationProfitPct float64 `json:"activation_profit_pct,omitempty"`
+	ActivationR         float64 `json:"activation_r,omitempty"`
+	DrawdownPct         float64 `json:"drawdown_pct,omitempty"`
+	Action              string  `json:"action,omitempty"`
+}
+
+type ProgrammaticStructureBreakConfig struct {
+	Enabled     *bool  `json:"enabled,omitempty"`
+	ConfirmBars int    `json:"confirm_bars,omitempty"`
+	Action      string `json:"action,omitempty"`
+}
+
+type ProgrammaticShortTradeConfig struct {
+	Enabled         *bool   `json:"enabled,omitempty"`
+	PartialClosePct float64 `json:"partial_close_pct,omitempty"`
+}
+
 type ProgrammaticTPConfig struct {
 	Mode         string  `json:"mode,omitempty"`
 	FallbackMode string  `json:"fallback_mode,omitempty"`
@@ -108,23 +149,24 @@ type ProgrammaticStateConfig struct {
 }
 
 type ProgrammaticStrategyProfile struct {
-	DecisionMode    string
-	StrategyName    string
-	StrategyVersion string
-	ConfigHash      string
-	AllowLong       bool
-	AllowShort      bool
-	EnabledSignals  []string
-	Timeframes      ProgrammaticTimeframesProfile
-	HistoryDepth    ProgrammaticHistoryDepth
-	SymbolPool      ProgrammaticSymbolPoolProfile
-	MovingAverage   ProgrammaticMAProfile
-	Structure       ProgrammaticStructureProfile
-	Divergence      ProgrammaticDivergenceProfile
-	ADX             ProgrammaticADXProfile
-	Position        ProgrammaticPositionProfile
-	TakeProfit      ProgrammaticTPProfile
-	State           ProgrammaticStateProfile
+	DecisionMode       string
+	StrategyName       string
+	StrategyVersion    string
+	ConfigHash         string
+	AllowLong          bool
+	AllowShort         bool
+	EnabledSignals     []string
+	Timeframes         ProgrammaticTimeframesProfile
+	HistoryDepth       ProgrammaticHistoryDepth
+	SymbolPool         ProgrammaticSymbolPoolProfile
+	MovingAverage      ProgrammaticMAProfile
+	Structure          ProgrammaticStructureProfile
+	Divergence         ProgrammaticDivergenceProfile
+	ADX                ProgrammaticADXProfile
+	Position           ProgrammaticPositionProfile
+	PositionManagement ProgrammaticPositionManagementProfile
+	TakeProfit         ProgrammaticTPProfile
+	State              ProgrammaticStateProfile
 }
 
 type ProgrammaticTimeframesProfile struct {
@@ -175,6 +217,46 @@ type ProgrammaticPositionProfile struct {
 	AddSizeMultiplier float64
 	PartialClosePct   float64
 	AllowReversal     bool
+}
+
+type ProgrammaticPositionManagementProfile struct {
+	Enabled          bool
+	Timeframes       ProgrammaticManagementTFProfile
+	Breakeven        ProgrammaticBreakevenProfile
+	FloatingDrawdown ProgrammaticFloatingDrawdownProfile
+	StructureBreak   ProgrammaticStructureBreakProfile
+	ShortTrade       ProgrammaticShortTradeProfile
+}
+
+type ProgrammaticManagementTFProfile struct {
+	Structure string
+	Micro     string
+}
+
+type ProgrammaticBreakevenProfile struct {
+	Enabled          bool
+	TriggerProfitPct float64
+	TriggerR         float64
+	BufferRatio      float64
+}
+
+type ProgrammaticFloatingDrawdownProfile struct {
+	Enabled             bool
+	ActivationProfitPct float64
+	ActivationR         float64
+	DrawdownRatio       float64
+	Action              string
+}
+
+type ProgrammaticStructureBreakProfile struct {
+	Enabled     bool
+	ConfirmBars int
+	Action      string
+}
+
+type ProgrammaticShortTradeProfile struct {
+	Enabled         bool
+	PartialClosePct float64
 }
 
 type ProgrammaticTPProfile struct {
@@ -280,6 +362,10 @@ func normalizeProgrammaticStrategyConfig(cfg ProgrammaticStrategyConfig) (Progra
 	if err != nil {
 		return ProgrammaticStrategyProfile{}, err
 	}
+	positionManagement, err := normalizeProgrammaticPositionManagement(cfg.PositionManagement, position)
+	if err != nil {
+		return ProgrammaticStrategyProfile{}, err
+	}
 	tp, err := normalizeProgrammaticTP(cfg.TakeProfit)
 	if err != nil {
 		return ProgrammaticStrategyProfile{}, err
@@ -318,8 +404,9 @@ func normalizeProgrammaticStrategyConfig(cfg ProgrammaticStrategyConfig) (Progra
 			MinADX:         minADX,
 			MicroADXFilter: cfg.ADX.MicroADXFilter,
 		},
-		Position:   position,
-		TakeProfit: tp,
+		Position:           position,
+		PositionManagement: positionManagement,
+		TakeProfit:         tp,
 		State: ProgrammaticStateProfile{
 			Path:      statePath,
 			Bootstrap: cfg.State.Bootstrap,
@@ -328,15 +415,22 @@ func normalizeProgrammaticStrategyConfig(cfg ProgrammaticStrategyConfig) (Progra
 }
 
 func normalizeProgrammaticTimeframes(cfg ProgrammaticTimeframesConfig) (ProgrammaticTimeframesProfile, error) {
+	trade := defaultString(cfg.Trade, "1h")
+	if !isSupportedProgrammaticTradeTimeframe(trade) {
+		return ProgrammaticTimeframesProfile{}, fmt.Errorf("timeframes.trade必须是 15m、1h 或 4h: %q", trade)
+	}
+	sub := defaultString(cfg.Sub, "")
+	if sub == "" {
+		sub = defaultSubTimeframeForTrade(trade)
+	}
 	profile := ProgrammaticTimeframesProfile{
 		Higher: defaultString(cfg.Higher, "4h"),
-		Trade:  defaultString(cfg.Trade, "1h"),
-		Sub:    defaultString(cfg.Sub, "15m"),
+		Trade:  trade,
+		Sub:    sub,
 		Micro:  defaultString(cfg.Micro, "3m"),
 	}
 	for name, tf := range map[string]string{
 		"timeframes.higher": profile.Higher,
-		"timeframes.trade":  profile.Trade,
 		"timeframes.sub":    profile.Sub,
 		"timeframes.micro":  profile.Micro,
 	} {
@@ -345,6 +439,17 @@ func normalizeProgrammaticTimeframes(cfg ProgrammaticTimeframesConfig) (Programm
 		}
 	}
 	return profile, nil
+}
+
+func defaultSubTimeframeForTrade(trade string) string {
+	switch trade {
+	case "15m":
+		return "3m"
+	case "4h":
+		return "1h"
+	default:
+		return "15m"
+	}
 }
 
 func normalizeProgrammaticHistoryDepth(cfg ProgrammaticHistoryDepth, adxPeriod int) (ProgrammaticHistoryDepth, error) {
@@ -505,6 +610,182 @@ func normalizeProgrammaticPosition(cfg ProgrammaticPositionConfig) (Programmatic
 	}, nil
 }
 
+func normalizeProgrammaticPositionManagement(cfg ProgrammaticPositionManagementConfig, position ProgrammaticPositionProfile) (ProgrammaticPositionManagementProfile, error) {
+	enabled := true
+	if cfg.Enabled != nil {
+		enabled = *cfg.Enabled
+	}
+	timeframes, err := normalizeProgrammaticManagementTimeframes(cfg.Timeframes)
+	if err != nil {
+		return ProgrammaticPositionManagementProfile{}, err
+	}
+	breakeven, err := normalizeProgrammaticBreakeven(cfg.Breakeven)
+	if err != nil {
+		return ProgrammaticPositionManagementProfile{}, err
+	}
+	drawdown, err := normalizeProgrammaticFloatingDrawdown(cfg.FloatingDrawdown)
+	if err != nil {
+		return ProgrammaticPositionManagementProfile{}, err
+	}
+	structureBreak, err := normalizeProgrammaticStructureBreak(cfg.StructureBreak)
+	if err != nil {
+		return ProgrammaticPositionManagementProfile{}, err
+	}
+	shortTrade, err := normalizeProgrammaticShortTrade(cfg.ShortTrade, position.PartialClosePct)
+	if err != nil {
+		return ProgrammaticPositionManagementProfile{}, err
+	}
+	return ProgrammaticPositionManagementProfile{
+		Enabled:          enabled,
+		Timeframes:       timeframes,
+		Breakeven:        breakeven,
+		FloatingDrawdown: drawdown,
+		StructureBreak:   structureBreak,
+		ShortTrade:       shortTrade,
+	}, nil
+}
+
+func normalizeProgrammaticManagementTimeframes(cfg ProgrammaticManagementTFConfig) (ProgrammaticManagementTFProfile, error) {
+	profile := ProgrammaticManagementTFProfile{
+		Structure: defaultString(cfg.Structure, "15m"),
+		Micro:     defaultString(cfg.Micro, "3m"),
+	}
+	for name, tf := range map[string]string{
+		"position_management.timeframes.structure": profile.Structure,
+		"position_management.timeframes.micro":     profile.Micro,
+	} {
+		if !isSupportedProgrammaticTimeframe(tf) {
+			return ProgrammaticManagementTFProfile{}, fmt.Errorf("%s必须是 3m、15m、1h 或 4h: %q", name, tf)
+		}
+	}
+	return profile, nil
+}
+
+func normalizeProgrammaticBreakeven(cfg ProgrammaticBreakevenConfig) (ProgrammaticBreakevenProfile, error) {
+	enabled := true
+	if cfg.Enabled != nil {
+		enabled = *cfg.Enabled
+	}
+	triggerProfit, err := normalizeHumanPercentValue(cfg.TriggerProfitPct, 1.0, "position_management.breakeven.trigger_profit_pct")
+	if err != nil {
+		return ProgrammaticBreakevenProfile{}, err
+	}
+	triggerR := cfg.TriggerR
+	if triggerR <= 0 {
+		triggerR = 1.0
+	}
+	if triggerR < 0 || triggerR > 20 {
+		return ProgrammaticBreakevenProfile{}, fmt.Errorf("position_management.breakeven.trigger_r必须在0-20之间: %.4f", triggerR)
+	}
+	bufferRatio, err := normalizeHumanPercentRatio(cfg.BufferPct, 0.05, "position_management.breakeven.buffer_pct")
+	if err != nil {
+		return ProgrammaticBreakevenProfile{}, err
+	}
+	return ProgrammaticBreakevenProfile{
+		Enabled:          enabled,
+		TriggerProfitPct: triggerProfit,
+		TriggerR:         triggerR,
+		BufferRatio:      bufferRatio,
+	}, nil
+}
+
+func normalizeProgrammaticFloatingDrawdown(cfg ProgrammaticFloatingDrawdownConfig) (ProgrammaticFloatingDrawdownProfile, error) {
+	enabled := true
+	if cfg.Enabled != nil {
+		enabled = *cfg.Enabled
+	}
+	activationProfit, err := normalizeHumanPercentValue(cfg.ActivationProfitPct, 2.0, "position_management.floating_drawdown.activation_profit_pct")
+	if err != nil {
+		return ProgrammaticFloatingDrawdownProfile{}, err
+	}
+	activationR := cfg.ActivationR
+	if activationR <= 0 {
+		activationR = 1.5
+	}
+	if activationR < 0 || activationR > 50 {
+		return ProgrammaticFloatingDrawdownProfile{}, fmt.Errorf("position_management.floating_drawdown.activation_r必须在0-50之间: %.4f", activationR)
+	}
+	drawdownRatio, err := normalizeHumanPercentRatio(cfg.DrawdownPct, 35, "position_management.floating_drawdown.drawdown_pct")
+	if err != nil {
+		return ProgrammaticFloatingDrawdownProfile{}, err
+	}
+	action := strings.TrimSpace(strings.ToLower(cfg.Action))
+	if action == "" {
+		action = "partial_close"
+	}
+	if action != "partial_close" && action != "close" {
+		return ProgrammaticFloatingDrawdownProfile{}, fmt.Errorf("position_management.floating_drawdown.action必须是 partial_close 或 close: %q", action)
+	}
+	return ProgrammaticFloatingDrawdownProfile{
+		Enabled:             enabled,
+		ActivationProfitPct: activationProfit,
+		ActivationR:         activationR,
+		DrawdownRatio:       drawdownRatio,
+		Action:              action,
+	}, nil
+}
+
+func normalizeProgrammaticStructureBreak(cfg ProgrammaticStructureBreakConfig) (ProgrammaticStructureBreakProfile, error) {
+	enabled := true
+	if cfg.Enabled != nil {
+		enabled = *cfg.Enabled
+	}
+	confirmBars := cfg.ConfirmBars
+	if confirmBars <= 0 {
+		confirmBars = 2
+	}
+	if confirmBars < 1 || confirmBars > 10 {
+		return ProgrammaticStructureBreakProfile{}, fmt.Errorf("position_management.structure_break.confirm_bars必须在1-10之间: %d", confirmBars)
+	}
+	action := strings.TrimSpace(strings.ToLower(cfg.Action))
+	if action == "" {
+		action = "partial_close"
+	}
+	if action != "partial_close" && action != "close" {
+		return ProgrammaticStructureBreakProfile{}, fmt.Errorf("position_management.structure_break.action必须是 partial_close 或 close: %q", action)
+	}
+	return ProgrammaticStructureBreakProfile{Enabled: enabled, ConfirmBars: confirmBars, Action: action}, nil
+}
+
+func normalizeProgrammaticShortTrade(cfg ProgrammaticShortTradeConfig, fallbackPct float64) (ProgrammaticShortTradeProfile, error) {
+	enabled := true
+	if cfg.Enabled != nil {
+		enabled = *cfg.Enabled
+	}
+	partialClosePct := cfg.PartialClosePct
+	if partialClosePct <= 0 {
+		partialClosePct = fallbackPct
+	}
+	if partialClosePct <= 0 || partialClosePct > 100 {
+		return ProgrammaticShortTradeProfile{}, fmt.Errorf("position_management.short_trade.partial_close_pct必须在0-100之间: %.2f", partialClosePct)
+	}
+	return ProgrammaticShortTradeProfile{Enabled: enabled, PartialClosePct: partialClosePct}, nil
+}
+
+func normalizeHumanPercentValue(value, fallback float64, field string) (float64, error) {
+	if value == 0 {
+		return fallback, nil
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("%s不能为负数: %.4f", field, value)
+	}
+	if value > 500 {
+		return 0, fmt.Errorf("%s过大: %.4f", field, value)
+	}
+	return value, nil
+}
+
+func normalizeHumanPercentRatio(value, fallbackPct float64, field string) (float64, error) {
+	pct, err := normalizeHumanPercentValue(value, fallbackPct, field)
+	if err != nil {
+		return 0, err
+	}
+	if pct > 100 {
+		return 0, fmt.Errorf("%s不能超过100%%: %.4f", field, pct)
+	}
+	return pct / 100, nil
+}
+
 func normalizeProgrammaticTP(cfg ProgrammaticTPConfig) (ProgrammaticTPProfile, error) {
 	mode := strings.TrimSpace(strings.ToLower(cfg.Mode))
 	if mode == "" {
@@ -609,6 +890,15 @@ func defaultPositiveInt(value, fallback int) int {
 func isSupportedProgrammaticTimeframe(value string) bool {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "3m", "15m", "1h", "4h":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSupportedProgrammaticTradeTimeframe(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "15m", "1h", "4h":
 		return true
 	default:
 		return false

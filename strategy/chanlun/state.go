@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -26,12 +27,24 @@ type ProgrammaticTraderState struct {
 }
 
 type ProgrammaticSymbolState struct {
-	LastStructureHash       string                  `json:"last_structure_hash,omitempty"`
-	LastAnalyzedClosedKline map[string]int64        `json:"last_analyzed_closed_kline,omitempty"`
-	ConfirmedSignals        map[string]StoredSignal `json:"confirmed_signals,omitempty"`
-	ExecutedSignals         map[string]SignalExec   `json:"executed_signals,omitempty"`
-	AddCountBySide          map[string]int          `json:"add_count_by_side,omitempty"`
-	ShortTradeState         *ShortTradeState        `json:"short_trade_state,omitempty"`
+	LastStructureHash       string                               `json:"last_structure_hash,omitempty"`
+	LastAnalyzedClosedKline map[string]int64                     `json:"last_analyzed_closed_kline,omitempty"`
+	ConfirmedSignals        map[string]StoredSignal              `json:"confirmed_signals,omitempty"`
+	ExecutedSignals         map[string]SignalExec                `json:"executed_signals,omitempty"`
+	AddCountBySide          map[string]int                       `json:"add_count_by_side,omitempty"`
+	ShortTradeState         *ShortTradeState                     `json:"short_trade_state,omitempty"`
+	PositionStates          map[string]ProgrammaticPositionState `json:"position_states,omitempty"`
+}
+
+type ProgrammaticPositionState struct {
+	Side                   string    `json:"side"`
+	PeakPrice              float64   `json:"peak_price,omitempty"`
+	PeakR                  float64   `json:"peak_r,omitempty"`
+	LastBreakevenSignalID  string    `json:"last_breakeven_signal_id,omitempty"`
+	LastDrawdownSignalID   string    `json:"last_drawdown_signal_id,omitempty"`
+	LastStructureSignalID  string    `json:"last_structure_signal_id,omitempty"`
+	LastShortTradeSignalID string    `json:"last_short_trade_signal_id,omitempty"`
+	LastManagedAt          time.Time `json:"last_managed_at,omitempty"`
 }
 
 type StoredSignal struct {
@@ -157,6 +170,71 @@ func (s *StateStore) SetLastAnalyzedClosedKline(traderID, symbol, timeframe stri
 	s.setSymbolLocked(traderID, symbol, state)
 }
 
+func (s *StateStore) PositionState(traderID, symbol, side string) ProgrammaticPositionState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	key := normalizeSideKey(side)
+	posState := state.PositionStates[key]
+	if posState.Side == "" {
+		posState.Side = key
+	}
+	return posState
+}
+
+func (s *StateStore) UpdatePositionState(traderID, symbol, side string, updateFn func(*ProgrammaticPositionState)) ProgrammaticPositionState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	key := normalizeSideKey(side)
+	posState := state.PositionStates[key]
+	if posState.Side == "" {
+		posState.Side = key
+	}
+	if updateFn != nil {
+		updateFn(&posState)
+	}
+	posState.LastManagedAt = time.Now()
+	state.PositionStates[key] = posState
+	s.setSymbolLocked(traderID, symbol, state)
+	return posState
+}
+
+func (s *StateStore) MarkPositionSignal(traderID, symbol, side, rule, signalID string) bool {
+	if signalID == "" {
+		return false
+	}
+	marked := false
+	s.UpdatePositionState(traderID, symbol, side, func(state *ProgrammaticPositionState) {
+		switch rule {
+		case "breakeven":
+			if state.LastBreakevenSignalID == signalID {
+				return
+			}
+			state.LastBreakevenSignalID = signalID
+		case "floating_drawdown":
+			if state.LastDrawdownSignalID == signalID {
+				return
+			}
+			state.LastDrawdownSignalID = signalID
+		case "structure_break":
+			if state.LastStructureSignalID == signalID {
+				return
+			}
+			state.LastStructureSignalID = signalID
+		case "short_trade":
+			if state.LastShortTradeSignalID == signalID {
+				return
+			}
+			state.LastShortTradeSignalID = signalID
+		default:
+			return
+		}
+		marked = true
+	})
+	return marked
+}
+
 func (s *StateStore) ensureSymbolLocked(traderID, symbol string) ProgrammaticSymbolState {
 	if s.data.Traders == nil {
 		s.data.Traders = map[string]ProgrammaticTraderState{}
@@ -178,6 +256,9 @@ func (s *StateStore) ensureSymbolLocked(traderID, symbol string) ProgrammaticSym
 	if state.LastAnalyzedClosedKline == nil {
 		state.LastAnalyzedClosedKline = map[string]int64{}
 	}
+	if state.PositionStates == nil {
+		state.PositionStates = map[string]ProgrammaticPositionState{}
+	}
 	trader.Symbols[symbol] = state
 	s.data.Traders[traderID] = trader
 	return state
@@ -197,5 +278,14 @@ func emptyStateFile() ProgrammaticStateFile {
 		Version:   1,
 		UpdatedAt: time.Now(),
 		Traders:   map[string]ProgrammaticTraderState{},
+	}
+}
+
+func normalizeSideKey(side string) string {
+	switch strings.ToLower(strings.TrimSpace(side)) {
+	case SideShort:
+		return SideShort
+	default:
+		return SideLong
 	}
 }

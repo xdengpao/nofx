@@ -212,24 +212,34 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 }
 
 type CyclePreparationOptions struct {
-	MarketSymbols      []string
-	MarketHistoryDepth map[string]int
-	ClosedKlinesOnly   bool
-	IncludeMicroADX    bool
+	MarketSymbols           []string
+	MarketHistoryDepth      map[string]int
+	ClosedKlinesOnly        bool
+	IncludeMicroADX         bool
+	AllowRiskReducingOnHalt bool
 }
 
 type CyclePreparation struct {
-	PositionDecisions []Decision
-	WaitDecision      *Decision
-	StopReason        string
-	HaltDecision      *FullDecision
+	PositionDecisions   []Decision
+	WaitDecision        *Decision
+	StopReason          string
+	HaltDecision        *FullDecision
+	RiskIncreaseBlocked bool
+	FullStop            bool
 }
 
 func PrepareCycleContext(ctx *Context, opts CyclePreparationOptions) (*CyclePreparation, error) {
 	initializeDefaults(ctx)
 
+	preparation := &CyclePreparation{}
 	if result := checkCircuitBreakerState(ctx); result != nil {
-		return &CyclePreparation{HaltDecision: result}, nil
+		if !opts.AllowRiskReducingOnHalt {
+			return &CyclePreparation{HaltDecision: result, FullStop: true}, nil
+		}
+		preparation.HaltDecision = result
+		preparation.RiskIncreaseBlocked = true
+		preparation.StopReason = haltReason(result)
+		preparation.WaitDecision = waitDecisionPtr(preparation.StopReason)
 	}
 
 	if err := fetchMarketDataForContextWithOptions(ctx, opts); err != nil {
@@ -240,29 +250,38 @@ func PrepareCycleContext(ctx *Context, opts CyclePreparationOptions) (*CyclePrep
 	cb := CheckCircuitBreaker(ctx, stats)
 	if cb.IsTriggered {
 		ctx.CircuitBreaker = cb
-		return &CyclePreparation{
-			StopReason: cb.TriggerReason,
-			WaitDecision: &Decision{
+		halt := &FullDecision{
+			CoTTrace: "🛑 触发熔断保护，暂停交易",
+			Decisions: []Decision{{
 				Symbol:    "ALL",
 				Action:    "wait",
 				Reasoning: cb.TriggerReason,
-			},
-			HaltDecision: &FullDecision{
-				CoTTrace: "🛑 触发熔断保护，暂停交易",
-				Decisions: []Decision{{
+			}},
+			Timestamp: time.Now(),
+		}
+		if !opts.AllowRiskReducingOnHalt {
+			return &CyclePreparation{
+				StopReason: cb.TriggerReason,
+				WaitDecision: &Decision{
 					Symbol:    "ALL",
 					Action:    "wait",
 					Reasoning: cb.TriggerReason,
-				}},
-				Timestamp: time.Now(),
-			},
-		}, nil
+				},
+				HaltDecision: halt,
+				FullStop:     true,
+			}, nil
+		}
+		preparation.StopReason = cb.TriggerReason
+		preparation.WaitDecision = waitDecisionPtr(cb.TriggerReason)
+		preparation.HaltDecision = halt
+		preparation.RiskIncreaseBlocked = true
 	}
 
 	CalculateCorrelationMatrix(ctx)
 	evaluateCandidateQuality(ctx)
 
 	positionDecisions := evaluateExistingPositions(ctx)
+	preparation.PositionDecisions = positionDecisions
 	if isAccountDrawdownHardStopped(ctx) {
 		reason := fmt.Sprintf("账户总回撤 %.2f%% 已达到最大回撤阈值 %.2f%%，停止搜索新开仓机会",
 			ctx.Account.TotalPnLPct, ctx.MaxAccountDrawdownPct)
@@ -273,19 +292,44 @@ func PrepareCycleContext(ctx *Context, opts CyclePreparationOptions) (*CyclePrep
 		}
 		strategyDecisions := []Decision{waitDecision}
 		allDecisions := mergeDecisions(positionDecisions, strategyDecisions)
-		return &CyclePreparation{
-			PositionDecisions: positionDecisions,
-			WaitDecision:      &waitDecision,
-			StopReason:        reason,
-			HaltDecision: &FullDecision{
-				CoTTrace:  buildFinalCoTTrace(reason, positionDecisions, strategyDecisions, allDecisions),
-				Decisions: allDecisions,
-				Timestamp: time.Now(),
-			},
-		}, nil
+		halt := &FullDecision{
+			CoTTrace:  buildFinalCoTTrace(reason, positionDecisions, strategyDecisions, allDecisions),
+			Decisions: allDecisions,
+			Timestamp: time.Now(),
+		}
+		if !opts.AllowRiskReducingOnHalt {
+			return &CyclePreparation{
+				PositionDecisions: positionDecisions,
+				WaitDecision:      &waitDecision,
+				StopReason:        reason,
+				HaltDecision:      halt,
+				FullStop:          true,
+			}, nil
+		}
+		preparation.WaitDecision = &waitDecision
+		preparation.StopReason = reason
+		preparation.HaltDecision = halt
+		preparation.RiskIncreaseBlocked = true
 	}
 
-	return &CyclePreparation{PositionDecisions: positionDecisions}, nil
+	return preparation, nil
+}
+
+func waitDecisionPtr(reason string) *Decision {
+	if strings.TrimSpace(reason) == "" {
+		reason = "暂停新开仓"
+	}
+	return &Decision{Symbol: "ALL", Action: "wait", Reasoning: reason}
+}
+
+func haltReason(full *FullDecision) string {
+	if full == nil {
+		return ""
+	}
+	if len(full.Decisions) > 0 && strings.TrimSpace(full.Decisions[0].Reasoning) != "" {
+		return full.Decisions[0].Reasoning
+	}
+	return strings.TrimSpace(full.CoTTrace)
 }
 
 func openRejectionReasons(rejections []OpenRejection) []string {
@@ -381,32 +425,247 @@ func ValidateStrategyDecisions(ctx *Context, decisions []Decision, opts Strategy
 	return validDecisions, openRejections
 }
 
+type RiskReducingValidationOptions struct {
+	Source string
+}
+
+func ValidateRiskReducingStrategyDecisions(ctx *Context, decisions []Decision, opts RiskReducingValidationOptions) ([]Decision, []OpenRejection) {
+	var valid []Decision
+	var rejections []OpenRejection
+	seen := map[string]bool{}
+
+	for _, d := range decisions {
+		if IsOpenLikeAction(d.Action) || d.Action == "wait" || d.Action == "hold" {
+			valid = append(valid, d)
+			continue
+		}
+		if !isRiskReducingStrategyAction(d.Action) {
+			rejections = append(rejections, OpenRejection{Symbol: d.Symbol, Action: d.Action, Reason: fmt.Sprintf("%s %s 不是允许的程序化持仓管理动作", d.Symbol, d.Action)})
+			continue
+		}
+		pos, ok := findPositionForRiskDecision(ctx, d)
+		if !ok {
+			rejections = append(rejections, OpenRejection{Symbol: d.Symbol, Action: d.Action, Reason: fmt.Sprintf("%s %s 被拒绝: 未找到已有持仓", d.Symbol, d.Action)})
+			continue
+		}
+		if err := validateRiskDecisionForPosition(ctx, d, pos); err != nil {
+			rejections = append(rejections, OpenRejection{Symbol: d.Symbol, Action: d.Action, Reason: err.Error()})
+			continue
+		}
+		key := market.Normalize(d.Symbol) + "|" + strings.ToLower(pos.Side)
+		if seen[key] {
+			rejections = append(rejections, OpenRejection{Symbol: d.Symbol, Action: d.Action, Reason: fmt.Sprintf("%s %s 被拒绝: 同一持仓本周期已有程序化管理动作", d.Symbol, d.Action)})
+			continue
+		}
+		if err := validateProgrammaticMetadata(d); err != nil {
+			rejections = append(rejections, OpenRejection{Symbol: d.Symbol, Action: d.Action, Reason: err.Error()})
+			continue
+		}
+		seen[key] = true
+		valid = append(valid, d)
+	}
+	return valid, rejections
+}
+
+func isRiskReducingStrategyAction(action string) bool {
+	switch action {
+	case "close_long", "close_short", "partial_close", "update_stop_loss":
+		return true
+	default:
+		return false
+	}
+}
+
+func findPositionForRiskDecision(ctx *Context, d Decision) (PositionInfo, bool) {
+	if ctx == nil {
+		return PositionInfo{}, false
+	}
+	symbol := market.Normalize(d.Symbol)
+	for _, pos := range ctx.Positions {
+		if market.Normalize(pos.Symbol) != symbol {
+			continue
+		}
+		side := strings.ToLower(pos.Side)
+		switch d.Action {
+		case "close_long":
+			if side != "long" {
+				continue
+			}
+		case "close_short":
+			if side != "short" {
+				continue
+			}
+		}
+		return pos, true
+	}
+	return PositionInfo{}, false
+}
+
+func validateRiskDecisionForPosition(ctx *Context, d Decision, pos PositionInfo) error {
+	side := strings.ToLower(pos.Side)
+	switch d.Action {
+	case "close_long":
+		if side != "long" {
+			return fmt.Errorf("%s close_long 被拒绝: 持仓方向是%s", d.Symbol, pos.Side)
+		}
+	case "close_short":
+		if side != "short" {
+			return fmt.Errorf("%s close_short 被拒绝: 持仓方向是%s", d.Symbol, pos.Side)
+		}
+	case "partial_close":
+		if d.ClosePercentage <= 0 || d.ClosePercentage > 100 {
+			return fmt.Errorf("%s partial_close 被拒绝: close_percentage必须在0-100之间: %.2f", d.Symbol, d.ClosePercentage)
+		}
+	case "update_stop_loss":
+		if d.NewStopLoss <= 0 {
+			return fmt.Errorf("%s update_stop_loss 被拒绝: new_stop_loss无效", d.Symbol)
+		}
+		currentPrice := pos.MarkPrice
+		if currentPrice <= 0 {
+			currentPrice = pos.EntryPrice
+		}
+		if ctx != nil && ctx.MarketDataMap != nil {
+			if data := ctx.MarketDataMap[market.Normalize(d.Symbol)]; data != nil && data.CurrentPrice > 0 {
+				currentPrice = data.CurrentPrice
+			}
+		}
+		existingStop := effectiveStopForPosition(ctx, pos)
+		switch side {
+		case "long":
+			if currentPrice > 0 && d.NewStopLoss >= currentPrice {
+				return fmt.Errorf("%s update_stop_loss 被拒绝: 多头止损 %.4f 不得高于或等于当前价 %.4f", d.Symbol, d.NewStopLoss, currentPrice)
+			}
+			if existingStop > 0 && d.NewStopLoss <= existingStop {
+				return fmt.Errorf("%s update_stop_loss 被拒绝: 新止损 %.4f 未改善现有保护 %.4f", d.Symbol, d.NewStopLoss, existingStop)
+			}
+			if existingStop <= 0 && pos.EntryPrice > 0 && d.NewStopLoss < pos.EntryPrice {
+				return fmt.Errorf("%s update_stop_loss 被拒绝: 新止损 %.4f 会扩大入场风险", d.Symbol, d.NewStopLoss)
+			}
+		case "short":
+			if currentPrice > 0 && d.NewStopLoss <= currentPrice {
+				return fmt.Errorf("%s update_stop_loss 被拒绝: 空头止损 %.4f 不得低于或等于当前价 %.4f", d.Symbol, d.NewStopLoss, currentPrice)
+			}
+			if existingStop > 0 && d.NewStopLoss >= existingStop {
+				return fmt.Errorf("%s update_stop_loss 被拒绝: 新止损 %.4f 未改善现有保护 %.4f", d.Symbol, d.NewStopLoss, existingStop)
+			}
+			if existingStop <= 0 && pos.EntryPrice > 0 && d.NewStopLoss > pos.EntryPrice {
+				return fmt.Errorf("%s update_stop_loss 被拒绝: 新止损 %.4f 会扩大入场风险", d.Symbol, d.NewStopLoss)
+			}
+		default:
+			return fmt.Errorf("%s update_stop_loss 被拒绝: 未知持仓方向%s", d.Symbol, pos.Side)
+		}
+	}
+	return nil
+}
+
+func effectiveStopForPosition(ctx *Context, pos PositionInfo) float64 {
+	stop := pos.StopLoss
+	if ctx != nil {
+		if plan := GetPlanByScope(ctx.TraderID, pos.Symbol, pos.Side); plan != nil {
+			if plan.CurrentStopLoss > 0 {
+				stop = plan.CurrentStopLoss
+			} else if plan.StopLoss > 0 {
+				stop = plan.StopLoss
+			}
+		}
+	}
+	return stop
+}
+
+func validateProgrammaticMetadata(d Decision) error {
+	if d.StrategyMode == "programmatic" {
+		if strings.TrimSpace(d.StrategyName) == "" || strings.TrimSpace(d.StrategyVersion) == "" || strings.TrimSpace(d.ConfigHash) == "" {
+			return fmt.Errorf("%s %s 被拒绝: 缺少策略版本或配置hash", d.Symbol, d.Action)
+		}
+		if strings.TrimSpace(d.SignalID) == "" {
+			return fmt.Errorf("%s %s 被拒绝: 缺少signal_id", d.Symbol, d.Action)
+		}
+		layer, _ := d.StrategyMetadata["layer"].(string)
+		rule, _ := d.StrategyMetadata["rule"].(string)
+		if d.StrategyMetadata == nil || strings.TrimSpace(layer) == "" || strings.TrimSpace(rule) == "" {
+			return fmt.Errorf("%s %s 被拒绝: 缺少strategy_metadata.layer/rule", d.Symbol, d.Action)
+		}
+	}
+	return nil
+}
+
 func MergePublicAndStrategyDecisions(publicDecisions, strategyDecisions []Decision) []Decision {
+	return MergePublicAndStrategyDecisionsWithContext(nil, publicDecisions, strategyDecisions)
+}
+
+func MergePublicAndStrategyDecisionsWithContext(ctx *Context, publicDecisions, strategyDecisions []Decision) []Decision {
 	if len(publicDecisions) == 0 {
 		return strategyDecisions
 	}
 	blockOpenLikeBySymbol := make(map[string]bool)
+	suppressRiskBySymbol := make(map[string]bool)
+	publicStopBySymbol := make(map[string]Decision)
+	publicStopIndex := make(map[string]int)
 	for _, d := range publicDecisions {
 		if d.Symbol == "" || d.Symbol == "ALL" {
 			continue
 		}
+		symbol := market.Normalize(d.Symbol)
 		switch d.Action {
 		case "close_long", "close_short", "partial_close", "update_stop_loss", "update_take_profit":
-			blockOpenLikeBySymbol[d.Symbol] = true
+			blockOpenLikeBySymbol[symbol] = true
+		}
+		switch d.Action {
+		case "close_long", "close_short", "partial_close":
+			suppressRiskBySymbol[symbol] = true
+		case "update_stop_loss":
+			publicStopBySymbol[symbol] = d
 		}
 	}
 
 	merged := append([]Decision(nil), publicDecisions...)
+	for idx, d := range merged {
+		if d.Action == "update_stop_loss" && d.Symbol != "" && d.Symbol != "ALL" {
+			publicStopIndex[market.Normalize(d.Symbol)] = idx
+		}
+	}
 	for _, d := range strategyDecisions {
-		if IsOpenLikeAction(d.Action) && blockOpenLikeBySymbol[d.Symbol] {
+		symbol := market.Normalize(d.Symbol)
+		if IsOpenLikeAction(d.Action) && blockOpenLikeBySymbol[symbol] {
 			continue
 		}
 		if isRedundantWaitOrHold(d, publicDecisions) {
 			continue
 		}
+		if isRiskReducingStrategyAction(d.Action) {
+			if suppressRiskBySymbol[symbol] {
+				continue
+			}
+			if d.Action == "update_stop_loss" {
+				if publicStop, ok := publicStopBySymbol[symbol]; ok {
+					if shouldReplacePublicStop(ctx, publicStop, d) {
+						merged[publicStopIndex[symbol]] = d
+					}
+					continue
+				}
+			}
+		}
 		merged = append(merged, d)
 	}
 	return merged
+}
+
+func shouldReplacePublicStop(ctx *Context, publicStop, strategyStop Decision) bool {
+	if ctx == nil || strategyStop.NewStopLoss <= 0 || publicStop.NewStopLoss <= 0 {
+		return false
+	}
+	pos, ok := findPositionForRiskDecision(ctx, strategyStop)
+	if !ok {
+		return false
+	}
+	switch strings.ToLower(pos.Side) {
+	case "long":
+		return strategyStop.NewStopLoss > publicStop.NewStopLoss
+	case "short":
+		return strategyStop.NewStopLoss < publicStop.NewStopLoss
+	default:
+		return false
+	}
 }
 
 func isRedundantWaitOrHold(d Decision, existing []Decision) bool {

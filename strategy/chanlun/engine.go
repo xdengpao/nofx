@@ -31,11 +31,17 @@ func NewEngine(policy decision.ProgrammaticStrategyPolicy) (*Engine, error) {
 	if policy.StrategyVersion == "" {
 		policy.StrategyVersion = "v1"
 	}
+	if policy.ConfigHash == "" {
+		policy.ConfigHash = "default"
+	}
 	if policy.State.Path == "" {
 		policy.State.Path = "data/programmatic_strategy_state.json"
 	}
 	if policy.Timeframes.Trade == "" {
 		policy.Timeframes = decision.ProgrammaticTimeframesPolicy{Higher: "4h", Trade: "1h", Sub: "15m", Micro: "3m"}
+	}
+	if policy.PositionManagement.Timeframes.Structure == "" {
+		policy.PositionManagement = defaultPositionManagementPolicy(policy.Position.PartialClosePct)
 	}
 	engine := &Engine{
 		Policy:         policy,
@@ -67,13 +73,14 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 			"1h":  e.Policy.HistoryDepth.H1,
 			"4h":  e.Policy.HistoryDepth.H4,
 		},
-		ClosedKlinesOnly: true,
-		IncludeMicroADX:  e.Policy.ADX.MicroADXFilter,
+		ClosedKlinesOnly:        true,
+		IncludeMicroADX:         e.Policy.ADX.MicroADXFilter,
+		AllowRiskReducingOnHalt: true,
 	})
 	if err != nil {
 		return nil, err
 	}
-	if prep.HaltDecision != nil {
+	if prep.FullStop && prep.HaltDecision != nil {
 		prep.HaltDecision.UserPrompt = ""
 		prep.HaltDecision.AICallAttempted = false
 		e.applyDecisionMetadata(prep.HaltDecision, nil)
@@ -82,40 +89,33 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 
 	var strategyDecisions []decision.Decision
 	var diagnostics []string
-	for _, symbol := range universe {
-		data := ctx.MarketDataMap[symbol.Symbol]
-		if data == nil || len(data.Klines) == 0 {
-			diagnostics = append(diagnostics, fmt.Sprintf("%s 数据不足", symbol.Symbol))
-			continue
+	positionDecisions, positionDiagnostics := e.evaluatePositionManagement(ctx, now)
+	strategyDecisions = append(strategyDecisions, positionDecisions...)
+	diagnostics = append(diagnostics, positionDiagnostics...)
+	if prep.RiskIncreaseBlocked {
+		reason := prep.StopReason
+		if strings.TrimSpace(reason) == "" {
+			reason = "风险增加已阻断"
 		}
-		signals, diag := e.analyzeSymbol(ctx.TraderID, symbol.Symbol, data, now)
-		diagnostics = append(diagnostics, diag...)
-		e.setLatestSignals(ctx.TraderID, symbol.Symbol, signals, diag)
-		for _, signal := range signals {
-			e.StateStore.StoreConfirmedSignal(ctx.TraderID, signal.Symbol, signal, false)
-			d := e.signalToDecision(ctx, signal)
-			if d.Action == "" {
-				continue
-			}
-			if !e.StateStore.MarkExecuted(ctx.TraderID, signal.Symbol, signal.SignalID, d.Action) {
-				diagnostics = append(diagnostics, fmt.Sprintf("%s %s 已处理过signal_id=%s", signal.Symbol, signal.SignalType, signal.SignalID))
-				continue
-			}
-			strategyDecisions = append(strategyDecisions, d)
-		}
+		diagnostics = append(diagnostics, "主信号层跳过open/add: "+reason)
+	} else {
+		mainDecisions, mainDiagnostics := e.evaluateMainSignals(ctx, universe, now)
+		strategyDecisions = append(strategyDecisions, mainDecisions...)
+		diagnostics = append(diagnostics, mainDiagnostics...)
 	}
 	_ = e.StateStore.Save()
 
-	validDecisions, rejections := decision.ValidateStrategyDecisions(ctx, strategyDecisions, decision.StrategyValidationOptions{
-		Source:   "programmatic",
-		AllowAdd: true,
-	})
-	allDecisions := decision.MergePublicAndStrategyDecisions(prep.PositionDecisions, validDecisions)
+	validDecisions, rejections := e.validateProgrammaticDecisions(ctx, strategyDecisions, prep)
+	allDecisions := decision.MergePublicAndStrategyDecisionsWithContext(ctx, prep.PositionDecisions, validDecisions)
 	if len(allDecisions) == 0 {
+		reason := "程序化策略未发现可执行信号"
+		if prep.WaitDecision != nil && prep.WaitDecision.Reasoning != "" {
+			reason = prep.WaitDecision.Reasoning
+		}
 		allDecisions = []decision.Decision{{
 			Symbol:    "ALL",
 			Action:    "wait",
-			Reasoning: "程序化策略未发现可执行信号",
+			Reasoning: reason,
 		}}
 	}
 	summary := "程序化策略周期完成"
@@ -138,6 +138,75 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 	return fullDecision, nil
 }
 
+func (e *Engine) evaluateMainSignals(ctx *decision.Context, universe []StrategySymbol, now time.Time) ([]decision.Decision, []string) {
+	var strategyDecisions []decision.Decision
+	var diagnostics []string
+	noNewClosedCount := 0
+	for _, symbol := range universe {
+		data := ctx.MarketDataMap[symbol.Symbol]
+		if data == nil || len(data.Klines) == 0 {
+			diagnostics = append(diagnostics, fmt.Sprintf("%s 数据不足", symbol.Symbol))
+			continue
+		}
+		signals, diag := e.analyzeMainSignal(ctx.TraderID, symbol.Symbol, data, now)
+		for _, msg := range diag {
+			if strings.Contains(msg, "无新闭合K线") && !symbol.HasPosition {
+				noNewClosedCount++
+				continue
+			}
+			diagnostics = append(diagnostics, msg)
+		}
+		e.setLatestSignals(ctx.TraderID, symbol.Symbol, signals, diag)
+		for _, signal := range signals {
+			e.StateStore.StoreConfirmedSignal(ctx.TraderID, signal.Symbol, signal, false)
+			d := e.signalToMainDecision(ctx, signal)
+			if d.Action == "" {
+				continue
+			}
+			if !e.StateStore.MarkExecuted(ctx.TraderID, signal.Symbol, signal.SignalID, d.Action) {
+				diagnostics = append(diagnostics, fmt.Sprintf("%s %s 已处理过signal_id=%s", signal.Symbol, signal.SignalType, signal.SignalID))
+				continue
+			}
+			strategyDecisions = append(strategyDecisions, d)
+		}
+	}
+	if noNewClosedCount > 0 {
+		diagnostics = append(diagnostics, fmt.Sprintf("主信号层%d个无持仓候选等待%s新闭合K线", noNewClosedCount, e.Policy.Timeframes.Trade))
+	}
+	return strategyDecisions, diagnostics
+}
+
+func (e *Engine) validateProgrammaticDecisions(ctx *decision.Context, strategyDecisions []decision.Decision, prep *decision.CyclePreparation) ([]decision.Decision, []decision.OpenRejection) {
+	var riskReducing []decision.Decision
+	var openLike []decision.Decision
+	for _, d := range strategyDecisions {
+		if decision.IsOpenLikeAction(d.Action) {
+			openLike = append(openLike, d)
+			continue
+		}
+		riskReducing = append(riskReducing, d)
+	}
+	validRiskReducing, rrRejections := decision.ValidateRiskReducingStrategyDecisions(ctx, riskReducing, decision.RiskReducingValidationOptions{Source: "programmatic"})
+	var rejections []decision.OpenRejection
+	rejections = append(rejections, rrRejections...)
+	if prep != nil && prep.RiskIncreaseBlocked {
+		for _, d := range openLike {
+			rejections = append(rejections, decision.OpenRejection{
+				Symbol: d.Symbol,
+				Action: d.Action,
+				Reason: fmt.Sprintf("%s %s 被拒绝: %s", d.Symbol, d.Action, prep.StopReason),
+			})
+		}
+		return validRiskReducing, rejections
+	}
+	validOpenLike, openRejections := decision.ValidateStrategyDecisions(ctx, openLike, decision.StrategyValidationOptions{
+		Source:   "programmatic",
+		AllowAdd: true,
+	})
+	rejections = append(rejections, openRejections...)
+	return append(validRiskReducing, validOpenLike...), rejections
+}
+
 func (e *Engine) applyDecisionMetadata(fullDecision *decision.FullDecision, diagnostics []string) {
 	if fullDecision == nil {
 		return
@@ -147,19 +216,30 @@ func (e *Engine) applyDecisionMetadata(fullDecision *decision.FullDecision, diag
 	fullDecision.StrategyVersion = e.Policy.StrategyVersion
 	fullDecision.ConfigHash = e.Policy.ConfigHash
 	fullDecision.StrategyParams = map[string]any{
-		"timeframes":     e.Policy.Timeframes,
-		"history_depth":  e.Policy.HistoryDepth,
-		"symbol_pool":    e.Policy.SymbolPool,
-		"moving_average": e.Policy.MovingAverage,
-		"structure":      e.Policy.Structure,
-		"divergence":     e.Policy.Divergence,
-		"adx":            e.Policy.ADX,
-		"position":       e.Policy.Position,
-		"take_profit":    e.Policy.TakeProfit,
+		"timeframes":          e.Policy.Timeframes,
+		"history_depth":       e.Policy.HistoryDepth,
+		"symbol_pool":         e.Policy.SymbolPool,
+		"moving_average":      e.Policy.MovingAverage,
+		"structure":           e.Policy.Structure,
+		"divergence":          e.Policy.Divergence,
+		"adx":                 e.Policy.ADX,
+		"position":            e.Policy.Position,
+		"position_management": e.Policy.PositionManagement,
+		"take_profit":         e.Policy.TakeProfit,
 	}
 	if len(diagnostics) > 0 {
+		mainMessages, positionMessages := splitLayerDiagnostics(diagnostics)
 		fullDecision.StrategyDiagnostics = map[string]any{
 			"messages": append([]string(nil), diagnostics...),
+			"main_signal": map[string]any{
+				"trade_timeframe": e.Policy.Timeframes.Trade,
+				"next_close_time": nextCloseTime(e.now(), e.Policy.Timeframes.Trade).Format(time.RFC3339),
+				"messages":        mainMessages,
+			},
+			"position_management": map[string]any{
+				"enabled":  e.Policy.PositionManagement.Enabled,
+				"messages": positionMessages,
+			},
 		}
 	}
 }
@@ -177,7 +257,7 @@ func (e *Engine) SymbolUniverse(traderID string) []StrategySymbol {
 	return append([]StrategySymbol(nil), e.symbolUniverse[traderID]...)
 }
 
-func (e *Engine) analyzeSymbol(traderID, symbol string, data *market.Data, now time.Time) ([]ChanlunSignal, []string) {
+func (e *Engine) analyzeMainSignal(traderID, symbol string, data *market.Data, now time.Time) ([]ChanlunSignal, []string) {
 	tradeTF := e.Policy.Timeframes.Trade
 	subTF := ComponentTimeframe(tradeTF)
 	if subTF == "" {
@@ -206,6 +286,7 @@ func (e *Engine) analyzeSymbol(traderID, symbol string, data *market.Data, now t
 	}
 	centers := BuildCenters(centerSegments, tradeTF)
 	if len(segments) < 3 {
+		e.StateStore.SetLastAnalyzedClosedKline(traderID, symbol, tradeTF, lastClosed)
 		return nil, []string{fmt.Sprintf("%s 无足够走势段", symbol)}
 	}
 	hist := macdHistForTF(data, tradeTF)
@@ -236,7 +317,7 @@ func (e *Engine) analyzeSymbol(traderID, symbol string, data *market.Data, now t
 	return signals, []string{fmt.Sprintf("%s 识别到%d个信号", symbol, len(signals))}
 }
 
-func (e *Engine) signalToDecision(ctx *decision.Context, signal ChanlunSignal) decision.Decision {
+func (e *Engine) signalToMainDecision(ctx *decision.Context, signal ChanlunSignal) decision.Decision {
 	action := ""
 	positionSide := positionSideForSymbol(ctx.Positions, signal.Symbol)
 	switch {
@@ -248,18 +329,6 @@ func (e *Engine) signalToDecision(ctx *decision.Context, signal ChanlunSignal) d
 		action = "add_long"
 	case positionSide == SideShort && signal.Direction == SideShort:
 		action = "add_short"
-	case positionSide == SideLong && signal.Direction == SideShort:
-		if isReduceSignal(signal.SignalType) {
-			action = "partial_close"
-		} else {
-			action = "close_long"
-		}
-	case positionSide == SideShort && signal.Direction == SideLong:
-		if isReduceSignal(signal.SignalType) {
-			action = "partial_close"
-		} else {
-			action = "close_short"
-		}
 	}
 	if action == "" {
 		return decision.Decision{}
@@ -511,6 +580,34 @@ func limitStrings(values []string, limit int) []string {
 		return values
 	}
 	return values[:limit]
+}
+
+func splitLayerDiagnostics(values []string) ([]string, []string) {
+	var mainMessages []string
+	var positionMessages []string
+	for _, value := range values {
+		if strings.Contains(value, "持仓") || strings.Contains(value, "保本") || strings.Contains(value, "回撤") || strings.Contains(value, "结构") || strings.Contains(value, "短差") {
+			positionMessages = append(positionMessages, value)
+			continue
+		}
+		mainMessages = append(mainMessages, value)
+	}
+	return mainMessages, positionMessages
+}
+
+func nextCloseTime(now time.Time, timeframe string) time.Time {
+	duration := time.Hour
+	switch timeframe {
+	case "15m":
+		duration = 15 * time.Minute
+	case "4h":
+		duration = 4 * time.Hour
+	}
+	truncated := now.Truncate(duration)
+	if truncated.Equal(now) {
+		return now
+	}
+	return truncated.Add(duration)
 }
 
 func openRejectionText(rejections []decision.OpenRejection) []string {
