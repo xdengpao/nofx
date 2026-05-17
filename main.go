@@ -256,6 +256,10 @@ func setupTraderManager(cfg *config.Config) (*manager.TraderManager, error) {
 	if err != nil {
 		return nil, err
 	}
+	programmaticProfiles, err := cfg.NormalizeProgrammaticStrategies()
+	if err != nil {
+		return nil, err
+	}
 
 	// 设置自动平仓回调
 	traderManager.SetAutoCloseCallback(handleAutoClose)
@@ -267,8 +271,16 @@ func setupTraderManager(cfg *config.Config) (*manager.TraderManager, error) {
 			continue
 		}
 
-		log.Printf("📦 [%d/%d] 初始化 %s (%s模型)...",
-			i+1, len(cfg.Traders), traderCfg.Name, strings.ToUpper(traderCfg.AIModel))
+		mode := traderCfg.DecisionMode
+		if mode == "" {
+			mode = config.DecisionModeAI
+		}
+		modelLabel := strings.ToUpper(traderCfg.AIModel)
+		if mode == config.DecisionModeProgrammatic {
+			modelLabel = "PROGRAMMATIC"
+		}
+		log.Printf("📦 [%d/%d] 初始化 %s (%s模式)...",
+			i+1, len(cfg.Traders), traderCfg.Name, modelLabel)
 
 		err := traderManager.AddTraderWithPolicies(
 			traderCfg,
@@ -279,6 +291,7 @@ func setupTraderManager(cfg *config.Config) (*manager.TraderManager, error) {
 			cfg.Leverage,
 			frequencyProfile,
 			strategyRiskProfile,
+			programmaticProfiles[traderCfg.ID],
 		)
 		if err != nil {
 			return nil, fmt.Errorf("添加trader '%s' 失败: %w", traderCfg.Name, err)
@@ -328,10 +341,14 @@ func printContestants(cfg *config.Config) {
 			icon = "•"
 		}
 
+		modeLabel := strings.ToUpper(traderCfg.AIModel)
+		if traderCfg.DecisionMode == config.DecisionModeProgrammatic {
+			modeLabel = "PROGRAMMATIC"
+		}
 		fmt.Printf("  %s %s (%s @ %s) - 初始资金: %.0f USDT\n",
 			icon,
 			traderCfg.Name,
-			strings.ToUpper(traderCfg.AIModel),
+			modeLabel,
 			strings.Title(traderCfg.Exchange),
 			traderCfg.InitialBalance)
 	}

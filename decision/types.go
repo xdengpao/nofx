@@ -184,6 +184,21 @@ type TradePlan struct {
 	ExchangeFullTPMinRR    float64 `json:"exchange_full_tp_min_rr,omitempty"`
 	FeeSlippagePct         float64 `json:"fee_slippage_pct,omitempty"`
 	MinNetRR               float64 `json:"min_net_rr,omitempty"`
+
+	// 程序化策略元数据
+	StrategyMode      string         `json:"strategy_mode,omitempty"`
+	StrategyName      string         `json:"strategy_name,omitempty"`
+	StrategyVersion   string         `json:"strategy_version,omitempty"`
+	ConfigHash        string         `json:"config_hash,omitempty"`
+	SignalID          string         `json:"signal_id,omitempty"`
+	SignalType        string         `json:"signal_type,omitempty"`
+	SignalTimeframe   string         `json:"signal_timeframe,omitempty"`
+	StructureTarget   float64        `json:"structure_target,omitempty"`
+	AddCount          int            `json:"add_count,omitempty"`
+	AverageEntry      float64        `json:"average_entry,omitempty"`
+	LastAddTime       time.Time      `json:"last_add_time,omitempty"`
+	StrategyMetadata  map[string]any `json:"strategy_metadata,omitempty"`
+	StrategyDiagnosis map[string]any `json:"strategy_diagnostics,omitempty"`
 }
 
 // TradePlanManager 交易计划管理器
@@ -241,18 +256,34 @@ type Decision struct {
 	MinHoldMinutes           int                    `json:"min_hold_minutes,omitempty"`
 	TrancheIndex             int                    `json:"tranche_index,omitempty"`
 	RiskNormalization        *OpenRiskNormalization `json:"risk_normalization,omitempty"`
+	StrategyMode             string                 `json:"strategy_mode,omitempty"`
+	StrategyName             string                 `json:"strategy_name,omitempty"`
+	StrategyVersion          string                 `json:"strategy_version,omitempty"`
+	ConfigHash               string                 `json:"config_hash,omitempty"`
+	SignalID                 string                 `json:"signal_id,omitempty"`
+	SignalType               string                 `json:"signal_type,omitempty"`
+	SignalTimeframe          string                 `json:"signal_timeframe,omitempty"`
+	StructureTarget          float64                `json:"structure_target,omitempty"`
+	StrategyMetadata         map[string]any         `json:"strategy_metadata,omitempty"`
+	StrategyDiagnosis        map[string]any         `json:"strategy_diagnostics,omitempty"`
 }
 
 // FullDecision AI的完整决策
 type FullDecision struct {
-	UserPrompt      string          `json:"user_prompt"`
-	CoTTrace        string          `json:"cot_trace"`
-	Decisions       []Decision      `json:"decisions"`
-	Timestamp       time.Time       `json:"timestamp"`
-	AICallAttempted bool            `json:"ai_call_attempted,omitempty"`
-	AICallSucceeded bool            `json:"ai_call_succeeded,omitempty"`
-	AIFailureReason string          `json:"ai_failure_reason,omitempty"`
-	OpenRejections  []OpenRejection `json:"open_rejections,omitempty"`
+	UserPrompt          string          `json:"user_prompt"`
+	CoTTrace            string          `json:"cot_trace"`
+	Decisions           []Decision      `json:"decisions"`
+	Timestamp           time.Time       `json:"timestamp"`
+	AICallAttempted     bool            `json:"ai_call_attempted,omitempty"`
+	AICallSucceeded     bool            `json:"ai_call_succeeded,omitempty"`
+	AIFailureReason     string          `json:"ai_failure_reason,omitempty"`
+	OpenRejections      []OpenRejection `json:"open_rejections,omitempty"`
+	DecisionMode        string          `json:"decision_mode,omitempty"`
+	StrategyName        string          `json:"strategy_name,omitempty"`
+	StrategyVersion     string          `json:"strategy_version,omitempty"`
+	ConfigHash          string          `json:"config_hash,omitempty"`
+	StrategyParams      map[string]any  `json:"strategy_params,omitempty"`
+	StrategyDiagnostics map[string]any  `json:"strategy_diagnostics,omitempty"`
 }
 
 // OpenRejection 记录开仓建议被确定性风控拒绝的原因。
@@ -356,6 +387,95 @@ type InstrumentProfile struct {
 	MinOrderValueUSDT   float64
 	ExchangeFullTPMode  string
 	ExchangeFullTPMinRR float64
+}
+
+// ProgrammaticStrategyPolicy 是程序化策略的运行时配置。
+type ProgrammaticStrategyPolicy struct {
+	DecisionMode    string
+	StrategyName    string
+	StrategyVersion string
+	ConfigHash      string
+	AllowLong       bool
+	AllowShort      bool
+	EnabledSignals  []string
+	Timeframes      ProgrammaticTimeframesPolicy
+	HistoryDepth    ProgrammaticHistoryDepth
+	SymbolPool      ProgrammaticSymbolPoolPolicy
+	MovingAverage   ProgrammaticMAPolicy
+	Structure       ProgrammaticStructurePolicy
+	Divergence      ProgrammaticDivergencePolicy
+	ADX             ProgrammaticADXPolicy
+	Position        ProgrammaticPositionPolicy
+	TakeProfit      ProgrammaticTPPolicy
+	State           ProgrammaticStatePolicy
+}
+
+type ProgrammaticTimeframesPolicy struct {
+	Higher string
+	Trade  string
+	Sub    string
+	Micro  string
+}
+
+type ProgrammaticHistoryDepth struct {
+	M3  int
+	M15 int
+	H1  int
+	H4  int
+}
+
+type ProgrammaticSymbolPoolPolicy struct {
+	Mode        string
+	Symbols     []string
+	CoreSymbols []string
+}
+
+type ProgrammaticMAPolicy struct {
+	ShortPeriod     int
+	LongPeriod      int
+	KissDistancePct float64
+	WetKissBars     int
+}
+
+type ProgrammaticStructurePolicy struct {
+	Strictness    string
+	LeftBars      int
+	RightBars     int
+	MinStrokeBars int
+	MinSwingPct   float64
+	ATRMultiplier float64
+	Bootstrap     bool
+}
+
+type ProgrammaticDivergencePolicy struct {
+	Ratio                       float64
+	PriceTolerancePct           float64
+	PriceToleranceATRMultiplier float64
+	RequireBZeroAxis            bool
+}
+
+type ProgrammaticADXPolicy struct {
+	Period         int
+	MinADX         float64
+	MicroADXFilter bool
+}
+
+type ProgrammaticPositionPolicy struct {
+	MaxAddCount       int
+	AddSizeMultiplier float64
+	PartialClosePct   float64
+	AllowReversal     bool
+}
+
+type ProgrammaticTPPolicy struct {
+	Mode         string
+	FallbackMode string
+	MinNetRR     float64
+}
+
+type ProgrammaticStatePolicy struct {
+	Path      string
+	Bootstrap bool
 }
 
 type OpenRiskNormalization struct {

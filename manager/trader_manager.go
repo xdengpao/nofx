@@ -6,6 +6,8 @@ import (
 	"log"
 	"nofx/config"
 	"nofx/decision"
+	"nofx/market"
+	"nofx/strategy/chanlun"
 	"nofx/trader"
 	"sync"
 	"time"
@@ -74,7 +76,7 @@ func (tm *TraderManager) AddTraderWithFrequency(cfg config.TraderConfig, coinPoo
 }
 
 // AddTraderWithPolicies 添加一个带开仓频率和策略风险策略的trader。
-func (tm *TraderManager) AddTraderWithPolicies(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig, frequency config.TradingFrequencyProfile, strategyRisk config.StrategyRiskProfile) error {
+func (tm *TraderManager) AddTraderWithPolicies(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig, frequency config.TradingFrequencyProfile, strategyRisk config.StrategyRiskProfile, programmaticProfiles ...config.ProgrammaticStrategyProfile) error {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 
@@ -115,6 +117,13 @@ func (tm *TraderManager) AddTraderWithPolicies(cfg config.TraderConfig, coinPool
 		AnalysisIntervalMin:   frequency.AnalysisIntervalMinutes,
 		FrequencyPolicy:       decisionFrequencyPolicy(frequency),
 		StrategyRiskPolicy:    decisionStrategyRiskPolicy(strategyRisk),
+		DecisionMode:          cfg.DecisionMode,
+	}
+	if len(programmaticProfiles) > 0 {
+		traderConfig.ProgrammaticStrategyPolicy = decisionProgrammaticStrategyPolicy(programmaticProfiles[0])
+		if traderConfig.DecisionMode == "" {
+			traderConfig.DecisionMode = programmaticProfiles[0].DecisionMode
+		}
 	}
 
 	// 创建trader实例
@@ -131,7 +140,7 @@ func (tm *TraderManager) AddTraderWithPolicies(cfg config.TraderConfig, coinPool
 		tm.orderTrackers[cfg.ID] = trader.NewOrderTracker(traderImpl)
 		log.Printf("📋 [TraderManager] 已为 '%s' 创建订单追踪器", cfg.Name)
 	}
-	log.Printf("✓ Trader '%s' (%s) 已添加", cfg.Name, cfg.AIModel)
+	log.Printf("✓ Trader '%s' (%s/%s) 已添加", cfg.Name, traderConfig.DecisionMode, cfg.AIModel)
 	return nil
 }
 
@@ -203,6 +212,76 @@ func decisionStrategyRiskPolicy(profile config.StrategyRiskProfile) decision.Str
 		})
 	}
 	return policy
+}
+
+func decisionProgrammaticStrategyPolicy(profile config.ProgrammaticStrategyProfile) decision.ProgrammaticStrategyPolicy {
+	return decision.ProgrammaticStrategyPolicy{
+		DecisionMode:    profile.DecisionMode,
+		StrategyName:    profile.StrategyName,
+		StrategyVersion: profile.StrategyVersion,
+		ConfigHash:      profile.ConfigHash,
+		AllowLong:       profile.AllowLong,
+		AllowShort:      profile.AllowShort,
+		EnabledSignals:  append([]string(nil), profile.EnabledSignals...),
+		Timeframes: decision.ProgrammaticTimeframesPolicy{
+			Higher: profile.Timeframes.Higher,
+			Trade:  profile.Timeframes.Trade,
+			Sub:    profile.Timeframes.Sub,
+			Micro:  profile.Timeframes.Micro,
+		},
+		HistoryDepth: decision.ProgrammaticHistoryDepth{
+			M3:  profile.HistoryDepth.M3,
+			M15: profile.HistoryDepth.M15,
+			H1:  profile.HistoryDepth.H1,
+			H4:  profile.HistoryDepth.H4,
+		},
+		SymbolPool: decision.ProgrammaticSymbolPoolPolicy{
+			Mode:        profile.SymbolPool.Mode,
+			Symbols:     append([]string(nil), profile.SymbolPool.Symbols...),
+			CoreSymbols: append([]string(nil), profile.SymbolPool.CoreSymbols...),
+		},
+		MovingAverage: decision.ProgrammaticMAPolicy{
+			ShortPeriod:     profile.MovingAverage.ShortPeriod,
+			LongPeriod:      profile.MovingAverage.LongPeriod,
+			KissDistancePct: profile.MovingAverage.KissDistancePct,
+			WetKissBars:     profile.MovingAverage.WetKissBars,
+		},
+		Structure: decision.ProgrammaticStructurePolicy{
+			Strictness:    profile.Structure.Strictness,
+			LeftBars:      profile.Structure.LeftBars,
+			RightBars:     profile.Structure.RightBars,
+			MinStrokeBars: profile.Structure.MinStrokeBars,
+			MinSwingPct:   profile.Structure.MinSwingPct,
+			ATRMultiplier: profile.Structure.ATRMultiplier,
+			Bootstrap:     profile.Structure.Bootstrap,
+		},
+		Divergence: decision.ProgrammaticDivergencePolicy{
+			Ratio:                       profile.Divergence.Ratio,
+			PriceTolerancePct:           profile.Divergence.PriceTolerancePct,
+			PriceToleranceATRMultiplier: profile.Divergence.PriceToleranceATRMultiplier,
+			RequireBZeroAxis:            profile.Divergence.RequireBZeroAxis,
+		},
+		ADX: decision.ProgrammaticADXPolicy{
+			Period:         profile.ADX.Period,
+			MinADX:         profile.ADX.MinADX,
+			MicroADXFilter: profile.ADX.MicroADXFilter,
+		},
+		Position: decision.ProgrammaticPositionPolicy{
+			MaxAddCount:       profile.Position.MaxAddCount,
+			AddSizeMultiplier: profile.Position.AddSizeMultiplier,
+			PartialClosePct:   profile.Position.PartialClosePct,
+			AllowReversal:     profile.Position.AllowReversal,
+		},
+		TakeProfit: decision.ProgrammaticTPPolicy{
+			Mode:         profile.TakeProfit.Mode,
+			FallbackMode: profile.TakeProfit.FallbackMode,
+			MinNetRR:     profile.TakeProfit.MinNetRR,
+		},
+		State: decision.ProgrammaticStatePolicy{
+			Path:      profile.State.Path,
+			Bootstrap: profile.State.Bootstrap,
+		},
+	}
 }
 
 // GetOrderTracker 获取指定trader的订单追踪器
@@ -384,6 +463,41 @@ func (tm *TraderManager) GetTrader(id string) (*trader.AutoTrader, error) {
 	return t, nil
 }
 
+func (tm *TraderManager) GetStrategySymbols(traderID string) ([]chanlun.StrategySymbol, error) {
+	t, err := tm.GetTrader(traderID)
+	if err != nil {
+		return nil, err
+	}
+	return t.GetStrategySymbols(), nil
+}
+
+func (tm *TraderManager) GetLatestStrategySignals(traderID, symbol string) (*chanlun.SignalReport, error) {
+	t, err := tm.GetTrader(traderID)
+	if err != nil {
+		return nil, err
+	}
+	if report, ok := t.GetLatestStrategySignals(symbol); ok {
+		return report, nil
+	}
+	return &chanlun.SignalReport{
+		TraderID:     traderID,
+		Symbol:       market.Normalize(symbol),
+		DecisionMode: t.GetDecisionMode(),
+		Signals:      []chanlun.ChanlunSignal{},
+		LatestDiagnostics: map[string]any{
+			"messages": []string{"暂无该标的的程序化策略信号"},
+		},
+	}, nil
+}
+
+func (tm *TraderManager) GetMarketKlines(traderID, symbol, timeframe string, limit int) ([]market.Kline, error) {
+	t, err := tm.GetTrader(traderID)
+	if err != nil {
+		return nil, err
+	}
+	return t.GetMarketKlines(symbol, timeframe, limit)
+}
+
 // GetAllTraders 获取所有trader
 func (tm *TraderManager) GetAllTraders() map[string]*trader.AutoTrader {
 	tm.mu.RLock()
@@ -488,6 +602,7 @@ func (tm *TraderManager) GetComparisonData() (map[string]interface{}, error) {
 			"trader_id":       t.GetID(),
 			"trader_name":     t.GetName(),
 			"ai_model":        t.GetAIModel(),
+			"decision_mode":   t.GetDecisionMode(),
 			"total_equity":    account["total_equity"],
 			"total_pnl":       account["total_pnl"],
 			"total_pnl_pct":   account["total_pnl_pct"],

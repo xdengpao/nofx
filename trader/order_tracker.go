@@ -45,6 +45,18 @@ func (ot *OrderTracker) TrackNewPosition(symbol, side string, entryOrderID int64
 	defer ot.mu.Unlock()
 
 	key := symbol + "_" + side
+	if tracked, ok := ot.trackedOrders[key]; ok {
+		totalQuantity := tracked.Quantity + quantity
+		if totalQuantity > 0 && tracked.EntryPrice > 0 && entryPrice > 0 {
+			tracked.EntryPrice = (tracked.EntryPrice*tracked.Quantity + entryPrice*quantity) / totalQuantity
+		}
+		tracked.Quantity = totalQuantity
+		tracked.EntryOrderID = entryOrderID
+		tracked.Leverage = leverage
+		log.Printf("📋 [OrderTracker] 更新追踪: %s %s @ %.4f 数量 %.6f", symbol, side, tracked.EntryPrice, tracked.Quantity)
+		return
+	}
+
 	ot.trackedOrders[key] = &TrackedOrder{
 		Symbol:       symbol,
 		Side:         side,

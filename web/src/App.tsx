@@ -14,6 +14,9 @@ import type {
   DecisionRecord,
   Statistics,
   TraderInfo,
+  MarketKlineResponse,
+  StrategySignalReport,
+  StrategySymbolsResponse,
 } from './types';
 
 type Page = 'competition' | 'trader';
@@ -385,6 +388,33 @@ function TraderDetailsPage({
   lastUpdate: string;
   language: Language;
 }) {
+  const [strategySymbol, setStrategySymbol] = useState('');
+  const traderId = selectedTrader?.trader_id;
+  const { data: strategySymbols } = useSWR<StrategySymbolsResponse>(
+    traderId ? `strategy-symbols-${traderId}` : null,
+    () => api.getStrategySymbols(traderId),
+    { refreshInterval: 30000, revalidateOnFocus: false }
+  );
+  const symbolOptions = strategySymbols?.symbols ?? [];
+
+  useEffect(() => {
+    if (!strategySymbol && symbolOptions.length > 0) {
+      setStrategySymbol(symbolOptions[0].symbol);
+    }
+  }, [strategySymbol, symbolOptions]);
+
+  const { data: strategySignals } = useSWR<StrategySignalReport>(
+    traderId && strategySymbol ? `strategy-signals-${traderId}-${strategySymbol}` : null,
+    () => api.getStrategySignals(traderId, strategySymbol),
+    { refreshInterval: 30000, revalidateOnFocus: false }
+  );
+
+  const { data: strategyKlines } = useSWR<MarketKlineResponse>(
+    traderId && strategySymbol ? `market-klines-${traderId}-${strategySymbol}-1h` : null,
+    () => api.getMarketKlines(traderId, strategySymbol, '1h', 80),
+    { refreshInterval: 30000, revalidateOnFocus: false }
+  );
+
   if (!selectedTrader) {
     return (
       <div className="space-y-6">
@@ -605,12 +635,147 @@ function TraderDetailsPage({
         {/* 右侧结束 */}
       </div>
 
+      <StrategyInspector
+        status={status}
+        symbols={symbolOptions}
+        selectedSymbol={strategySymbol}
+        onSymbolChange={setStrategySymbol}
+        signals={strategySignals}
+        klines={strategyKlines}
+      />
+
       {/* AI Learning & Performance Analysis */}
       <div className="mb-6 animate-slide-in" style={{ animationDelay: '0.3s' }}>
         <AILearning traderId={selectedTrader.trader_id} />
       </div>
     </div>
   );
+}
+
+function StrategyInspector({
+  status,
+  symbols,
+  selectedSymbol,
+  onSymbolChange,
+  signals,
+  klines,
+}: {
+  status?: SystemStatus;
+  symbols: StrategySymbolsResponse['symbols'];
+  selectedSymbol: string;
+  onSymbolChange: (symbol: string) => void;
+  signals?: StrategySignalReport;
+  klines?: MarketKlineResponse;
+}) {
+  const latestSignal = signals?.signals?.[0];
+  const recentKlines = (klines?.klines ?? []).slice(-8).reverse();
+  const isProgrammatic = status?.decision_mode === 'programmatic';
+
+  return (
+    <div className="binance-card p-6 mb-6 animate-slide-in" style={{ animationDelay: '0.25s' }}>
+      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between mb-5">
+        <div>
+          <h2 className="text-xl font-bold" style={{ color: '#EAECEF' }}>策略检查</h2>
+          <div className="text-xs mt-1" style={{ color: '#848E9C' }}>
+            {status?.decision_mode || 'ai'} {signals?.strategy_name ? `· ${signals.strategy_name} ${signals.strategy_version || ''}` : ''}
+          </div>
+        </div>
+        <select
+          value={selectedSymbol}
+          onChange={(event) => onSymbolChange(event.target.value)}
+          className="rounded px-3 py-2 text-sm font-medium cursor-pointer"
+          style={{ background: '#1E2329', border: '1px solid #2B3139', color: '#EAECEF' }}
+        >
+          {symbols.length === 0 && <option value="">暂无标的</option>}
+          {symbols.map((item) => (
+            <option key={item.symbol} value={item.symbol}>
+              {item.symbol}{item.has_position ? ' · 持仓' : ''}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {!isProgrammatic ? (
+        <div className="rounded p-4 text-sm" style={{ background: '#0B0E11', color: '#848E9C', border: '1px solid #2B3139' }}>
+          当前 trader 使用 AI 决策模式。
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+          <div className="rounded p-4" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
+            <div className="text-xs mb-3" style={{ color: '#848E9C' }}>最新信号</div>
+            {latestSignal ? (
+              <div className="space-y-2 text-sm">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono font-bold" style={{ color: '#EAECEF' }}>{latestSignal.symbol}</span>
+                  <span className="px-2 py-0.5 rounded text-xs font-bold" style={{ background: 'rgba(240, 185, 11, 0.1)', color: '#F0B90B' }}>
+                    {latestSignal.signal_type}
+                  </span>
+                  <span style={{ color: latestSignal.direction === 'long' ? '#0ECB81' : '#F6465D' }}>{latestSignal.direction}</span>
+                </div>
+                <div className="font-mono" style={{ color: '#EAECEF' }}>价格 {latestSignal.price?.toFixed(4)}</div>
+                <div className="font-mono" style={{ color: '#F6465D' }}>SL {latestSignal.stop_loss?.toFixed(4)}</div>
+                <div className="font-mono" style={{ color: '#0ECB81' }}>TP {latestSignal.take_profit?.toFixed(4)}</div>
+                <div className="text-xs" style={{ color: '#848E9C' }}>
+                  {latestSignal.analysis_timeframe} / {latestSignal.trigger_timeframe} · {latestSignal.center_id || '--'}
+                </div>
+              </div>
+            ) : (
+              <div className="text-sm" style={{ color: '#848E9C' }}>
+                {diagnosticText(signals?.latest_diagnostics) || '暂无信号'}
+              </div>
+            )}
+          </div>
+
+          <div className="rounded p-4" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
+            <div className="text-xs mb-3" style={{ color: '#848E9C' }}>信号诊断</div>
+            <div className="text-sm break-words" style={{ color: '#EAECEF' }}>
+              {diagnosticText(signals?.latest_diagnostics) || latestSignal?.signal_id || '--'}
+            </div>
+            {signals?.config_hash && (
+              <div className="text-xs font-mono mt-3" style={{ color: '#848E9C' }}>config {signals.config_hash}</div>
+            )}
+          </div>
+
+          <div className="rounded p-4 overflow-x-auto" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
+            <div className="text-xs mb-3" style={{ color: '#848E9C' }}>1h K线</div>
+            <table className="w-full text-xs">
+              <thead>
+                <tr style={{ color: '#848E9C' }}>
+                  <th className="text-left pb-2">时间</th>
+                  <th className="text-right pb-2">H</th>
+                  <th className="text-right pb-2">L</th>
+                  <th className="text-right pb-2">C</th>
+                </tr>
+              </thead>
+              <tbody>
+                {recentKlines.map((kline) => (
+                  <tr key={kline.close_time} style={{ color: '#EAECEF' }}>
+                    <td className="py-1">{new Date(kline.close_time).toLocaleString()}</td>
+                    <td className="py-1 text-right font-mono">{kline.high.toFixed(4)}</td>
+                    <td className="py-1 text-right font-mono">{kline.low.toFixed(4)}</td>
+                    <td className="py-1 text-right font-mono">{kline.close.toFixed(4)}</td>
+                  </tr>
+                ))}
+                {recentKlines.length === 0 && (
+                  <tr>
+                    <td className="py-4 text-center" colSpan={4} style={{ color: '#848E9C' }}>暂无K线</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function diagnosticText(value?: Record<string, unknown>) {
+  const messages = value?.messages;
+  if (Array.isArray(messages)) {
+    return messages.map(String).join('；');
+  }
+  return '';
 }
 
 // Stat Card Component - Binance Style Enhanced

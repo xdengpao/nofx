@@ -1,0 +1,532 @@
+package chanlun
+
+import (
+	"fmt"
+	"log"
+	"nofx/decision"
+	"nofx/market"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+type Engine struct {
+	Policy     decision.ProgrammaticStrategyPolicy
+	StateStore *StateStore
+	Clock      func() time.Time
+
+	mu             sync.RWMutex
+	latestSignals  map[string]*SignalReport
+	symbolUniverse map[string][]StrategySymbol
+}
+
+func NewEngine(policy decision.ProgrammaticStrategyPolicy) (*Engine, error) {
+	if policy.DecisionMode == "" {
+		policy.DecisionMode = "programmatic"
+	}
+	if policy.StrategyName == "" {
+		policy.StrategyName = "chanlun_programmatic"
+	}
+	if policy.StrategyVersion == "" {
+		policy.StrategyVersion = "v1"
+	}
+	if policy.State.Path == "" {
+		policy.State.Path = "data/programmatic_strategy_state.json"
+	}
+	if policy.Timeframes.Trade == "" {
+		policy.Timeframes = decision.ProgrammaticTimeframesPolicy{Higher: "4h", Trade: "1h", Sub: "15m", Micro: "3m"}
+	}
+	engine := &Engine{
+		Policy:         policy,
+		StateStore:     NewStateStore(policy.State.Path),
+		Clock:          time.Now,
+		latestSignals:  map[string]*SignalReport{},
+		symbolUniverse: map[string][]StrategySymbol{},
+	}
+	return engine, nil
+}
+
+func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision, error) {
+	if ctx == nil {
+		return nil, fmt.Errorf("缺少交易上下文")
+	}
+	now := e.now()
+	universe := ResolveProgrammaticSymbols(ctx.CandidateCoins, ctx.Positions, e.Policy)
+	marketSymbols := make([]string, 0, len(universe))
+	for _, item := range universe {
+		marketSymbols = append(marketSymbols, item.Symbol)
+	}
+	e.setUniverse(ctx.TraderID, universe)
+
+	prep, err := decision.PrepareCycleContext(ctx, decision.CyclePreparationOptions{
+		MarketSymbols: marketSymbols,
+		MarketHistoryDepth: map[string]int{
+			"3m":  e.Policy.HistoryDepth.M3,
+			"15m": e.Policy.HistoryDepth.M15,
+			"1h":  e.Policy.HistoryDepth.H1,
+			"4h":  e.Policy.HistoryDepth.H4,
+		},
+		ClosedKlinesOnly: true,
+		IncludeMicroADX:  e.Policy.ADX.MicroADXFilter,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if prep.HaltDecision != nil {
+		prep.HaltDecision.UserPrompt = ""
+		prep.HaltDecision.AICallAttempted = false
+		e.applyDecisionMetadata(prep.HaltDecision, nil)
+		return prep.HaltDecision, nil
+	}
+
+	var strategyDecisions []decision.Decision
+	var diagnostics []string
+	for _, symbol := range universe {
+		data := ctx.MarketDataMap[symbol.Symbol]
+		if data == nil || len(data.Klines) == 0 {
+			diagnostics = append(diagnostics, fmt.Sprintf("%s 数据不足", symbol.Symbol))
+			continue
+		}
+		signals, diag := e.analyzeSymbol(ctx.TraderID, symbol.Symbol, data, now)
+		diagnostics = append(diagnostics, diag...)
+		e.setLatestSignals(ctx.TraderID, symbol.Symbol, signals, diag)
+		for _, signal := range signals {
+			e.StateStore.StoreConfirmedSignal(ctx.TraderID, signal.Symbol, signal, false)
+			d := e.signalToDecision(ctx, signal)
+			if d.Action == "" {
+				continue
+			}
+			if !e.StateStore.MarkExecuted(ctx.TraderID, signal.Symbol, signal.SignalID, d.Action) {
+				diagnostics = append(diagnostics, fmt.Sprintf("%s %s 已处理过signal_id=%s", signal.Symbol, signal.SignalType, signal.SignalID))
+				continue
+			}
+			strategyDecisions = append(strategyDecisions, d)
+		}
+	}
+	_ = e.StateStore.Save()
+
+	validDecisions, rejections := decision.ValidateStrategyDecisions(ctx, strategyDecisions, decision.StrategyValidationOptions{
+		Source:   "programmatic",
+		AllowAdd: true,
+	})
+	allDecisions := decision.MergePublicAndStrategyDecisions(prep.PositionDecisions, validDecisions)
+	if len(allDecisions) == 0 {
+		allDecisions = []decision.Decision{{
+			Symbol:    "ALL",
+			Action:    "wait",
+			Reasoning: "程序化策略未发现可执行信号",
+		}}
+	}
+	summary := "程序化策略周期完成"
+	if len(diagnostics) > 0 {
+		summary += ": " + strings.Join(limitStrings(diagnostics, 8), "; ")
+	}
+	if len(rejections) > 0 {
+		summary += "; 风控拒绝 " + strings.Join(openRejectionText(rejections), "; ")
+	}
+	fullDecision := &decision.FullDecision{
+		UserPrompt:      "",
+		CoTTrace:        summary,
+		Decisions:       allDecisions,
+		Timestamp:       now,
+		AICallAttempted: false,
+		AICallSucceeded: false,
+		OpenRejections:  rejections,
+	}
+	e.applyDecisionMetadata(fullDecision, diagnostics)
+	return fullDecision, nil
+}
+
+func (e *Engine) applyDecisionMetadata(fullDecision *decision.FullDecision, diagnostics []string) {
+	if fullDecision == nil {
+		return
+	}
+	fullDecision.DecisionMode = "programmatic"
+	fullDecision.StrategyName = e.Policy.StrategyName
+	fullDecision.StrategyVersion = e.Policy.StrategyVersion
+	fullDecision.ConfigHash = e.Policy.ConfigHash
+	fullDecision.StrategyParams = map[string]any{
+		"timeframes":     e.Policy.Timeframes,
+		"history_depth":  e.Policy.HistoryDepth,
+		"symbol_pool":    e.Policy.SymbolPool,
+		"moving_average": e.Policy.MovingAverage,
+		"structure":      e.Policy.Structure,
+		"divergence":     e.Policy.Divergence,
+		"adx":            e.Policy.ADX,
+		"position":       e.Policy.Position,
+		"take_profit":    e.Policy.TakeProfit,
+	}
+	if len(diagnostics) > 0 {
+		fullDecision.StrategyDiagnostics = map[string]any{
+			"messages": append([]string(nil), diagnostics...),
+		}
+	}
+}
+
+func (e *Engine) LatestSignals(traderID, symbol string) (*SignalReport, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	report, ok := e.latestSignals[traderID+"|"+symbol]
+	return report, ok
+}
+
+func (e *Engine) SymbolUniverse(traderID string) []StrategySymbol {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return append([]StrategySymbol(nil), e.symbolUniverse[traderID]...)
+}
+
+func (e *Engine) analyzeSymbol(traderID, symbol string, data *market.Data, now time.Time) ([]ChanlunSignal, []string) {
+	tradeTF := e.Policy.Timeframes.Trade
+	subTF := ComponentTimeframe(tradeTF)
+	if subTF == "" {
+		subTF = e.Policy.Timeframes.Sub
+	}
+	tradeKlines := data.Klines[tradeTF]
+	if len(tradeKlines) < 30 {
+		return nil, []string{fmt.Sprintf("%s %s K线不足", symbol, tradeTF)}
+	}
+	lastClosed := tradeKlines[len(tradeKlines)-1].CloseTime
+	symbolState := e.StateStore.SymbolState(traderID, symbol)
+	if !e.Policy.State.Bootstrap && symbolState.LastAnalyzedClosedKline[tradeTF] == lastClosed {
+		return nil, []string{fmt.Sprintf("%s %s 无新闭合K线", symbol, tradeTF)}
+	}
+	candles := marketKlinesToCandles(tradeTF, tradeKlines)
+	normalized := NormalizeInclusion(candles)
+	fractals := FindFractals(normalized, e.Policy.Structure.LeftBars, e.Policy.Structure.RightBars)
+	strokes := BuildStrokes(fractals, normalized, e.Policy.Structure.MinStrokeBars, e.Policy.Structure.MinSwingPct, e.Policy.Structure.ATRMultiplier)
+	segments := BuildSegments(strokes, e.Policy.Structure.Strictness)
+	centerSegments := segments
+	if subTF != "" && len(data.Klines[subTF]) > 0 {
+		subCandles := NormalizeInclusion(marketKlinesToCandles(subTF, data.Klines[subTF]))
+		subFractals := FindFractals(subCandles, e.Policy.Structure.LeftBars, e.Policy.Structure.RightBars)
+		subStrokes := BuildStrokes(subFractals, subCandles, e.Policy.Structure.MinStrokeBars, e.Policy.Structure.MinSwingPct, e.Policy.Structure.ATRMultiplier)
+		centerSegments = BuildSegments(subStrokes, e.Policy.Structure.Strictness)
+	}
+	centers := BuildCenters(centerSegments, tradeTF)
+	if len(segments) < 3 {
+		return nil, []string{fmt.Sprintf("%s 无足够走势段", symbol)}
+	}
+	hist := macdHistForTF(data, tradeTF)
+	shortEMA := emaSeriesFromCandles(candles, e.Policy.MovingAverage.ShortPeriod)
+	longEMA := emaSeriesFromCandles(candles, e.Policy.MovingAverage.LongPeriod)
+	maKiss := DetectMAKiss(shortEMA, longEMA, e.Policy.MovingAverage.KissDistancePct, e.Policy.MovingAverage.WetKissBars)
+	signals := DetectSignals(SignalInput{
+		TraderID:          traderID,
+		Symbol:            symbol,
+		AnalysisTF:        tradeTF,
+		TriggerTF:         e.Policy.Timeframes.Sub,
+		Centers:           centers,
+		Segments:          segments,
+		MACDHist:          hist,
+		ConfigHash:        e.Policy.ConfigHash,
+		Now:               now,
+		EnabledSignal:     enabledSignalMap(e.Policy.EnabledSignals),
+		DivergenceRatio:   e.Policy.Divergence.Ratio,
+		PriceTolerancePct: e.Policy.Divergence.PriceTolerancePct,
+		RequireBZeroAxis:  e.Policy.Divergence.RequireBZeroAxis,
+		MAKiss:            maKiss,
+	})
+	if len(signals) == 0 {
+		e.StateStore.SetLastAnalyzedClosedKline(traderID, symbol, tradeTF, lastClosed)
+		return nil, []string{fmt.Sprintf("%s 无买卖点信号", symbol)}
+	}
+	e.StateStore.SetLastAnalyzedClosedKline(traderID, symbol, tradeTF, lastClosed)
+	return signals, []string{fmt.Sprintf("%s 识别到%d个信号", symbol, len(signals))}
+}
+
+func (e *Engine) signalToDecision(ctx *decision.Context, signal ChanlunSignal) decision.Decision {
+	action := ""
+	positionSide := positionSideForSymbol(ctx.Positions, signal.Symbol)
+	switch {
+	case positionSide == "" && signal.Direction == SideLong && e.Policy.AllowLong:
+		action = "open_long"
+	case positionSide == "" && signal.Direction == SideShort && e.Policy.AllowShort:
+		action = "open_short"
+	case positionSide == SideLong && signal.Direction == SideLong:
+		action = "add_long"
+	case positionSide == SideShort && signal.Direction == SideShort:
+		action = "add_short"
+	case positionSide == SideLong && signal.Direction == SideShort:
+		if isReduceSignal(signal.SignalType) {
+			action = "partial_close"
+		} else {
+			action = "close_long"
+		}
+	case positionSide == SideShort && signal.Direction == SideLong:
+		if isReduceSignal(signal.SignalType) {
+			action = "partial_close"
+		} else {
+			action = "close_short"
+		}
+	}
+	if action == "" {
+		return decision.Decision{}
+	}
+	d := decision.Decision{
+		Symbol:          signal.Symbol,
+		Action:          action,
+		Leverage:        leverageForSymbol(ctx, signal.Symbol),
+		StopLoss:        signal.StopLoss,
+		TakeProfit:      signal.TakeProfit,
+		Confidence:      signal.Confidence,
+		Reasoning:       fmt.Sprintf("程序化缠论%s信号: %s %s", signal.SignalType, signal.AnalysisTF, signal.CenterID),
+		PositionSizeUSD: 0,
+		StrategyMode:    "programmatic",
+		StrategyName:    e.Policy.StrategyName,
+		StrategyVersion: e.Policy.StrategyVersion,
+		ConfigHash:      e.Policy.ConfigHash,
+		SignalID:        signal.SignalID,
+		SignalType:      signal.SignalType,
+		SignalTimeframe: signal.AnalysisTF,
+		StructureTarget: signal.StructureTarget,
+		StrategyMetadata: map[string]any{
+			"center_id":         signal.CenterID,
+			"trigger_timeframe": signal.TriggerTF,
+			"level":             signal.Level,
+		},
+		StrategyDiagnosis: map[string]any{
+			"diagnostics": signal.Diagnostics,
+		},
+	}
+	if action == "partial_close" {
+		d.ClosePercentage = e.Policy.Position.PartialClosePct
+	}
+	if decision.IsAddAction(action) {
+		if value := positionValueForSymbolSide(ctx.Positions, signal.Symbol, signal.Direction); value > 0 {
+			multiplier := e.Policy.Position.AddSizeMultiplier
+			if multiplier <= 0 {
+				multiplier = 0.5
+			}
+			d.PositionSizeUSD = value * multiplier
+		}
+	}
+	return d
+}
+
+func isReduceSignal(signalType string) bool {
+	switch signalType {
+	case SignalBuy2, SignalBuy3, SignalSell2, SignalSell3:
+		return true
+	default:
+		return false
+	}
+}
+
+func ResolveProgrammaticSymbols(candidates []decision.CandidateCoin, positions []decision.PositionInfo, policy decision.ProgrammaticStrategyPolicy) []StrategySymbol {
+	base := map[string]StrategySymbol{}
+	for _, coin := range candidates {
+		symbol := market.Normalize(coin.Symbol)
+		base[symbol] = StrategySymbol{Symbol: symbol, Sources: append([]string(nil), coin.Sources...), Selected: true}
+	}
+	custom := map[string]bool{}
+	for _, symbol := range policy.SymbolPool.Symbols {
+		custom[market.Normalize(symbol)] = true
+	}
+	core := map[string]bool{}
+	for _, symbol := range policy.SymbolPool.CoreSymbols {
+		core[market.Normalize(symbol)] = true
+	}
+	mode := policy.SymbolPool.Mode
+	if mode == "" {
+		mode = "append"
+	}
+	result := map[string]StrategySymbol{}
+	switch mode {
+	case "override":
+		for symbol := range custom {
+			result[symbol] = StrategySymbol{Symbol: symbol, Sources: []string{"custom"}, Selected: true}
+		}
+		for symbol := range core {
+			result[symbol] = StrategySymbol{Symbol: symbol, Sources: []string{"core"}, Selected: true}
+		}
+	case "filter":
+		for symbol, item := range base {
+			if custom[symbol] {
+				item.Sources = appendSource(item.Sources, "custom")
+				result[symbol] = item
+			}
+		}
+	default:
+		for symbol, item := range base {
+			result[symbol] = item
+		}
+		for symbol := range custom {
+			item := result[symbol]
+			item.Symbol = symbol
+			item.Selected = true
+			item.Sources = appendSource(item.Sources, "custom")
+			result[symbol] = item
+		}
+	}
+	for _, pos := range positions {
+		symbol := market.Normalize(pos.Symbol)
+		item := result[symbol]
+		item.Symbol = symbol
+		item.Selected = true
+		item.HasPosition = true
+		item.Sources = appendSource(item.Sources, "position")
+		result[symbol] = item
+	}
+	symbols := make([]string, 0, len(result))
+	for symbol := range result {
+		symbols = append(symbols, symbol)
+	}
+	sort.Strings(symbols)
+	out := make([]StrategySymbol, 0, len(symbols))
+	for _, symbol := range symbols {
+		out = append(out, result[symbol])
+	}
+	return out
+}
+
+func (e *Engine) setLatestSignals(traderID, symbol string, signals []ChanlunSignal, diagnostics []string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.latestSignals[traderID+"|"+symbol] = &SignalReport{
+		TraderID:        traderID,
+		Symbol:          symbol,
+		DecisionMode:    "programmatic",
+		StrategyName:    e.Policy.StrategyName,
+		StrategyVersion: e.Policy.StrategyVersion,
+		ConfigHash:      e.Policy.ConfigHash,
+		Signals:         append([]ChanlunSignal(nil), signals...),
+		LatestDiagnostics: map[string]any{
+			"messages": diagnostics,
+		},
+	}
+}
+
+func (e *Engine) setUniverse(traderID string, universe []StrategySymbol) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.symbolUniverse[traderID] = append([]StrategySymbol(nil), universe...)
+}
+
+func (e *Engine) now() time.Time {
+	if e.Clock != nil {
+		return e.Clock()
+	}
+	return time.Now()
+}
+
+func marketKlinesToCandles(timeframe string, klines []market.Kline) []Candle {
+	candles := make([]Candle, 0, len(klines))
+	for _, k := range klines {
+		candles = append(candles, Candle{
+			Timeframe: timeframe,
+			OpenTime:  k.OpenTime,
+			CloseTime: k.CloseTime,
+			Open:      k.Open,
+			High:      k.High,
+			Low:       k.Low,
+			Close:     k.Close,
+			Volume:    k.Volume,
+		})
+	}
+	return candles
+}
+
+func macdHistForTF(data *market.Data, timeframe string) []float64 {
+	switch timeframe {
+	case "15m":
+		if data.MidTermSeries15m != nil {
+			return data.MidTermSeries15m.MACDHist
+		}
+	case "1h":
+		if data.MidTermSeries1h != nil {
+			return data.MidTermSeries1h.MACDHist
+		}
+	case "4h":
+		if data.LongerTermContext != nil {
+			return data.LongerTermContext.MACDHist
+		}
+	}
+	return nil
+}
+
+func enabledSignalMap(values []string) map[string]bool {
+	result := map[string]bool{}
+	for _, value := range values {
+		result[value] = true
+	}
+	return result
+}
+
+func emaSeriesFromCandles(candles []Candle, period int) []float64 {
+	if period <= 0 || len(candles) == 0 {
+		return nil
+	}
+	alpha := 2.0 / float64(period+1)
+	out := make([]float64, len(candles))
+	out[0] = candles[0].Close
+	for i := 1; i < len(candles); i++ {
+		out[i] = alpha*candles[i].Close + (1-alpha)*out[i-1]
+	}
+	return out
+}
+
+func positionSideForSymbol(positions []decision.PositionInfo, symbol string) string {
+	for _, pos := range positions {
+		if market.Normalize(pos.Symbol) == market.Normalize(symbol) {
+			return strings.ToLower(pos.Side)
+		}
+	}
+	return ""
+}
+
+func positionValueForSymbolSide(positions []decision.PositionInfo, symbol, side string) float64 {
+	for _, pos := range positions {
+		if market.Normalize(pos.Symbol) != market.Normalize(symbol) || strings.ToLower(pos.Side) != side {
+			continue
+		}
+		price := pos.MarkPrice
+		if price <= 0 {
+			price = pos.EntryPrice
+		}
+		return pos.Quantity * price
+	}
+	return 0
+}
+
+func leverageForSymbol(ctx *decision.Context, symbol string) int {
+	if symbol == "BTCUSDT" || symbol == "ETHUSDT" {
+		return ctx.BTCETHLeverage
+	}
+	return ctx.AltcoinLeverage
+}
+
+func appendSource(values []string, source string) []string {
+	for _, value := range values {
+		if value == source {
+			return values
+		}
+	}
+	return append(values, source)
+}
+
+func limitStrings(values []string, limit int) []string {
+	if limit <= 0 || len(values) <= limit {
+		return values
+	}
+	return values[:limit]
+}
+
+func openRejectionText(rejections []decision.OpenRejection) []string {
+	result := make([]string, 0, len(rejections))
+	for _, rejection := range rejections {
+		text := rejection.Reason
+		if text == "" {
+			text = strings.Join(rejection.GateReasons, ",")
+		}
+		if text != "" {
+			result = append(result, text)
+		}
+	}
+	return result
+}
+
+func init() {
+	log.SetFlags(log.Flags())
+}

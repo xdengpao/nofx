@@ -9,10 +9,12 @@ import (
 
 // TraderConfig 单个trader的配置
 type TraderConfig struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Enabled bool   `json:"enabled"`  // 是否启用该trader
-	AIModel string `json:"ai_model"` // "qwen" or "deepseek"
+	ID                   string                     `json:"id"`
+	Name                 string                     `json:"name"`
+	Enabled              bool                       `json:"enabled"`                 // 是否启用该trader
+	AIModel              string                     `json:"ai_model"`                // "qwen" or "deepseek"
+	DecisionMode         string                     `json:"decision_mode,omitempty"` // ai or programmatic
+	ProgrammaticStrategy ProgrammaticStrategyConfig `json:"programmatic_strategy,omitempty"`
 
 	// 交易平台选择（二选一）
 	Exchange string `json:"exchange"` // "binance" or "hyperliquid"
@@ -775,7 +777,16 @@ func (c *Config) Validate() error {
 		if trader.Name == "" {
 			return fmt.Errorf("trader[%d]: Name不能为空", i)
 		}
-		if trader.AIModel != "qwen" && trader.AIModel != "deepseek" && trader.AIModel != "custom" {
+		mode, err := normalizeDecisionMode(trader.DecisionMode)
+		if err != nil {
+			return fmt.Errorf("trader[%d]: %w", i, err)
+		}
+		trader.DecisionMode = mode
+		if mode == DecisionModeProgrammatic {
+			if trader.AIModel != "" && trader.AIModel != "qwen" && trader.AIModel != "deepseek" && trader.AIModel != "custom" {
+				return fmt.Errorf("trader[%d]: programmatic模式下ai_model如配置必须是 'qwen', 'deepseek' 或 'custom'", i)
+			}
+		} else if trader.AIModel != "qwen" && trader.AIModel != "deepseek" && trader.AIModel != "custom" {
 			return fmt.Errorf("trader[%d]: ai_model必须是 'qwen', 'deepseek' 或 'custom'", i)
 		}
 
@@ -802,21 +813,23 @@ func (c *Config) Validate() error {
 			}
 		}
 
-		if trader.AIModel == "qwen" && trader.QwenKey == "" {
-			return fmt.Errorf("trader[%d]: 使用Qwen时必须配置qwen_key", i)
-		}
-		if trader.AIModel == "deepseek" && trader.DeepSeekKey == "" {
-			return fmt.Errorf("trader[%d]: 使用DeepSeek时必须配置deepseek_key", i)
-		}
-		if trader.AIModel == "custom" {
-			if trader.CustomAPIURL == "" {
-				return fmt.Errorf("trader[%d]: 使用自定义API时必须配置custom_api_url", i)
+		if mode == DecisionModeAI {
+			if trader.AIModel == "qwen" && trader.QwenKey == "" {
+				return fmt.Errorf("trader[%d]: 使用Qwen时必须配置qwen_key", i)
 			}
-			if trader.CustomAPIKey == "" {
-				return fmt.Errorf("trader[%d]: 使用自定义API时必须配置custom_api_key", i)
+			if trader.AIModel == "deepseek" && trader.DeepSeekKey == "" {
+				return fmt.Errorf("trader[%d]: 使用DeepSeek时必须配置deepseek_key", i)
 			}
-			if trader.CustomModelName == "" {
-				return fmt.Errorf("trader[%d]: 使用自定义API时必须配置custom_model_name", i)
+			if trader.AIModel == "custom" {
+				if trader.CustomAPIURL == "" {
+					return fmt.Errorf("trader[%d]: 使用自定义API时必须配置custom_api_url", i)
+				}
+				if trader.CustomAPIKey == "" {
+					return fmt.Errorf("trader[%d]: 使用自定义API时必须配置custom_api_key", i)
+				}
+				if trader.CustomModelName == "" {
+					return fmt.Errorf("trader[%d]: 使用自定义API时必须配置custom_model_name", i)
+				}
 			}
 		}
 		if trader.InitialBalance <= 0 {
@@ -851,6 +864,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if _, err := c.NormalizeStrategyRisk(); err != nil {
+		return err
+	}
+	if _, err := c.NormalizeProgrammaticStrategies(); err != nil {
 		return err
 	}
 

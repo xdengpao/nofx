@@ -13,6 +13,7 @@ type ExecutionPreflightInput struct {
 	Leverage      int
 	MinOrderValue float64
 	Positions     []map[string]interface{}
+	Intent        string // open 或 add
 }
 
 // ExecutionPreflightResult 是下单前检查结果。
@@ -51,16 +52,36 @@ func EvaluateExecutionPreflight(input ExecutionPreflightInput) ExecutionPrefligh
 		result.reject(fmt.Sprintf("订单名义额 %.4f USDT 低于最小值 %.2f USDT", result.NotionalValue, minOrderValue))
 	}
 
+	hasSameSidePosition := false
 	for _, pos := range input.Positions {
 		symbol, _ := pos["symbol"].(string)
 		side, _ := pos["side"].(string)
-		if symbol == input.Symbol && side == input.Side {
+		if symbol != input.Symbol || !positionAmountNonZero(pos) {
+			continue
+		}
+		if side == input.Side {
+			if input.Intent == "add" {
+				hasSameSidePosition = true
+				continue
+			}
 			result.reject(fmt.Sprintf("%s 已有%s仓位", input.Symbol, input.Side))
 			break
 		}
+		result.reject(fmt.Sprintf("%s 已有反向%s仓位", input.Symbol, side))
+		break
+	}
+	if input.Intent == "add" && !hasSameSidePosition {
+		result.reject(fmt.Sprintf("%s 没有%s仓位，不能加仓", input.Symbol, input.Side))
 	}
 
 	return result
+}
+
+func positionAmountNonZero(pos map[string]interface{}) bool {
+	if amount, ok := pos["positionAmt"].(float64); ok {
+		return amount != 0
+	}
+	return true
 }
 
 func (result *ExecutionPreflightResult) reject(reason string) {

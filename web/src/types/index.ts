@@ -9,6 +9,7 @@ export interface SystemStatus {
   stop_until: string;
   last_reset_time: string;
   ai_provider: string;
+  decision_mode?: string;
 }
 
 // 账户信息
@@ -63,6 +64,16 @@ export interface DecisionAction {
   high_risk?: boolean;
   high_risk_reason?: string;
   remaining_position_usd?: number;
+  strategy_mode?: string;
+  strategy_name?: string;
+  strategy_version?: string;
+  config_hash?: string;
+  signal_id?: string;
+  signal_type?: string;
+  signal_timeframe?: string;
+  structure_target?: number;
+  strategy_metadata?: Record<string, unknown>;
+  strategy_diagnostics?: Record<string, unknown>;
 }
 
 export interface ExecutionRiskEvent {
@@ -133,6 +144,12 @@ export interface DecisionRecord {
     consecutive_ai_fails?: number;
     open_gate_reasons?: string[];
   };
+  decision_mode?: string;
+  strategy_name?: string;
+  strategy_version?: string;
+  config_hash?: string;
+  strategy_params?: Record<string, unknown>;
+  strategy_diagnostics?: Record<string, unknown>;
 }
 
 // 统计信息
@@ -142,4 +159,68 @@ export interface Statistics {
   failed_cycles: number;
   total_open_positions: number;
   total_close_positions: number;
+}
+
+export interface StrategySymbol {
+  symbol: string;
+  sources?: string[];
+  selected?: boolean;
+  has_position?: boolean;
+}
+
+export interface StrategySymbolsResponse {
+  trader_id: string;
+  symbols: StrategySymbol[];
+}
+
+export interface ChanlunSignal {
+  signal_id: string;
+  symbol: string;
+  direction: string;
+  signal_type: string;
+  action_hint: string;
+  analysis_timeframe: string;
+  trigger_timeframe: string;
+  level: string;
+  price: number;
+  stop_loss: number;
+  take_profit: number;
+  structure_target: number;
+  center_id?: string;
+  confidence?: number;
+  confirmed_at?: string;
+  diagnostics?: {
+    reasons?: string[];
+    metrics?: Record<string, unknown>;
+    state_source?: string;
+    bootstrap?: boolean;
+  };
+}
+
+export interface StrategySignalReport {
+  trader_id: string;
+  symbol: string;
+  decision_mode: string;
+  strategy_name?: string;
+  strategy_version?: string;
+  config_hash?: string;
+  signals: ChanlunSignal[];
+  latest_diagnostics?: Record<string, unknown>;
+}
+
+export interface MarketKline {
+  open_time: number;
+  close_time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface MarketKlineResponse {
+  symbol: string;
+  timeframe: string;
+  limit: number;
+  klines: MarketKline[];
 }

@@ -14,21 +14,27 @@ import (
 
 // DecisionRecord 决策记录
 type DecisionRecord struct {
-	Timestamp        time.Time           `json:"timestamp"`       // 决策时间
-	SourcePath       string              `json:"-"`               // 离线读取时的源文件路径
-	CycleNumber      int                 `json:"cycle_number"`    // 周期编号
-	InputPrompt      string              `json:"input_prompt"`    // 发送给AI的输入prompt
-	CoTTrace         string              `json:"cot_trace"`       // AI思维链（输出）
-	DecisionJSON     string              `json:"decision_json"`   // 决策JSON
-	AccountState     AccountSnapshot     `json:"account_state"`   // 账户状态快照
-	Positions        []PositionSnapshot  `json:"positions"`       // 持仓快照
-	CandidateCoins   []string            `json:"candidate_coins"` // 候选币种列表
-	CandidateDetails []CandidateSnapshot `json:"candidate_details,omitempty"`
-	Decisions        []DecisionAction    `json:"decisions"`     // 执行的决策
-	ExecutionLog     []string            `json:"execution_log"` // 执行日志
-	Success          bool                `json:"success"`       // 是否成功
-	ErrorMessage     string              `json:"error_message"` // 错误信息（如果有）
-	RiskState        *RiskStateSnapshot  `json:"risk_state,omitempty"`
+	Timestamp           time.Time           `json:"timestamp"`       // 决策时间
+	SourcePath          string              `json:"-"`               // 离线读取时的源文件路径
+	CycleNumber         int                 `json:"cycle_number"`    // 周期编号
+	InputPrompt         string              `json:"input_prompt"`    // 发送给AI的输入prompt
+	CoTTrace            string              `json:"cot_trace"`       // AI思维链（输出）
+	DecisionJSON        string              `json:"decision_json"`   // 决策JSON
+	AccountState        AccountSnapshot     `json:"account_state"`   // 账户状态快照
+	Positions           []PositionSnapshot  `json:"positions"`       // 持仓快照
+	CandidateCoins      []string            `json:"candidate_coins"` // 候选币种列表
+	CandidateDetails    []CandidateSnapshot `json:"candidate_details,omitempty"`
+	Decisions           []DecisionAction    `json:"decisions"`     // 执行的决策
+	ExecutionLog        []string            `json:"execution_log"` // 执行日志
+	Success             bool                `json:"success"`       // 是否成功
+	ErrorMessage        string              `json:"error_message"` // 错误信息（如果有）
+	RiskState           *RiskStateSnapshot  `json:"risk_state,omitempty"`
+	DecisionMode        string              `json:"decision_mode,omitempty"`
+	StrategyName        string              `json:"strategy_name,omitempty"`
+	StrategyVersion     string              `json:"strategy_version,omitempty"`
+	ConfigHash          string              `json:"config_hash,omitempty"`
+	StrategyParams      map[string]any      `json:"strategy_params,omitempty"`
+	StrategyDiagnostics map[string]any      `json:"strategy_diagnostics,omitempty"`
 }
 
 // RiskStateSnapshot 记录本周期可观测风险状态，保持旧日志兼容。
@@ -174,6 +180,16 @@ type DecisionAction struct {
 	CloseSource              string                            `json:"close_source,omitempty"`
 	ExchangeMetadata         bool                              `json:"exchange_metadata,omitempty"`
 	CountedInStats           *bool                             `json:"counted_in_stats,omitempty"`
+	StrategyMode             string                            `json:"strategy_mode,omitempty"`
+	StrategyName             string                            `json:"strategy_name,omitempty"`
+	StrategyVersion          string                            `json:"strategy_version,omitempty"`
+	ConfigHash               string                            `json:"config_hash,omitempty"`
+	SignalID                 string                            `json:"signal_id,omitempty"`
+	SignalType               string                            `json:"signal_type,omitempty"`
+	SignalTimeframe          string                            `json:"signal_timeframe,omitempty"`
+	StructureTarget          float64                           `json:"structure_target,omitempty"`
+	StrategyMetadata         map[string]any                    `json:"strategy_metadata,omitempty"`
+	StrategyDiagnostics      map[string]any                    `json:"strategy_diagnostics,omitempty"`
 }
 
 // OpenFrequencySimulationSnapshot 是日志层的 report-only 开仓频率模拟结果。
@@ -373,7 +389,7 @@ func (l *DecisionLogger) GetStatistics() (*Statistics, error) {
 		for _, action := range record.Decisions {
 			if action.Success {
 				switch action.Action {
-				case "open_long", "open_short":
+				case "open_long", "open_short", "add_long", "add_short":
 					stats.TotalOpenPositions++
 				case "close_long", "close_short":
 					stats.TotalClosePositions++
@@ -582,7 +598,7 @@ func BuildTradeOutcomes(records []*DecisionRecord) ([]TradeOutcome, []UnmatchedA
 
 			key := action.Symbol + "_" + side
 			switch action.Action {
-			case "open_long", "open_short":
+			case "open_long", "open_short", "add_long", "add_short":
 				openPositions[key] = append(openPositions[key], openPositionTrace{
 					symbol:    action.Symbol,
 					side:      side,
@@ -1039,7 +1055,7 @@ func BuildExecutionQuality(records []*DecisionRecord, unmatchedCount int) Execut
 }
 
 func isOpenAction(action string) bool {
-	return action == "open_long" || action == "open_short"
+	return action == "open_long" || action == "open_short" || action == "add_long" || action == "add_short"
 }
 
 func isAIFailureText(value string) bool {
@@ -1186,9 +1202,9 @@ func buildTradeOutcome(open openPositionTrace, closeAction DecisionAction, close
 
 func actionSide(action string) (string, bool) {
 	switch action {
-	case "open_long", "close_long", "auto_close_long":
+	case "open_long", "add_long", "close_long", "auto_close_long":
 		return "long", true
-	case "open_short", "close_short", "auto_close_short":
+	case "open_short", "add_short", "close_short", "auto_close_short":
 		return "short", true
 	default:
 		return "", false

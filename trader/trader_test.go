@@ -459,6 +459,7 @@ type mockTrader struct {
 	stopLossCalls       int
 	takeProfitCalls     int
 	lastTakeProfitPrice float64
+	positions           []map[string]interface{}
 }
 
 func (m *mockTrader) GetBalance() (map[string]interface{}, error) {
@@ -470,7 +471,7 @@ func (m *mockTrader) GetBalance() (map[string]interface{}, error) {
 }
 
 func (m *mockTrader) GetPositions() ([]map[string]interface{}, error) {
-	return []map[string]interface{}{}, nil
+	return append([]map[string]interface{}(nil), m.positions...), nil
 }
 
 func (m *mockTrader) OpenLong(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
@@ -557,6 +558,41 @@ func TestMockTrader_ImplementsInterface(t *testing.T) {
 	}
 }
 
+func TestNewAutoTrader_ProgrammaticDoesNotInitializeAIClient(t *testing.T) {
+	at, err := NewAutoTrader(AutoTraderConfig{
+		ID:              "programmatic-test",
+		Name:            "Programmatic Test",
+		DecisionMode:    "programmatic",
+		Exchange:        "binance",
+		InitialBalance:  1000,
+		BTCETHLeverage:  5,
+		AltcoinLeverage: 3,
+		ProgrammaticStrategyPolicy: decision.ProgrammaticStrategyPolicy{
+			StrategyName:    "chanlun_programmatic",
+			StrategyVersion: "v1-test",
+			Timeframes: decision.ProgrammaticTimeframesPolicy{
+				Higher: "4h",
+				Trade:  "1h",
+				Sub:    "15m",
+				Micro:  "3m",
+			},
+			State: decision.ProgrammaticStatePolicy{Path: t.TempDir() + "/state.json"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("programmatic trader 不应依赖AI配置: %v", err)
+	}
+	if at.mcpClient != nil {
+		t.Fatal("programmatic trader 不应初始化 AI client")
+	}
+	if at.programmaticEngine == nil {
+		t.Fatal("programmatic trader 应初始化策略引擎")
+	}
+	if at.GetDecisionMode() != "programmatic" {
+		t.Fatalf("decision mode错误: %s", at.GetDecisionMode())
+	}
+}
+
 func TestMockTrader_OpenLong_RecordsCall(t *testing.T) {
 	m := &mockTrader{}
 	result, err := m.OpenLong("BTCUSDT", 0.1, 5)
@@ -618,6 +654,39 @@ func TestEvaluateExecutionPreflight_MinNotionalBlocked(t *testing.T) {
 	})
 	if result.Allowed {
 		t.Fatalf("小额订单应被preflight拦截: %+v", result)
+	}
+}
+
+func TestEvaluateExecutionPreflight_AddIntentAllowsSameSideOnly(t *testing.T) {
+	positions := []map[string]interface{}{
+		{"symbol": "BTCUSDT", "side": "long", "positionAmt": 1.0},
+	}
+	allowed := EvaluateExecutionPreflight(ExecutionPreflightInput{
+		Symbol:        "BTCUSDT",
+		Side:          "long",
+		Quantity:      0.2,
+		Price:         100,
+		Leverage:      5,
+		MinOrderValue: 10,
+		Positions:     positions,
+		Intent:        "add",
+	})
+	if !allowed.Allowed {
+		t.Fatalf("加仓应允许同向已有仓位: %+v", allowed)
+	}
+
+	blocked := EvaluateExecutionPreflight(ExecutionPreflightInput{
+		Symbol:        "BTCUSDT",
+		Side:          "short",
+		Quantity:      0.2,
+		Price:         100,
+		Leverage:      5,
+		MinOrderValue: 10,
+		Positions:     positions,
+		Intent:        "add",
+	})
+	if blocked.Allowed {
+		t.Fatalf("加仓应禁止反向持仓: %+v", blocked)
 	}
 }
 
@@ -900,6 +969,77 @@ func TestExecuteOpenLong_StopLossFailure_EmergencyClose(t *testing.T) {
 	}
 	if !record.HighRisk {
 		t.Fatalf("应保留高危标记: %+v", record)
+	}
+}
+
+func TestExecuteAddLong_UpdatesTradePlanWithFakeTrader(t *testing.T) {
+	originalGetter := getMarketData
+	getMarketData = func(symbol string) (*market.Data, error) {
+		return &market.Data{Symbol: symbol, CurrentPrice: 100}, nil
+	}
+	t.Cleanup(func() { getMarketData = originalGetter })
+	if err := decision.InitPlanManager(t.TempDir()); err != nil {
+		t.Fatalf("初始化计划管理器失败: %v", err)
+	}
+
+	openDecision := &decision.Decision{
+		Symbol:          "BTCUSDT",
+		Action:          "open_long",
+		Leverage:        5,
+		PositionSizeUSD: 100,
+		StopLoss:        95,
+		TakeProfit:      120,
+		Reasoning:       "initial",
+	}
+	if err := decision.OnPositionOpenedScoped("test-trader", openDecision, 100, 1); err != nil {
+		t.Fatalf("创建初始计划失败: %v", err)
+	}
+
+	m := &mockTrader{positions: []map[string]interface{}{
+		{"symbol": "BTCUSDT", "side": "long", "positionAmt": 1.0},
+	}}
+	at := &AutoTrader{
+		id:       "test-trader",
+		exchange: "binance",
+		config: AutoTraderConfig{
+			ProgrammaticStrategyPolicy: decision.ProgrammaticStrategyPolicy{
+				Position: decision.ProgrammaticPositionPolicy{MaxAddCount: 2},
+			},
+		},
+		trader:                m,
+		orderTracker:          NewOrderTracker(m),
+		positionFirstSeenTime: make(map[string]int64),
+	}
+	record := &logger.DecisionAction{}
+	addDecision := &decision.Decision{
+		Symbol:          "BTCUSDT",
+		Action:          "add_long",
+		Leverage:        5,
+		PositionSizeUSD: 50,
+		StopLoss:        96,
+		TakeProfit:      125,
+		RiskUSD:         5,
+		Reasoning:       "add",
+	}
+
+	if err := at.executeDecisionWithRecord(addDecision, record); err != nil {
+		t.Fatalf("加仓执行不应失败: %v", err)
+	}
+	if !m.openLongCalled {
+		t.Fatal("add_long 应复用 OpenLong 下单")
+	}
+	plan := decision.GetPlanByScope("test-trader", "BTCUSDT", "long")
+	if plan == nil {
+		t.Fatal("应保留并更新交易计划")
+	}
+	if plan.AddCount != 1 {
+		t.Fatalf("加仓次数应更新为1，实际=%d", plan.AddCount)
+	}
+	if plan.ActualQuantity <= 1 {
+		t.Fatalf("计划数量应增加，实际=%.6f", plan.ActualQuantity)
+	}
+	if plan.CurrentStopLoss != 96 || plan.TakeProfit != 125 {
+		t.Fatalf("加仓后保护价位应同步到计划: SL=%.4f TP=%.4f", plan.CurrentStopLoss, plan.TakeProfit)
 	}
 }
 

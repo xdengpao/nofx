@@ -95,19 +95,20 @@ func NormalizeOpenDecisionRisk(d *Decision, ctx *Context, data *market.Data) (*O
 	if ctx == nil || !StrategyRiskActive(ctx.StrategyRiskPolicy) {
 		return nil, nil
 	}
-	if d.Action != "open_long" && d.Action != "open_short" {
+	if !IsOpenLikeAction(d.Action) {
 		return nil, nil
 	}
+	direction := DecisionDirection(d.Action)
 
 	policy := ctx.StrategyRiskPolicy
 	profile := ResolveInstrumentProfile(d.Symbol, policy)
 	if profile.Name == "" {
 		return nil, fmt.Errorf("%s 未匹配到有效策略profile", d.Symbol)
 	}
-	if d.Action == "open_long" && !profile.AllowLong {
+	if direction == "long" && !profile.AllowLong {
 		return nil, fmt.Errorf("%s profile %s 禁止做多", d.Symbol, profile.Name)
 	}
-	if d.Action == "open_short" && !profile.AllowShort {
+	if direction == "short" && !profile.AllowShort {
 		return nil, fmt.Errorf("%s profile %s 禁止做空", d.Symbol, profile.Name)
 	}
 
@@ -130,7 +131,7 @@ func NormalizeOpenDecisionRisk(d *Decision, ctx *Context, data *market.Data) (*O
 	requestedTP := d.TakeProfit
 	effectiveSL := requestedSL
 	rewrittenSL := false
-	if d.Action == "open_long" {
+	if direction == "long" {
 		minSL := currentPrice - minStopDistance
 		if effectiveSL <= 0 || effectiveSL >= currentPrice || effectiveSL > minSL {
 			effectiveSL = minSL
@@ -165,7 +166,7 @@ func NormalizeOpenDecisionRisk(d *Decision, ctx *Context, data *market.Data) (*O
 	minTPRatio := stopDistanceRatio*minNetRR + feeSlippage
 	effectiveTP := requestedTP
 	rewrittenTP := false
-	if d.Action == "open_long" {
+	if direction == "long" {
 		minTP := currentPrice * (1 + minTPRatio)
 		if effectiveTP <= currentPrice || effectiveTP < minTP {
 			effectiveTP = minTP
@@ -189,7 +190,7 @@ func NormalizeOpenDecisionRisk(d *Decision, ctx *Context, data *market.Data) (*O
 	}
 	exchangeFullRatio := math.Max(tpRatio, stopDistanceRatio*fullTPMinRR+feeSlippage)
 	exchangeFullTP := effectiveTP
-	if d.Action == "open_long" {
+	if direction == "long" {
 		exchangeFullTP = currentPrice * (1 + exchangeFullRatio)
 	} else {
 		exchangeFullTP = currentPrice * (1 - exchangeFullRatio)

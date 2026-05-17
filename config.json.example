@@ -40,6 +40,78 @@
       "scan_interval_minutes": 3
     },
     {
+      "id": "binance_chanlun_programmatic",
+      "name": "Binance Chanlun Programmatic Trader",
+      "enabled": false,
+      "decision_mode": "programmatic",
+      "exchange": "binance",
+      "binance_api_key": "your_binance_api_key",
+      "binance_secret_key": "your_binance_secret_key",
+      "initial_balance": 1000,
+      "scan_interval_minutes": 3,
+      "programmatic_strategy": {
+        "strategy_name": "chanlun_programmatic",
+        "strategy_version": "v1",
+        "allow_long": true,
+        "allow_short": true,
+        "enabled_signals": ["buy1", "buy2", "buy3", "sell1", "sell2", "sell3"],
+        "timeframes": {
+          "higher": "4h",
+          "trade": "1h",
+          "sub": "15m",
+          "micro": "3m"
+        },
+        "history_depth": {
+          "3m": 240,
+          "15m": 192,
+          "1h": 240,
+          "4h": 180
+        },
+        "symbol_pool": {
+          // append: 追加到动态池；override: 只看自定义池；filter: 从动态池中过滤。
+          "mode": "append",
+          "symbols": ["BTCUSDT", "ETHUSDT"]
+        },
+        "moving_average": {
+          "short_period": 20,
+          "long_period": 50
+        },
+        "structure": {
+          "strictness": "enhanced",
+          "left_bars": 2,
+          "right_bars": 2,
+          "min_stroke_bars": 5,
+          "min_swing_pct": 0.3,
+          "atr_multiplier": 0.5
+        },
+        "divergence": {
+          "ratio": 0.8,
+          "price_tolerance_pct": 0.1,
+          "price_tolerance_atr_multiplier": 0.2
+        },
+        "adx": {
+          "period": 14,
+          "min_adx": 20,
+          "micro_adx_filter": false
+        },
+        "position": {
+          "max_add_count": 2,
+          "add_size_multiplier": 0.5,
+          "partial_close_pct": 30,
+          "allow_reversal": false
+        },
+        "take_profit": {
+          "mode": "structure",
+          "fallback_mode": "reject",
+          "min_net_rr": 2.5
+        },
+        "state": {
+          "path": "data/programmatic_strategy_state.json",
+          "bootstrap": false
+        }
+      }
+    },
+    {
       "id": "aster_deepseek",
       "name": "Aster DeepSeek Trader",
       "enabled": true,

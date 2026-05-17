@@ -79,6 +79,29 @@ func CleanSymbol(symbol string) string {
 // 验证工具
 // ============================================================================
 
+func IsOpenAction(action string) bool {
+	return action == "open_long" || action == "open_short"
+}
+
+func IsAddAction(action string) bool {
+	return action == "add_long" || action == "add_short"
+}
+
+func IsOpenLikeAction(action string) bool {
+	return IsOpenAction(action) || IsAddAction(action)
+}
+
+func DecisionDirection(action string) string {
+	switch action {
+	case "open_long", "add_long", "close_long":
+		return "long"
+	case "open_short", "add_short", "close_short":
+		return "short"
+	default:
+		return ""
+	}
+}
+
 // IsValidSymbol 验证交易对是否有效
 func IsValidSymbol(symbol string) bool {
 	if len(symbol) < 5 {

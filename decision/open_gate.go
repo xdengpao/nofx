@@ -115,7 +115,7 @@ func applyLossModeGate(result *OpenGateResult, d *Decision, ctx *Context) {
 	if lossMode.MinConfidence > 0 {
 		result.requireMinConfidence(lossMode.MinConfidence, "亏损模式置信度要求")
 	}
-	if d.Action == "open_long" && isHighBetaAltcoin(d.Symbol) {
+	if DecisionDirection(d.Action) == "long" && isHighBetaAltcoin(d.Symbol) {
 		btcData := ctx.MarketDataMap["BTCUSDT"]
 		if !isBTCHigherTimeframeSupportive(btcData) {
 			result.blockWithDiagnostics("亏损模式下BTC高周期未确认支持，禁止高 beta 山寨多单", "loss_mode", buildBTCGateDiagnostics(btcData))
@@ -130,10 +130,10 @@ func applyDirectionalConfidenceGate(result *OpenGateResult, d *Decision, data *m
 	if d == nil {
 		return
 	}
-	switch d.Action {
-	case "open_long":
+	switch DecisionDirection(d.Action) {
+	case "long":
 		result.requireMinConfidence(longBaseMinConfidence, "多单基础置信度要求")
-	case "open_short":
+	case "short":
 		result.requireMinConfidence(shortBaseMinConfidence, "空单基础置信度要求")
 	default:
 		return
@@ -143,8 +143,8 @@ func applyDirectionalConfidenceGate(result *OpenGateResult, d *Decision, data *m
 	}
 
 	state, _ := market.GetMarketState(data)
-	switch d.Action {
-	case "open_long":
+	switch DecisionDirection(d.Action) {
+	case "long":
 		switch state {
 		case "RANGING", "SQUEEZE":
 			result.penalize("标的处于震荡/波动收缩，多单需更高置信度")
@@ -153,7 +153,7 @@ func applyDirectionalConfidenceGate(result *OpenGateResult, d *Decision, data *m
 			result.penalize("标的处于下行结构，多单属于逆势")
 			result.requireMinConfidence(counterTrendMinConfidence, "逆势多单置信度要求")
 		}
-	case "open_short":
+	case "short":
 		switch state {
 		case "RANGING", "SQUEEZE":
 			result.penalize("标的处于震荡/波动收缩，空单需更高置信度")
@@ -169,7 +169,7 @@ func applyADXRegimeGate(result *OpenGateResult, d *Decision, data *market.Data, 
 	if result == nil || d == nil || data == nil || policy == nil || policy.Legacy || !policy.Enabled {
 		return
 	}
-	if d.Action != "open_long" && d.Action != "open_short" {
+	if !IsOpenLikeAction(d.Action) {
 		return
 	}
 	if profile.Name == "" {
@@ -261,10 +261,10 @@ func applyADXRegimeGate(result *OpenGateResult, d *Decision, data *market.Data, 
 }
 
 func isDIAligned(action string, diPlus, diMinus float64) bool {
-	switch action {
-	case "open_long":
+	switch DecisionDirection(action) {
+	case "long":
 		return diPlus > diMinus
-	case "open_short":
+	case "short":
 		return diMinus > diPlus
 	default:
 		return true
@@ -275,9 +275,9 @@ func applyRollingPerformanceGate(result *OpenGateResult, d *Decision, ctx *Conte
 	if ctx.PerformanceGates == nil {
 		return
 	}
-	side := "long"
-	if d.Action == "open_short" {
-		side = "short"
+	side := DecisionDirection(d.Action)
+	if side == "" {
+		side = "long"
 	}
 	applyGate := func(g logger.PerformanceGate) {
 		if g.State == "" || g.State == "allow" {
@@ -342,7 +342,7 @@ func applyBTCMarketGate(result *OpenGateResult, ctx *Context) {
 }
 
 func applyBTCMultiTimeframeGate(result *OpenGateResult, d *Decision, ctx *Context) {
-	if d.Action != "open_long" || !isHighBetaAltcoin(d.Symbol) || ctx.MarketDataMap == nil {
+	if DecisionDirection(d.Action) != "long" || !isHighBetaAltcoin(d.Symbol) || ctx.MarketDataMap == nil {
 		return
 	}
 	btcData := ctx.MarketDataMap["BTCUSDT"]
@@ -401,7 +401,7 @@ func applySameSideExposureGate(result *OpenGateResult, d *Decision, ctx *Context
 		}
 	}
 
-	if d.Action != "open_long" || !isHighBetaAltcoin(d.Symbol) {
+	if DecisionDirection(d.Action) != "long" || !isHighBetaAltcoin(d.Symbol) {
 		return
 	}
 	maxHighBeta := highBetaLongMaxSameSidePositions
@@ -423,9 +423,9 @@ func applyCorrelationConcentrationGate(result *OpenGateResult, d *Decision, ctx 
 	if !ok || !targetCorr.IsHighCorr {
 		return
 	}
-	side := "long"
-	if d.Action == "open_short" {
-		side = "short"
+	side := DecisionDirection(d.Action)
+	if side == "" {
+		side = "long"
 	}
 	sameSideHighCorr := 0
 	existingSymbols := make([]string, 0)
@@ -477,7 +477,7 @@ func maxSameSideHighCorr(ctx *Context, profile InstrumentProfile, data *market.D
 }
 
 func applyHighADXChaseGate(result *OpenGateResult, d *Decision, data *market.Data) {
-	if d.Action != "open_long" || !isHighBetaAltcoin(d.Symbol) || data == nil {
+	if DecisionDirection(d.Action) != "long" || !isHighBetaAltcoin(d.Symbol) || data == nil {
 		return
 	}
 	if data.CurrentADX > extremeADX {
@@ -588,14 +588,7 @@ func normalizePositionSide(side string) string {
 }
 
 func decisionSide(action string) string {
-	switch action {
-	case "open_long":
-		return "long"
-	case "open_short":
-		return "short"
-	default:
-		return ""
-	}
+	return DecisionDirection(action)
 }
 
 func isBearishStructure(data *market.Data) bool {

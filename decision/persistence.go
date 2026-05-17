@@ -1129,6 +1129,95 @@ func OnPositionOpenedScoped(traderID string, decision *Decision, actualEntryPric
 	return nil
 }
 
+// OnPositionAddedScoped 加仓成功后更新同一 trader/symbol/side 的交易计划。
+func OnPositionAddedScoped(traderID string, decision *Decision, addEntryPrice float64, addQuantity float64) error {
+	if decision == nil {
+		return fmt.Errorf("缺少加仓决策")
+	}
+	if addEntryPrice <= 0 {
+		return fmt.Errorf("无效的加仓价格: %.4f", addEntryPrice)
+	}
+	if addQuantity <= 0 {
+		return fmt.Errorf("无效的加仓数量: %.6f", addQuantity)
+	}
+
+	side := DecisionDirection(decision.Action)
+	if side == "" {
+		return fmt.Errorf("无法识别加仓方向: %s", decision.Action)
+	}
+
+	updated := false
+	now := time.Now()
+	planManager.UpdatePlanScoped(traderID, decision.Symbol, side, func(p *TradePlan) {
+		oldQty := p.ActualQuantity
+		oldEntry := p.ActualEntry
+		if oldEntry <= 0 {
+			oldEntry = p.EntryPrice
+		}
+		if oldQty <= 0 && oldEntry > 0 && p.PositionSizeUSD > 0 {
+			oldQty = p.PositionSizeUSD / oldEntry
+		}
+		totalQty := oldQty + addQuantity
+		averageEntry := addEntryPrice
+		if totalQty > 0 && oldQty > 0 && oldEntry > 0 {
+			averageEntry = (oldEntry*oldQty + addEntryPrice*addQuantity) / totalQty
+		}
+
+		p.ActualQuantity = totalQty
+		p.ActualEntry = averageEntry
+		p.EntryPrice = averageEntry
+		p.AverageEntry = averageEntry
+		p.PositionSizeUSD = totalQty * averageEntry
+		p.AddCount++
+		p.LastAddTime = now
+		p.RiskUSD += decision.RiskUSD
+		p.StopLoss = decision.StopLoss
+		p.CurrentStopLoss = decision.StopLoss
+		p.TakeProfit = decision.TakeProfit
+		p.OriginalTakeProfit = decision.TakeProfit
+		p.EffectiveStopLoss = decision.EffectiveStopLoss
+		if p.EffectiveStopLoss <= 0 {
+			p.EffectiveStopLoss = decision.StopLoss
+		}
+		p.EffectiveTakeProfit = decision.EffectiveTakeProfit
+		if p.EffectiveTakeProfit <= 0 {
+			p.EffectiveTakeProfit = decision.TakeProfit
+		}
+		p.ExchangeFullTakeProfit = decision.ExchangeFullTakeProfit
+		if p.ExchangeFullTakeProfit <= 0 {
+			p.ExchangeFullTakeProfit = decision.TakeProfit
+		}
+		p.ExchangeFullTPMode = decision.ExchangeFullTPMode
+		p.SignalID = decision.SignalID
+		p.SignalType = decision.SignalType
+		p.SignalTimeframe = decision.SignalTimeframe
+		p.StructureTarget = decision.StructureTarget
+		p.StrategyMode = decision.StrategyMode
+		p.StrategyName = decision.StrategyName
+		p.StrategyVersion = decision.StrategyVersion
+		p.ConfigHash = decision.ConfigHash
+		p.StrategyMetadata = copyStringAnyMap(decision.StrategyMetadata)
+		p.StrategyDiagnosis = copyStringAnyMap(decision.StrategyDiagnosis)
+		updated = true
+	})
+	if !updated {
+		if err := OnPositionOpenedScoped(traderID, decision, addEntryPrice, addQuantity); err != nil {
+			return err
+		}
+		planManager.UpdatePlanScoped(traderID, decision.Symbol, side, func(p *TradePlan) {
+			p.AddCount = 1
+			p.AverageEntry = addEntryPrice
+			p.LastAddTime = now
+		})
+		log.Printf("⚠️ 未找到既有交易计划，已为加仓创建新计划: %s %s", decision.Symbol, side)
+		return nil
+	}
+
+	planManager.autoSaveIfEnabled()
+	log.Printf("✅ 加仓成功，交易计划已更新: %s %s +%.6f @ %.4f", decision.Symbol, side, addQuantity, addEntryPrice)
+	return nil
+}
+
 // ============================================================================
 // 导出导入
 // ============================================================================

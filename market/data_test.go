@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/leanovate/gopter"
 	"github.com/leanovate/gopter/gen"
@@ -334,6 +335,45 @@ func TestNormalize(t *testing.T) {
 		if got := Normalize(c.input); got != c.expected {
 			t.Errorf("Normalize(%q) = %q，期望 %q", c.input, got, c.expected)
 		}
+	}
+}
+
+func TestFilterClosedKlines(t *testing.T) {
+	now := time.UnixMilli(10_000)
+	klines := []Kline{
+		{CloseTime: 9_000, Close: 1},
+		{CloseTime: 10_000, Close: 2},
+		{CloseTime: 10_001, Close: 3},
+	}
+	filtered := FilterClosedKlines(klines, now)
+	if len(filtered) != 2 {
+		t.Fatalf("应只保留已闭合K线，实际=%d", len(filtered))
+	}
+	if filtered[1].Close != 2 {
+		t.Fatalf("闭合边界应包含CloseTime==now的K线: %+v", filtered)
+	}
+}
+
+func TestCalculateADXSeries_DataInsufficient(t *testing.T) {
+	adx, diPlus, diMinus := CalculateADXSeries(makeKlinesN(20, 100), 14)
+	if adx != nil || diPlus != nil || diMinus != nil {
+		t.Fatalf("ADX样本不足时应返回nil序列: %+v %+v %+v", adx, diPlus, diMinus)
+	}
+}
+
+func TestCalculateIntradaySeriesWithMicroADX(t *testing.T) {
+	klines := makeKlinesN(80, 100)
+	withoutADX := calculateIntradaySeriesEnhancedWithLimit(klines, 0, false, 14)
+	if len(withoutADX.ADXValues) != 0 || len(withoutADX.DIPlus) != 0 || len(withoutADX.DIMinus) != 0 {
+		t.Fatalf("未启用micro ADX时不应写入3m ADX/DI")
+	}
+
+	withADX := calculateIntradaySeriesEnhancedWithLimit(klines, 0, true, 14)
+	if len(withADX.ADXValues) == 0 || len(withADX.DIPlus) == 0 || len(withADX.DIMinus) == 0 {
+		t.Fatalf("启用micro ADX时应写入3m ADX/DI")
+	}
+	if len(withADX.MidPrices) != len(klines) {
+		t.Fatalf("limit=0应保留完整3m价格序列，got=%d want=%d", len(withADX.MidPrices), len(klines))
 	}
 }
 

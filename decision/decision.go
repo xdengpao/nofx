@@ -63,59 +63,14 @@ var configuredMaxAccountDrawdownPct = defaultMaxAccountDrawdownPct
 
 // GetFullDecision 获取AI的完整交易决策
 func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error) {
-	initializeDefaults(ctx)
-
-	// 检查熔断状态
-	if result := checkCircuitBreakerState(ctx); result != nil {
-		return result, nil
+	preparation, err := PrepareCycleContext(ctx, CyclePreparationOptions{})
+	if err != nil {
+		return nil, err
 	}
-
-	// 获取市场数据
-	if err := fetchMarketDataForContext(ctx); err != nil {
-		return nil, fmt.Errorf("获取市场数据失败: %w", err)
+	if preparation.HaltDecision != nil {
+		return preparation.HaltDecision, nil
 	}
-
-	// 检查是否触发熔断
-	stats := GetStatistics()
-	cb := CheckCircuitBreaker(ctx, stats)
-	if cb.IsTriggered {
-		// CheckCircuitBreaker 内部已调用 SetCircuitBreakerState，
-		// 此处同步到 ctx 以便日志输出
-		ctx.CircuitBreaker = cb
-		return &FullDecision{
-			CoTTrace: "🛑 触发熔断保护，暂停交易",
-			Decisions: []Decision{{
-				Symbol:    "ALL",
-				Action:    "wait",
-				Reasoning: cb.TriggerReason,
-			}},
-			Timestamp: time.Now(),
-		}, nil
-	}
-
-	// 计算相关性矩阵
-	CalculateCorrelationMatrix(ctx)
-	evaluateCandidateQuality(ctx)
-
-	// 评估现有持仓
-	positionDecisions := evaluateExistingPositions(ctx)
-
-	if isAccountDrawdownHardStopped(ctx) {
-		reason := fmt.Sprintf("账户总回撤 %.2f%% 已达到最大回撤阈值 %.2f%%，停止搜索新开仓机会",
-			ctx.Account.TotalPnLPct, ctx.MaxAccountDrawdownPct)
-		waitDecision := Decision{
-			Symbol:    "ALL",
-			Action:    "wait",
-			Reasoning: reason,
-		}
-		aiDecisions := []Decision{waitDecision}
-		allDecisions := mergeDecisions(positionDecisions, aiDecisions)
-		return &FullDecision{
-			CoTTrace:  buildFinalCoTTrace(reason, positionDecisions, aiDecisions, allDecisions),
-			Decisions: allDecisions,
-			Timestamp: time.Now(),
-		}, nil
-	}
+	positionDecisions := preparation.PositionDecisions
 
 	// 判断是否需要调用AI
 	shouldCallAI := shouldCallAIForNewOpportunities(ctx)
@@ -256,6 +211,83 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 	}, nil
 }
 
+type CyclePreparationOptions struct {
+	MarketSymbols      []string
+	MarketHistoryDepth map[string]int
+	ClosedKlinesOnly   bool
+	IncludeMicroADX    bool
+}
+
+type CyclePreparation struct {
+	PositionDecisions []Decision
+	WaitDecision      *Decision
+	StopReason        string
+	HaltDecision      *FullDecision
+}
+
+func PrepareCycleContext(ctx *Context, opts CyclePreparationOptions) (*CyclePreparation, error) {
+	initializeDefaults(ctx)
+
+	if result := checkCircuitBreakerState(ctx); result != nil {
+		return &CyclePreparation{HaltDecision: result}, nil
+	}
+
+	if err := fetchMarketDataForContextWithOptions(ctx, opts); err != nil {
+		return nil, fmt.Errorf("获取市场数据失败: %w", err)
+	}
+
+	stats := GetStatistics()
+	cb := CheckCircuitBreaker(ctx, stats)
+	if cb.IsTriggered {
+		ctx.CircuitBreaker = cb
+		return &CyclePreparation{
+			StopReason: cb.TriggerReason,
+			WaitDecision: &Decision{
+				Symbol:    "ALL",
+				Action:    "wait",
+				Reasoning: cb.TriggerReason,
+			},
+			HaltDecision: &FullDecision{
+				CoTTrace: "🛑 触发熔断保护，暂停交易",
+				Decisions: []Decision{{
+					Symbol:    "ALL",
+					Action:    "wait",
+					Reasoning: cb.TriggerReason,
+				}},
+				Timestamp: time.Now(),
+			},
+		}, nil
+	}
+
+	CalculateCorrelationMatrix(ctx)
+	evaluateCandidateQuality(ctx)
+
+	positionDecisions := evaluateExistingPositions(ctx)
+	if isAccountDrawdownHardStopped(ctx) {
+		reason := fmt.Sprintf("账户总回撤 %.2f%% 已达到最大回撤阈值 %.2f%%，停止搜索新开仓机会",
+			ctx.Account.TotalPnLPct, ctx.MaxAccountDrawdownPct)
+		waitDecision := Decision{
+			Symbol:    "ALL",
+			Action:    "wait",
+			Reasoning: reason,
+		}
+		strategyDecisions := []Decision{waitDecision}
+		allDecisions := mergeDecisions(positionDecisions, strategyDecisions)
+		return &CyclePreparation{
+			PositionDecisions: positionDecisions,
+			WaitDecision:      &waitDecision,
+			StopReason:        reason,
+			HaltDecision: &FullDecision{
+				CoTTrace:  buildFinalCoTTrace(reason, positionDecisions, strategyDecisions, allDecisions),
+				Decisions: allDecisions,
+				Timestamp: time.Now(),
+			},
+		}, nil
+	}
+
+	return &CyclePreparation{PositionDecisions: positionDecisions}, nil
+}
+
 func openRejectionReasons(rejections []OpenRejection) []string {
 	reasons := make([]string, 0, len(rejections))
 	for _, rejection := range rejections {
@@ -303,6 +335,90 @@ func buildOpenRejection(d Decision, ctx *Context, reason string) OpenRejection {
 		rejection.GateReasons = append(rejection.GateReasons, reason)
 	}
 	return rejection
+}
+
+type StrategyValidationOptions struct {
+	Source              string
+	AllowAdd            bool
+	AllowTPRRFallback   bool
+	PreserveStructureTP bool
+}
+
+func ValidateStrategyDecisions(ctx *Context, decisions []Decision, opts StrategyValidationOptions) ([]Decision, []OpenRejection) {
+	var validDecisions []Decision
+	var openRejections []OpenRejection
+
+	for _, d := range decisions {
+		if IsOpenLikeAction(d.Action) {
+			if IsAddAction(d.Action) && !opts.AllowAdd {
+				reason := fmt.Sprintf("%s %s 被拒绝: 当前策略不允许加仓", d.Symbol, d.Action)
+				openRejections = append(openRejections, OpenRejection{Symbol: d.Symbol, Action: d.Action, Reason: reason})
+				continue
+			}
+			if err := ValidateAndEnrichDecision(&d, ctx); err != nil {
+				reason := fmt.Sprintf("%s %s 参数补充失败: %v", d.Symbol, d.Action, err)
+				openRejections = append(openRejections, OpenRejection{Symbol: d.Symbol, Action: d.Action, Reason: reason})
+				continue
+			}
+			validationOpts := openValidationOptions{}
+			if IsAddAction(d.Action) {
+				validationOpts.Intent = "add"
+			}
+			if err := validateOpenDecisionWithOptions(&d, ctx, validationOpts); err != nil {
+				reason := fmt.Sprintf("%s %s 被风控过滤: %v", d.Symbol, d.Action, err)
+				openRejections = append(openRejections, buildOpenRejection(d, ctx, reason))
+				continue
+			}
+			validDecisions = append(validDecisions, d)
+			continue
+		}
+		validDecisions = append(validDecisions, d)
+	}
+
+	var finalRejections []OpenRejection
+	validDecisions, finalRejections = enforceFinalDecisionLimits(validDecisions, ctx)
+	openRejections = append(openRejections, finalRejections...)
+	return validDecisions, openRejections
+}
+
+func MergePublicAndStrategyDecisions(publicDecisions, strategyDecisions []Decision) []Decision {
+	if len(publicDecisions) == 0 {
+		return strategyDecisions
+	}
+	blockOpenLikeBySymbol := make(map[string]bool)
+	for _, d := range publicDecisions {
+		if d.Symbol == "" || d.Symbol == "ALL" {
+			continue
+		}
+		switch d.Action {
+		case "close_long", "close_short", "partial_close", "update_stop_loss", "update_take_profit":
+			blockOpenLikeBySymbol[d.Symbol] = true
+		}
+	}
+
+	merged := append([]Decision(nil), publicDecisions...)
+	for _, d := range strategyDecisions {
+		if IsOpenLikeAction(d.Action) && blockOpenLikeBySymbol[d.Symbol] {
+			continue
+		}
+		if isRedundantWaitOrHold(d, publicDecisions) {
+			continue
+		}
+		merged = append(merged, d)
+	}
+	return merged
+}
+
+func isRedundantWaitOrHold(d Decision, existing []Decision) bool {
+	if d.Action != "wait" && d.Action != "hold" {
+		return false
+	}
+	for _, current := range existing {
+		if current.Action == "wait" || current.Action == "hold" {
+			return true
+		}
+	}
+	return false
 }
 
 func buildOpenFrequencySimulations(d Decision, ctx *Context, marketData *market.Data, gate OpenGateResult, reason string) []OpenFrequencySimulation {
@@ -382,14 +498,14 @@ func calculateNetRR(d Decision, marketData *market.Data) (float64, bool) {
 	}
 	currentPrice := marketData.CurrentPrice
 	var riskPct, rewardPct float64
-	switch d.Action {
-	case "open_long":
+	switch DecisionDirection(d.Action) {
+	case "long":
 		if d.StopLoss >= currentPrice || d.TakeProfit <= currentPrice {
 			return 0, false
 		}
 		riskPct = (currentPrice - d.StopLoss) / currentPrice * 100
 		rewardPct = (d.TakeProfit - currentPrice) / currentPrice * 100
-	case "open_short":
+	case "short":
 		if d.StopLoss <= currentPrice || d.TakeProfit >= currentPrice {
 			return 0, false
 		}
@@ -783,7 +899,7 @@ func mergeDecisions(positionDecisions, aiDecisions []Decision) []Decision {
 	}
 
 	for _, d := range aiDecisions {
-		if d.Action == "open_long" || d.Action == "open_short" {
+		if IsOpenLikeAction(d.Action) {
 			if idx, exists := indexBySymbol[d.Symbol]; exists {
 				// 持仓评估决策（任何非 wait 的决策）优先于 AI 新开仓决策
 				if result[idx].Action != "wait" {
@@ -808,6 +924,14 @@ func mergeDecisions(positionDecisions, aiDecisions []Decision) []Decision {
 }
 
 func validateOpenDecision(d *Decision, ctx *Context) error {
+	return validateOpenDecisionWithOptions(d, ctx, openValidationOptions{})
+}
+
+type openValidationOptions struct {
+	Intent string
+}
+
+func validateOpenDecisionWithOptions(d *Decision, ctx *Context, opts openValidationOptions) error {
 	// ========== 开仓前失效条件预检查 ==========
 	marketData, ok := ctx.MarketDataMap[d.Symbol]
 	if !ok {
@@ -848,11 +972,26 @@ func validateOpenDecision(d *Decision, ctx *Context) error {
 		return fmt.Errorf("开仓前失效条件检查失败: %s", reason)
 	}
 
+	direction := DecisionDirection(d.Action)
+
 	// 检查是否已有持仓
+	hasSameSidePosition := false
 	for _, pos := range ctx.Positions {
-		if pos.Symbol == d.Symbol {
+		if pos.Symbol != d.Symbol {
+			continue
+		}
+		if opts.Intent == "add" {
+			if pos.Side == direction {
+				hasSameSidePosition = true
+				continue
+			}
+			return fmt.Errorf("%s 已有反向持仓，不能加仓", d.Symbol)
+		} else {
 			return fmt.Errorf("%s 已有持仓，不能重复开仓", d.Symbol)
 		}
+	}
+	if opts.Intent == "add" && !hasSameSidePosition {
+		return fmt.Errorf("%s 没有同向持仓，不能加仓", d.Symbol)
 	}
 
 	// 检查风险预算
@@ -900,7 +1039,7 @@ func validateOpenDecision(d *Decision, ctx *Context) error {
 
 	currentPrice := marketData.CurrentPrice
 	var riskPct, rewardPct float64
-	if d.Action == "open_long" {
+	if direction == "long" {
 		if d.StopLoss >= currentPrice || d.TakeProfit <= currentPrice {
 			return fmt.Errorf("做多止损必须<当前价<止盈")
 		}
@@ -1015,9 +1154,9 @@ func effectiveOpenGate(d *Decision, ctx *Context) openGateLimit {
 		return limit
 	}
 
-	side := "long"
-	if d.Action == "open_short" {
-		side = "short"
+	side := DecisionDirection(d.Action)
+	if side == "" {
+		side = "long"
 	}
 	applyGate := func(g logger.PerformanceGate) {
 		if g.State == "" || g.State == "allow" {
@@ -1055,7 +1194,7 @@ func effectiveOpenGate(d *Decision, ctx *Context) openGateLimit {
 func validateFinalDecisions(decisions []Decision, ctx *Context) error {
 	newPositions := 0
 	for _, d := range decisions {
-		if d.Action == "open_long" || d.Action == "open_short" {
+		if IsOpenAction(d.Action) {
 			newPositions++
 		}
 	}
@@ -1083,6 +1222,7 @@ func enforceFinalDecisionLimits(decisions []Decision, ctx *Context) ([]Decision,
 	var result []Decision
 	var rejections []OpenRejection
 	keptOpens := 0
+	keptOpenLike := 0
 	dailyOpenRemaining := 0
 	if ctx.FrequencyPolicy != nil && ctx.FrequencyPolicy.DailyOpenLimit > 0 {
 		openCount := 0
@@ -1108,11 +1248,11 @@ func enforceFinalDecisionLimits(decisions []Decision, ctx *Context) ([]Decision,
 		}
 	}
 	for _, d := range decisions {
-		if d.Action != "open_long" && d.Action != "open_short" {
+		if !IsOpenLikeAction(d.Action) {
 			result = append(result, d)
 			continue
 		}
-		if keptOpens >= availableSlots {
+		if IsOpenAction(d.Action) && keptOpens >= availableSlots {
 			rejections = append(rejections, OpenRejection{
 				Symbol: d.Symbol,
 				Action: d.Action,
@@ -1120,7 +1260,7 @@ func enforceFinalDecisionLimits(decisions []Decision, ctx *Context) ([]Decision,
 			})
 			continue
 		}
-		if dailyOpenRemaining > 0 && keptOpens >= dailyOpenRemaining ||
+		if dailyOpenRemaining > 0 && keptOpenLike >= dailyOpenRemaining ||
 			dailyOpenRemaining == 0 && (ctx.FrequencyPolicy != nil && ctx.FrequencyPolicy.DailyOpenLimit > 0 ||
 				ctx.LossMode != nil && ctx.LossMode.Active && ctx.LossMode.DailyOpenLimit > 0) {
 			openCount := 0
@@ -1139,12 +1279,15 @@ func enforceFinalDecisionLimits(decisions []Decision, ctx *Context) ([]Decision,
 				Symbol: d.Symbol,
 				Action: d.Action,
 				Reason: fmt.Sprintf("%s %s 因24小时新增开仓上限%d笔被拒绝(当前%d笔)",
-					d.Symbol, d.Action, limit, openCount+keptOpens),
+					d.Symbol, d.Action, limit, openCount+keptOpenLike),
 			})
 			continue
 		}
 		result = append(result, d)
-		keptOpens++
+		keptOpenLike++
+		if IsOpenAction(d.Action) {
+			keptOpens++
+		}
 	}
 
 	if len(result) == 0 && len(rejections) > 0 {
@@ -1205,7 +1348,7 @@ func ValidateAndEnrichDecision(d *Decision, ctx *Context) error {
 
 		stopDistance := atr * multiplier
 
-		if d.Action == "open_long" {
+		if DecisionDirection(d.Action) == "long" {
 			if d.StopLoss <= 0 {
 				d.StopLoss = currentPrice - stopDistance
 			}
@@ -1253,9 +1396,9 @@ func CheckPreOpenInvalidation(d *Decision, marketData *market.Data) (bool, strin
 		return false, ""
 	}
 
-	direction := "long"
-	if d.Action == "open_short" {
-		direction = "short"
+	direction := DecisionDirection(d.Action)
+	if direction == "" {
+		direction = "long"
 	}
 
 	checker := &PreOpenInvalidationChecker{
@@ -1662,7 +1805,7 @@ func (c *PreOpenInvalidationChecker) getContextForTimeframe(timeframe string) *I
 // CreateTradePlanFromDecision 从决策创建交易计划
 func CreateTradePlanFromDecision(d *Decision, actualEntryPrice float64) *TradePlan {
 	direction := "long"
-	if d.Action == "open_short" {
+	if DecisionDirection(d.Action) == "short" {
 		direction = "short"
 	}
 
@@ -1725,6 +1868,16 @@ func CreateTradePlanFromDecision(d *Decision, actualEntryPrice float64) *TradePl
 		EffectiveTakeProfit:         d.EffectiveTakeProfit,
 		ExchangeFullTakeProfit:      d.ExchangeFullTakeProfit,
 		ExchangeFullTPMode:          d.ExchangeFullTPMode,
+		StrategyMode:                d.StrategyMode,
+		StrategyName:                d.StrategyName,
+		StrategyVersion:             d.StrategyVersion,
+		ConfigHash:                  d.ConfigHash,
+		SignalID:                    d.SignalID,
+		SignalType:                  d.SignalType,
+		SignalTimeframe:             d.SignalTimeframe,
+		StructureTarget:             d.StructureTarget,
+		StrategyMetadata:            copyStringAnyMap(d.StrategyMetadata),
+		StrategyDiagnosis:           copyStringAnyMap(d.StrategyDiagnosis),
 	}
 	if actualEntryPrice > 0 {
 		plan.InitialRiskDistancePct = plan.InitialRiskDistance / actualEntryPrice
@@ -1751,11 +1904,26 @@ func CreateTradePlanFromDecision(d *Decision, actualEntryPrice float64) *TradePl
 	return plan
 }
 
+func copyStringAnyMap(source map[string]any) map[string]any {
+	if len(source) == 0 {
+		return nil
+	}
+	copied := make(map[string]any, len(source))
+	for key, value := range source {
+		copied[key] = value
+	}
+	return copied
+}
+
 // ============================================================================
 // 市场数据获取
 // ============================================================================
 
 func fetchMarketDataForContext(ctx *Context) error {
+	return fetchMarketDataForContextWithOptions(ctx, CyclePreparationOptions{})
+}
+
+func fetchMarketDataForContextWithOptions(ctx *Context, opts CyclePreparationOptions) error {
 	ctx.MarketDataMap = make(map[string]*market.Data)
 	ctx.OITopDataMap = make(map[string]*OITopData)
 
@@ -1769,6 +1937,11 @@ func fetchMarketDataForContext(ctx *Context) error {
 	for _, coin := range ctx.CandidateCoins {
 		symbolSet[coin.Symbol] = true
 	}
+	for _, symbol := range opts.MarketSymbols {
+		if strings.TrimSpace(symbol) != "" {
+			symbolSet[market.Normalize(symbol)] = true
+		}
+	}
 
 	positionSymbols := make(map[string]bool)
 	for _, pos := range ctx.Positions {
@@ -1776,7 +1949,7 @@ func fetchMarketDataForContext(ctx *Context) error {
 	}
 
 	for symbol := range symbolSet {
-		data, err := market.Get(symbol)
+		data, err := getMarketDataForPreparation(symbol, opts)
 		if err != nil {
 			log.Printf("⚠️ 获取 %s 数据失败: %v", symbol, err)
 			markCandidateFiltered(ctx, symbol, fmt.Sprintf("市场数据获取失败: %v", err))
@@ -1811,6 +1984,22 @@ func fetchMarketDataForContext(ctx *Context) error {
 	}
 
 	return nil
+}
+
+func getMarketDataForPreparation(symbol string, opts CyclePreparationOptions) (*market.Data, error) {
+	if opts.ClosedKlinesOnly || opts.IncludeMicroADX || len(opts.MarketHistoryDepth) > 0 {
+		return market.GetWithHistory(symbol, market.HistoryOptions{
+			Depth: market.HistoryDepth{
+				M3:  opts.MarketHistoryDepth["3m"],
+				M15: opts.MarketHistoryDepth["15m"],
+				H1:  opts.MarketHistoryDepth["1h"],
+				H4:  opts.MarketHistoryDepth["4h"],
+			},
+			ClosedOnly:      opts.ClosedKlinesOnly,
+			IncludeMicroADX: opts.IncludeMicroADX,
+		})
+	}
+	return market.Get(symbol)
 }
 
 func markCandidateFiltered(ctx *Context, symbol string, reason string) {

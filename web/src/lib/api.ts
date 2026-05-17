@@ -6,6 +6,9 @@ import type {
   Statistics,
   TraderInfo,
   CompetitionData,
+  MarketKlineResponse,
+  StrategySignalReport,
+  StrategySymbolsResponse,
 } from '../types';
 
 const API_BASE = '/api';
@@ -108,6 +111,35 @@ export const api = {
       : `${API_BASE}/performance`;
     const res = await fetch(url);
     if (!res.ok) throw new Error('获取AI学习数据失败');
+    return res.json();
+  },
+
+  async getStrategySymbols(traderId?: string): Promise<StrategySymbolsResponse> {
+    const url = traderId
+      ? `${API_BASE}/strategy/symbols?trader_id=${encodeURIComponent(traderId)}`
+      : `${API_BASE}/strategy/symbols`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('获取策略标的失败');
+    return res.json();
+  },
+
+  async getStrategySignals(traderId: string | undefined, symbol: string): Promise<StrategySignalReport> {
+    const params = new URLSearchParams();
+    if (traderId) params.set('trader_id', traderId);
+    params.set('symbol', symbol);
+    const res = await fetch(`${API_BASE}/strategy/signals?${params.toString()}`);
+    if (!res.ok) throw new Error('获取策略信号失败');
+    return res.json();
+  },
+
+  async getMarketKlines(traderId: string | undefined, symbol: string, timeframe = '1h', limit = 120): Promise<MarketKlineResponse> {
+    const params = new URLSearchParams();
+    if (traderId) params.set('trader_id', traderId);
+    params.set('symbol', symbol);
+    params.set('timeframe', timeframe);
+    params.set('limit', String(limit));
+    const res = await fetch(`${API_BASE}/market/klines?${params.toString()}`);
+    if (!res.ok) throw new Error('获取K线数据失败');
     return res.json();
   },
 };

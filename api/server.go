@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"nofx/logger"
 	"nofx/manager"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -84,6 +85,9 @@ func (s *Server) setupRoutes() {
 		api.GET("/statistics", s.handleStatistics)
 		api.GET("/equity-history", s.handleEquityHistory)
 		api.GET("/performance", s.handlePerformance)
+		api.GET("/strategy/symbols", s.handleStrategySymbols)
+		api.GET("/strategy/signals", s.handleStrategySignals)
+		api.GET("/market/klines", s.handleMarketKlines)
 	}
 }
 
@@ -128,9 +132,10 @@ func (s *Server) handleTraderList(c *gin.Context) {
 
 	for _, t := range traders {
 		result = append(result, map[string]interface{}{
-			"trader_id":   t.GetID(),
-			"trader_name": t.GetName(),
-			"ai_model":    t.GetAIModel(),
+			"trader_id":     t.GetID(),
+			"trader_name":   t.GetName(),
+			"ai_model":      t.GetAIModel(),
+			"decision_mode": t.GetDecisionMode(),
 		})
 	}
 
@@ -211,6 +216,101 @@ func (s *Server) handlePositions(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, positions)
+}
+
+func (s *Server) handleStrategySymbols(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	symbols, err := s.traderManager.GetStrategySymbols(traderID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"trader_id": traderID,
+		"symbols":   symbols,
+	})
+}
+
+func (s *Server) handleStrategySignals(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	symbol := strings.TrimSpace(c.Query("symbol"))
+	if symbol == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "symbol不能为空"})
+		return
+	}
+	report, err := s.traderManager.GetLatestStrategySignals(traderID, symbol)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, report)
+}
+
+type marketKlineDTO struct {
+	OpenTime  int64   `json:"open_time"`
+	CloseTime int64   `json:"close_time"`
+	Open      float64 `json:"open"`
+	High      float64 `json:"high"`
+	Low       float64 `json:"low"`
+	Close     float64 `json:"close"`
+	Volume    float64 `json:"volume"`
+}
+
+func (s *Server) handleMarketKlines(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	symbol := strings.TrimSpace(c.Query("symbol"))
+	if symbol == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "symbol不能为空"})
+		return
+	}
+	timeframe := strings.TrimSpace(c.DefaultQuery("timeframe", "1h"))
+	limit := parsePositiveInt(c.DefaultQuery("limit", "240"), 240)
+	if limit > 1000 {
+		limit = 1000
+	}
+	klines, err := s.traderManager.GetMarketKlines(traderID, symbol, timeframe, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取K线失败: %v", err)})
+		return
+	}
+	response := make([]marketKlineDTO, 0, len(klines))
+	for _, k := range klines {
+		response = append(response, marketKlineDTO{
+			OpenTime:  k.OpenTime,
+			CloseTime: k.CloseTime,
+			Open:      k.Open,
+			High:      k.High,
+			Low:       k.Low,
+			Close:     k.Close,
+			Volume:    k.Volume,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"symbol":    symbol,
+		"timeframe": timeframe,
+		"limit":     limit,
+		"klines":    response,
+	})
+}
+
+func parsePositiveInt(value string, fallback int) int {
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
 }
 
 // handleDecisions 决策日志列表

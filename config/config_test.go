@@ -269,6 +269,81 @@ func TestNormalizeStrategyRisk_LegacyPreservesExistingBehavior(t *testing.T) {
 	}
 }
 
+func TestNormalizeProgrammaticStrategies_DefaultAI(t *testing.T) {
+	cfg := validConfig()
+	profiles, err := cfg.NormalizeProgrammaticStrategies()
+	if err != nil {
+		t.Fatalf("默认AI模式不应失败: %v", err)
+	}
+	profile := profiles["trader1"]
+	if profile.DecisionMode != DecisionModeAI {
+		t.Fatalf("缺省decision_mode应为ai: %+v", profile)
+	}
+}
+
+func TestNormalizeProgrammaticStrategies_ProgrammaticDefaults(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].DecisionMode = DecisionModeProgrammatic
+	cfg.Traders[0].AIModel = ""
+	cfg.Traders[0].DeepSeekKey = ""
+	cfg.Traders[0].ProgrammaticStrategy.SymbolPool = ProgrammaticSymbolPoolConfig{
+		Mode:    "override",
+		Symbols: []string{"btc", "ETHUSDT"},
+	}
+
+	profiles, err := cfg.NormalizeProgrammaticStrategies()
+	if err != nil {
+		t.Fatalf("合法programmatic配置不应失败: %v", err)
+	}
+	profile := profiles["trader1"]
+	if profile.DecisionMode != DecisionModeProgrammatic {
+		t.Fatalf("decision_mode错误: %+v", profile)
+	}
+	if profile.Timeframes.Higher != "4h" || profile.Timeframes.Trade != "1h" || profile.Timeframes.Sub != "15m" || profile.Timeframes.Micro != "3m" {
+		t.Fatalf("默认timeframe错误: %+v", profile.Timeframes)
+	}
+	if profile.HistoryDepth.M3 != 240 || profile.HistoryDepth.M15 != 192 || profile.HistoryDepth.H1 != 240 || profile.HistoryDepth.H4 != 180 {
+		t.Fatalf("默认history depth错误: %+v", profile.HistoryDepth)
+	}
+	if profile.MovingAverage.ShortPeriod != 20 || profile.MovingAverage.LongPeriod != 50 {
+		t.Fatalf("默认均线周期错误: %+v", profile.MovingAverage)
+	}
+	if profile.SymbolPool.Mode != "override" || len(profile.SymbolPool.Symbols) != 2 || profile.SymbolPool.Symbols[0] != "BTCUSDT" {
+		t.Fatalf("symbol pool归一化错误: %+v", profile.SymbolPool)
+	}
+	if profile.ConfigHash == "" {
+		t.Fatal("programmatic profile应生成config hash")
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("programmatic模式不应要求AI key: %v", err)
+	}
+}
+
+func TestNormalizeProgrammaticStrategies_InvalidValues(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*TraderConfig)
+	}{
+		{name: "bad mode", mutate: func(t *TraderConfig) { t.ProgrammaticStrategy.SymbolPool.Mode = "bad" }},
+		{name: "bad timeframe", mutate: func(t *TraderConfig) { t.ProgrammaticStrategy.Timeframes.Trade = "5m" }},
+		{name: "bad ma", mutate: func(t *TraderConfig) {
+			t.ProgrammaticStrategy.MovingAverage.ShortPeriod = 60
+			t.ProgrammaticStrategy.MovingAverage.LongPeriod = 20
+		}},
+		{name: "bad symbol", mutate: func(t *TraderConfig) { t.ProgrammaticStrategy.SymbolPool.Symbols = []string{"bad symbol"} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Traders[0].DecisionMode = DecisionModeProgrammatic
+			tt.mutate(&cfg.Traders[0])
+			if _, err := cfg.NormalizeProgrammaticStrategies(); err == nil {
+				t.Fatal("非法programmatic配置应失败")
+			}
+		})
+	}
+}
+
 func TestNormalizeStrategyRisk_DefaultBlockDerivesStrictProfiles(t *testing.T) {
 	cfg := validConfig()
 	cfg.StrategyRisk = &StrategyRiskConfig{}

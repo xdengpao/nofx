@@ -30,10 +30,11 @@ type Data struct {
 	OpenInterest      *OIData
 	OIValueUSD        float64 // 新增：OI价值（USD）
 	FundingRate       float64
-	IntradaySeries    *IntradayData   // 3分钟数据 - 实时价格
-	MidTermSeries15m  *MidTermData15m // 15分钟数据 - 短期趋势
-	MidTermSeries1h   *MidTermData1h  // 1小时数据 - 中期趋势
-	LongerTermContext *LongerTermData // 4小时数据 - 长期趋势
+	IntradaySeries    *IntradayData      // 3分钟数据 - 实时价格
+	MidTermSeries15m  *MidTermData15m    // 15分钟数据 - 短期趋势
+	MidTermSeries1h   *MidTermData1h     // 1小时数据 - 中期趋势
+	LongerTermContext *LongerTermData    // 4小时数据 - 长期趋势
+	Klines            map[string][]Kline `json:"-"` // 策略内部使用的完整K线序列
 }
 
 // OIData Open Interest数据（优化版）
@@ -59,6 +60,9 @@ type IntradayData struct {
 	RSI7Values  []float64
 	RSI14Values []float64
 	ATRValues   []float64 // 新增：ATR序列
+	ADXValues   []float64 // 可选：3m ADX序列
+	DIPlus      []float64 // 可选：3m DI+
+	DIMinus     []float64 // 可选：3m DI-
 }
 
 // MidTermData15m 15分钟时间框架数据 - 短期趋势过滤
@@ -134,6 +138,19 @@ type Kline struct {
 	Close     float64
 	Volume    float64
 	CloseTime int64
+}
+
+type HistoryDepth struct {
+	M3  int
+	M15 int
+	H1  int
+	H4  int
+}
+
+type HistoryOptions struct {
+	Depth           HistoryDepth
+	ClosedOnly      bool
+	IncludeMicroADX bool
 }
 
 type DirectionalIndicatorSnapshot struct {
@@ -212,79 +229,9 @@ func Get(symbol string) (*Data, error) {
 		return nil, fmt.Errorf("获取4小时K线失败: %v", err4h)
 	}
 
-	// 计算当前指标 (基于3分钟最新数据)
-	currentPrice := klines3m[len(klines3m)-1].Close
-	currentEMA20 := calculateEMA(klines3m, 20)
-	currentEMA50 := calculateEMA(klines3m, 50)
-	macdLine, macdSignal, _ := calculateMACDFull(klines3m)
-	currentMACD := macdLine
-	currentRSI7 := calculateRSI(klines3m, 7)
-	currentRSI14 := calculateRSI(klines3m, 14)
-
-	// 计算ADX和DI（基于4小时数据）
-	currentADX, currentDIPlus, currentDIMinus := calculateADX(klines4h, 14)
-
-	// 计算布林带宽度
-	bollingerUpper, bollingerLower, bollingerWidth := calculateBollingerBands(klines4h, 20, 2.0)
-	_ = bollingerUpper
-	_ = bollingerLower
-
-	// 计算价格变化百分比
-	priceChange1h := 0.0
-	if len(klines3m) >= 21 {
-		price1hAgo := klines3m[len(klines3m)-21].Close
-		if price1hAgo > 0 {
-			priceChange1h = ((currentPrice - price1hAgo) / price1hAgo) * 100
-		}
-	}
-
-	priceChange4h := 0.0
-	if len(klines4h) >= 2 {
-		price4hAgo := klines4h[len(klines4h)-2].Close
-		if price4hAgo > 0 {
-			priceChange4h = ((currentPrice - price4hAgo) / price4hAgo) * 100
-		}
-	}
-
-	// 获取OI数据（优化版）
-	oiData, err := getOpenInterestDataEnhanced(symbol)
+	data, err := buildDataFromKlines(symbol, klines3m, klines15m, klines1h, klines4h, 10, false)
 	if err != nil {
-		oiData = &OIData{Latest: 0, Average: 0}
-	}
-
-	// 计算OI价值（USD）
-	oiValueUSD := oiData.Latest * currentPrice
-
-	// 获取Funding Rate
-	fundingRate, _ := getFundingRate(symbol)
-
-	// 计算各时间框架数据
-	intradayData := calculateIntradaySeriesEnhanced(klines3m)
-	midTermData15m := calculateMidTermSeries15mEnhanced(klines15m)
-	midTermData1h := calculateMidTermSeries1hEnhanced(klines1h)
-	longerTermData := calculateLongerTermDataEnhanced(klines4h)
-
-	data := &Data{
-		Symbol:            symbol,
-		CurrentPrice:      currentPrice,
-		PriceChange1h:     priceChange1h,
-		PriceChange4h:     priceChange4h,
-		CurrentEMA20:      currentEMA20,
-		CurrentEMA50:      currentEMA50,
-		CurrentMACD:       currentMACD,
-		CurrentRSI7:       currentRSI7,
-		CurrentRSI14:      currentRSI14,
-		CurrentADX:        currentADX,
-		CurrentDIPlus:     currentDIPlus,
-		CurrentDIMinus:    currentDIMinus,
-		BollingerWidth:    bollingerWidth,
-		OpenInterest:      oiData,
-		OIValueUSD:        oiValueUSD,
-		FundingRate:       fundingRate,
-		IntradaySeries:    intradayData,
-		MidTermSeries15m:  midTermData15m,
-		MidTermSeries1h:   midTermData1h,
-		LongerTermContext: longerTermData,
+		return nil, err
 	}
 
 	// 更新缓存
@@ -295,10 +242,176 @@ func Get(symbol string) (*Data, error) {
 	}
 	dataCacheLock.Unlock()
 
-	// 补充MACD信号线
-	_ = macdSignal
-
 	return data, nil
+}
+
+func GetWithHistory(symbol string, opts HistoryOptions) (*Data, error) {
+	symbol = Normalize(symbol)
+	depth := normalizeHistoryDepth(opts.Depth)
+
+	var wg sync.WaitGroup
+	var klines3m, klines15m, klines1h, klines4h []Kline
+	var err3m, err15m, err1h, err4h error
+
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		klines3m, err3m = GetKlines(symbol, "3m", depth.M3, opts.ClosedOnly)
+	}()
+	go func() {
+		defer wg.Done()
+		klines15m, err15m = GetKlines(symbol, "15m", depth.M15, opts.ClosedOnly)
+	}()
+	go func() {
+		defer wg.Done()
+		klines1h, err1h = GetKlines(symbol, "1h", depth.H1, opts.ClosedOnly)
+	}()
+	go func() {
+		defer wg.Done()
+		klines4h, err4h = GetKlines(symbol, "4h", depth.H4, opts.ClosedOnly)
+	}()
+	wg.Wait()
+
+	if err3m != nil {
+		return nil, fmt.Errorf("获取3分钟K线失败: %v", err3m)
+	}
+	if err15m != nil {
+		return nil, fmt.Errorf("获取15分钟K线失败: %v", err15m)
+	}
+	if err1h != nil {
+		return nil, fmt.Errorf("获取1小时K线失败: %v", err1h)
+	}
+	if err4h != nil {
+		return nil, fmt.Errorf("获取4小时K线失败: %v", err4h)
+	}
+
+	data, err := buildDataFromKlines(symbol, klines3m, klines15m, klines1h, klines4h, 0, opts.IncludeMicroADX)
+	if err != nil {
+		return nil, err
+	}
+	data.Klines = map[string][]Kline{
+		"3m":  append([]Kline(nil), klines3m...),
+		"15m": append([]Kline(nil), klines15m...),
+		"1h":  append([]Kline(nil), klines1h...),
+		"4h":  append([]Kline(nil), klines4h...),
+	}
+	return data, nil
+}
+
+func GetKlines(symbol, timeframe string, limit int, closedOnly bool) ([]Kline, error) {
+	if !isSupportedTimeframe(timeframe) {
+		return nil, fmt.Errorf("不支持的K线周期: %s", timeframe)
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	klines, err := getKlines(Normalize(symbol), timeframe, limit)
+	if err != nil {
+		return nil, err
+	}
+	if closedOnly {
+		klines = FilterClosedKlines(klines, time.Now())
+	}
+	return klines, nil
+}
+
+func FilterClosedKlines(klines []Kline, now time.Time) []Kline {
+	nowMillis := now.UnixMilli()
+	filtered := make([]Kline, 0, len(klines))
+	for _, k := range klines {
+		if k.CloseTime <= nowMillis {
+			filtered = append(filtered, k)
+		}
+	}
+	return filtered
+}
+
+func CalculateADXSeries(klines []Kline, period int) (adxSeries, diPlusSeries, diMinusSeries []float64) {
+	return calculateADXSeries(klines, period)
+}
+
+func normalizeHistoryDepth(depth HistoryDepth) HistoryDepth {
+	if depth.M3 <= 0 {
+		depth.M3 = 240
+	}
+	if depth.M15 <= 0 {
+		depth.M15 = 192
+	}
+	if depth.H1 <= 0 {
+		depth.H1 = 240
+	}
+	if depth.H4 <= 0 {
+		depth.H4 = 180
+	}
+	return depth
+}
+
+func isSupportedTimeframe(timeframe string) bool {
+	switch timeframe {
+	case "3m", "15m", "1h", "4h":
+		return true
+	default:
+		return false
+	}
+}
+
+func buildDataFromKlines(symbol string, klines3m, klines15m, klines1h, klines4h []Kline, seriesLimit int, includeMicroADX bool) (*Data, error) {
+	if len(klines3m) == 0 || len(klines15m) == 0 || len(klines1h) == 0 || len(klines4h) == 0 {
+		return nil, fmt.Errorf("K线数据不足")
+	}
+
+	currentPrice := klines3m[len(klines3m)-1].Close
+	currentEMA20 := calculateEMA(klines3m, 20)
+	currentEMA50 := calculateEMA(klines3m, 50)
+	macdLine, _, _ := calculateMACDFull(klines3m)
+	currentRSI7 := calculateRSI(klines3m, 7)
+	currentRSI14 := calculateRSI(klines3m, 14)
+	currentADX, currentDIPlus, currentDIMinus := calculateADX(klines4h, 14)
+	_, _, bollingerWidth := calculateBollingerBands(klines4h, 20, 2.0)
+
+	priceChange1h := 0.0
+	if len(klines3m) >= 21 {
+		price1hAgo := klines3m[len(klines3m)-21].Close
+		if price1hAgo > 0 {
+			priceChange1h = ((currentPrice - price1hAgo) / price1hAgo) * 100
+		}
+	}
+	priceChange4h := 0.0
+	if len(klines4h) >= 2 {
+		price4hAgo := klines4h[len(klines4h)-2].Close
+		if price4hAgo > 0 {
+			priceChange4h = ((currentPrice - price4hAgo) / price4hAgo) * 100
+		}
+	}
+
+	oiData, err := getOpenInterestDataEnhanced(symbol)
+	if err != nil {
+		oiData = &OIData{Latest: 0, Average: 0}
+	}
+	fundingRate, _ := getFundingRate(symbol)
+
+	return &Data{
+		Symbol:            symbol,
+		CurrentPrice:      currentPrice,
+		PriceChange1h:     priceChange1h,
+		PriceChange4h:     priceChange4h,
+		CurrentEMA20:      currentEMA20,
+		CurrentEMA50:      currentEMA50,
+		CurrentMACD:       macdLine,
+		CurrentRSI7:       currentRSI7,
+		CurrentRSI14:      currentRSI14,
+		CurrentADX:        currentADX,
+		CurrentDIPlus:     currentDIPlus,
+		CurrentDIMinus:    currentDIMinus,
+		BollingerWidth:    bollingerWidth,
+		OpenInterest:      oiData,
+		OIValueUSD:        oiData.Latest * currentPrice,
+		FundingRate:       fundingRate,
+		IntradaySeries:    calculateIntradaySeriesEnhancedWithLimit(klines3m, seriesLimit, includeMicroADX, 14),
+		MidTermSeries15m:  calculateMidTermSeries15mEnhancedWithLimit(klines15m, seriesLimit),
+		MidTermSeries1h:   calculateMidTermSeries1hEnhancedWithLimit(klines1h, seriesLimit),
+		LongerTermContext: calculateLongerTermDataEnhancedWithLimit(klines4h, seriesLimit),
+	}, nil
 }
 
 // getKlines 从Binance获取K线数据
@@ -810,26 +923,30 @@ func getFundingRate(symbol string) (float64, error) {
 
 // calculateIntradaySeriesEnhanced 计算增强版日内系列数据
 func calculateIntradaySeriesEnhanced(klines []Kline) *IntradayData {
+	return calculateIntradaySeriesEnhancedWithLimit(klines, 10, false, 14)
+}
+
+func calculateIntradaySeriesEnhancedWithLimit(klines []Kline, limit int, includeADX bool, adxPeriod int) *IntradayData {
+	capacity := seriesCapacity(klines, limit)
 	data := &IntradayData{
-		MidPrices:   make([]float64, 0, 10),
-		HighPrices:  make([]float64, 0, 10),
-		LowPrices:   make([]float64, 0, 10),
-		Volumes:     make([]float64, 0, 10),
-		EMA20Values: make([]float64, 0, 10),
-		EMA50Values: make([]float64, 0, 10),
-		MACDValues:  make([]float64, 0, 10),
-		MACDSignal:  make([]float64, 0, 10),
-		MACDHist:    make([]float64, 0, 10),
-		RSI7Values:  make([]float64, 0, 10),
-		RSI14Values: make([]float64, 0, 10),
-		ATRValues:   make([]float64, 0, 10),
+		MidPrices:   make([]float64, 0, capacity),
+		HighPrices:  make([]float64, 0, capacity),
+		LowPrices:   make([]float64, 0, capacity),
+		Volumes:     make([]float64, 0, capacity),
+		EMA20Values: make([]float64, 0, capacity),
+		EMA50Values: make([]float64, 0, capacity),
+		MACDValues:  make([]float64, 0, capacity),
+		MACDSignal:  make([]float64, 0, capacity),
+		MACDHist:    make([]float64, 0, capacity),
+		RSI7Values:  make([]float64, 0, capacity),
+		RSI14Values: make([]float64, 0, capacity),
+		ATRValues:   make([]float64, 0, capacity),
+		ADXValues:   make([]float64, 0, capacity),
+		DIPlus:      make([]float64, 0, capacity),
+		DIMinus:     make([]float64, 0, capacity),
 	}
 
-	start := len(klines) - 10
-	if start < 0 {
-		start = 0
-	}
-
+	start := seriesStart(klines, limit)
 	for i := start; i < len(klines); i++ {
 		data.MidPrices = append(data.MidPrices, klines[i].Close)
 		data.HighPrices = append(data.HighPrices, klines[i].High)
@@ -863,6 +980,12 @@ func calculateIntradaySeriesEnhanced(klines []Kline) *IntradayData {
 			atr := calculateATR(klines[:i+1], 14)
 			data.ATRValues = append(data.ATRValues, atr)
 		}
+		if includeADX && i >= adxPeriod*2 {
+			adx, diPlus, diMinus := calculateADX(klines[:i+1], adxPeriod)
+			data.ADXValues = append(data.ADXValues, adx)
+			data.DIPlus = append(data.DIPlus, diPlus)
+			data.DIMinus = append(data.DIMinus, diMinus)
+		}
 	}
 
 	return data
@@ -870,30 +993,31 @@ func calculateIntradaySeriesEnhanced(klines []Kline) *IntradayData {
 
 // calculateMidTermSeries15mEnhanced 计算增强版15分钟系列数据
 func calculateMidTermSeries15mEnhanced(klines []Kline) *MidTermData15m {
+	return calculateMidTermSeries15mEnhancedWithLimit(klines, 10)
+}
+
+func calculateMidTermSeries15mEnhancedWithLimit(klines []Kline, limit int) *MidTermData15m {
+	capacity := seriesCapacity(klines, limit)
 	data := &MidTermData15m{
-		MidPrices:   make([]float64, 0, 10),
-		HighPrices:  make([]float64, 0, 10),
-		LowPrices:   make([]float64, 0, 10),
-		Volumes:     make([]float64, 0, 10),
-		EMA20Values: make([]float64, 0, 10),
-		EMA50Values: make([]float64, 0, 10),
-		MACDValues:  make([]float64, 0, 10),
-		MACDSignal:  make([]float64, 0, 10),
-		MACDHist:    make([]float64, 0, 10),
-		RSI7Values:  make([]float64, 0, 10),
-		RSI14Values: make([]float64, 0, 10),
-		ADXValues:   make([]float64, 0, 10),
-		ADXLegacyDX: make([]float64, 0, 10),
-		DIPlus:      make([]float64, 0, 10),
-		DIMinus:     make([]float64, 0, 10),
-		ATRValues:   make([]float64, 0, 10),
+		MidPrices:   make([]float64, 0, capacity),
+		HighPrices:  make([]float64, 0, capacity),
+		LowPrices:   make([]float64, 0, capacity),
+		Volumes:     make([]float64, 0, capacity),
+		EMA20Values: make([]float64, 0, capacity),
+		EMA50Values: make([]float64, 0, capacity),
+		MACDValues:  make([]float64, 0, capacity),
+		MACDSignal:  make([]float64, 0, capacity),
+		MACDHist:    make([]float64, 0, capacity),
+		RSI7Values:  make([]float64, 0, capacity),
+		RSI14Values: make([]float64, 0, capacity),
+		ADXValues:   make([]float64, 0, capacity),
+		ADXLegacyDX: make([]float64, 0, capacity),
+		DIPlus:      make([]float64, 0, capacity),
+		DIMinus:     make([]float64, 0, capacity),
+		ATRValues:   make([]float64, 0, capacity),
 	}
 
-	start := len(klines) - 10
-	if start < 0 {
-		start = 0
-	}
-
+	start := seriesStart(klines, limit)
 	for i := start; i < len(klines); i++ {
 		data.MidPrices = append(data.MidPrices, klines[i].Close)
 		data.HighPrices = append(data.HighPrices, klines[i].High)
@@ -943,30 +1067,31 @@ func calculateMidTermSeries15mEnhanced(klines []Kline) *MidTermData15m {
 
 // calculateMidTermSeries1hEnhanced 计算增强版1小时系列数据
 func calculateMidTermSeries1hEnhanced(klines []Kline) *MidTermData1h {
+	return calculateMidTermSeries1hEnhancedWithLimit(klines, 10)
+}
+
+func calculateMidTermSeries1hEnhancedWithLimit(klines []Kline, limit int) *MidTermData1h {
+	capacity := seriesCapacity(klines, limit)
 	data := &MidTermData1h{
-		MidPrices:   make([]float64, 0, 10),
-		HighPrices:  make([]float64, 0, 10),
-		LowPrices:   make([]float64, 0, 10),
-		Volumes:     make([]float64, 0, 10),
-		EMA20Values: make([]float64, 0, 10),
-		EMA50Values: make([]float64, 0, 10),
-		MACDValues:  make([]float64, 0, 10),
-		MACDSignal:  make([]float64, 0, 10),
-		MACDHist:    make([]float64, 0, 10),
-		RSI7Values:  make([]float64, 0, 10),
-		RSI14Values: make([]float64, 0, 10),
-		ADXValues:   make([]float64, 0, 10),
-		ADXLegacyDX: make([]float64, 0, 10),
-		DIPlus:      make([]float64, 0, 10),
-		DIMinus:     make([]float64, 0, 10),
-		ATRValues:   make([]float64, 0, 10),
+		MidPrices:   make([]float64, 0, capacity),
+		HighPrices:  make([]float64, 0, capacity),
+		LowPrices:   make([]float64, 0, capacity),
+		Volumes:     make([]float64, 0, capacity),
+		EMA20Values: make([]float64, 0, capacity),
+		EMA50Values: make([]float64, 0, capacity),
+		MACDValues:  make([]float64, 0, capacity),
+		MACDSignal:  make([]float64, 0, capacity),
+		MACDHist:    make([]float64, 0, capacity),
+		RSI7Values:  make([]float64, 0, capacity),
+		RSI14Values: make([]float64, 0, capacity),
+		ADXValues:   make([]float64, 0, capacity),
+		ADXLegacyDX: make([]float64, 0, capacity),
+		DIPlus:      make([]float64, 0, capacity),
+		DIMinus:     make([]float64, 0, capacity),
+		ATRValues:   make([]float64, 0, capacity),
 	}
 
-	start := len(klines) - 10
-	if start < 0 {
-		start = 0
-	}
-
+	start := seriesStart(klines, limit)
 	for i := start; i < len(klines); i++ {
 		data.MidPrices = append(data.MidPrices, klines[i].Close)
 		data.HighPrices = append(data.HighPrices, klines[i].High)
@@ -1016,15 +1141,20 @@ func calculateMidTermSeries1hEnhanced(klines []Kline) *MidTermData1h {
 
 // calculateLongerTermDataEnhanced 计算增强版长期数据
 func calculateLongerTermDataEnhanced(klines []Kline) *LongerTermData {
+	return calculateLongerTermDataEnhancedWithLimit(klines, 10)
+}
+
+func calculateLongerTermDataEnhancedWithLimit(klines []Kline, limit int) *LongerTermData {
+	capacity := seriesCapacity(klines, limit)
 	data := &LongerTermData{
-		MACDValues:  make([]float64, 0, 10),
-		MACDSignal:  make([]float64, 0, 10),
-		MACDHist:    make([]float64, 0, 10),
-		RSI14Values: make([]float64, 0, 10),
-		ADXValues:   make([]float64, 0, 10),
-		ADXLegacyDX: make([]float64, 0, 10),
-		DIPlus:      make([]float64, 0, 10),
-		DIMinus:     make([]float64, 0, 10),
+		MACDValues:  make([]float64, 0, capacity),
+		MACDSignal:  make([]float64, 0, capacity),
+		MACDHist:    make([]float64, 0, capacity),
+		RSI14Values: make([]float64, 0, capacity),
+		ADXValues:   make([]float64, 0, capacity),
+		ADXLegacyDX: make([]float64, 0, capacity),
+		DIPlus:      make([]float64, 0, capacity),
+		DIMinus:     make([]float64, 0, capacity),
 	}
 
 	// 计算EMA
@@ -1059,11 +1189,7 @@ func calculateLongerTermDataEnhanced(klines []Kline) *LongerTermData {
 	}
 
 	// 计算序列指标
-	start := len(klines) - 10
-	if start < 0 {
-		start = 0
-	}
-
+	start := seriesStart(klines, limit)
 	for i := start; i < len(klines); i++ {
 		if i >= 34 {
 			macdLine, signalLine, hist := calculateMACDFull(klines[:i+1])
@@ -1086,6 +1212,20 @@ func calculateLongerTermDataEnhanced(klines []Kline) *LongerTermData {
 	}
 
 	return data
+}
+
+func seriesStart(klines []Kline, limit int) int {
+	if limit <= 0 || limit >= len(klines) {
+		return 0
+	}
+	return len(klines) - limit
+}
+
+func seriesCapacity(klines []Kline, limit int) int {
+	if limit <= 0 || limit > len(klines) {
+		return len(klines)
+	}
+	return limit
 }
 
 // Format 格式化输出市场数据（优化版）
