@@ -171,7 +171,8 @@ export function StrategyCandlestickChart({
                       key={`${marker.signal_id}-${marker.status}-${markerIndex}`}
                       marker={marker}
                       x={x}
-                      y={markerY(marker, kline, chart.priceToY, markerIndex)}
+                      y={markerY(marker, kline, chart.priceToY, markerStackIndex(rowMarkers, markerIndex))}
+                      placement={markerPlacement(marker)}
                       onMouseMove={(event) => updateHover(event, kline, rowMarkers)}
                     />
                   ))}
@@ -247,11 +248,13 @@ function MarkerGlyph({
   marker,
   x,
   y,
+  placement,
   onMouseMove,
 }: {
   marker: SignalMarker;
   x: number;
   y: number;
+  placement: 'buy' | 'sell';
   onMouseMove: (event: MouseEvent) => void;
 }) {
   const label = markerDisplayLabel(marker);
@@ -271,6 +274,11 @@ function MarkerGlyph({
   return (
     <g transform={`translate(${x}, ${y})`} onMouseMove={onMouseMove}>
       <title>{title}</title>
+      <path
+        d={placement === 'buy' ? 'M -5 -10 L 5 -10 L 0 -16 Z' : 'M -5 10 L 5 10 L 0 16 Z'}
+        fill={fill}
+        opacity={0.95}
+      />
       <rect
         x={-textWidth / 2}
         y={-10}
@@ -290,14 +298,41 @@ function MarkerGlyph({
 }
 
 function markerY(marker: SignalMarker, kline: MarketKline, priceToY: (price: number) => number, index: number) {
-  const signalType = (marker.signal_type || '').toLowerCase();
-  const isBuy = signalType.startsWith('buy') || marker.direction === 'long';
-  const rawY = marker.price && marker.price > 0
-    ? priceToY(marker.price)
-    : isBuy
-      ? priceToY(kline.low) + 18 + index * 18
-      : priceToY(kline.high) - 18 - index * 18;
+  const placement = markerPlacement(marker);
+  const offset = 22 + index * 24;
+  const rawY = placement === 'buy'
+    ? priceToY(kline.low) + offset
+    : priceToY(kline.high) - offset;
   return Math.max(topPad + 10, Math.min(chartHeight - bottomPad - 8, rawY));
+}
+
+function markerStackIndex(markers: SignalMarker[], markerIndex: number) {
+  const placement = markerPlacement(markers[markerIndex]);
+  return markers
+    .slice(0, markerIndex)
+    .filter((marker) => markerPlacement(marker) === placement)
+    .length;
+}
+
+function markerPlacement(marker: SignalMarker): 'buy' | 'sell' {
+  const signalType = (marker.signal_type || '').toLowerCase();
+  if (signalType.startsWith('buy')) return 'buy';
+  if (signalType.startsWith('sell')) return 'sell';
+
+  switch (resolveTradeIntent(marker)) {
+    case 'open_long':
+    case 'add_long':
+    case 'reduce_short':
+    case 'close_short':
+      return 'buy';
+    case 'open_short':
+    case 'add_short':
+    case 'reduce_long':
+    case 'close_long':
+      return 'sell';
+    default:
+      return marker.direction === 'short' ? 'sell' : 'buy';
+  }
 }
 
 function LegendSwatch({ color, label }: { color: string; label: string }) {
