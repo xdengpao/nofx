@@ -89,4 +89,4 @@
 - [x] 运行 `cd web && npm run test`。
 - [x] 运行 `cd web && npm run build`。
 - [ ] 手动检查历史成交表：部分平仓标签、估算/待对账状态、原因展示、CSV 导出。
-- [ ] 若后续执行部署，验证 161 `/api/performance?trader_id=aster_deepseek` 中旧 partial close 日志能出现在 `recent_trade_events`。
+- [x] 若后续执行部署，验证 161 `/api/performance?trader_id=aster_deepseek` 中旧 partial close 日志能出现在 `recent_trade_events`。
