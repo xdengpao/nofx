@@ -35,12 +35,18 @@ test_*
 docs/
 
 # Runtime data
+data/
+backups/
 decision_logs/
 coin_pool_cache/
 *.log
+config.json.bak*
+*.bak
 
 # Config files (should be mounted)
 config.json
+.env
+.env.*
 
 # Web build artifacts (but include source for multi-stage build)
 web/node_modules/
