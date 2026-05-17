@@ -81,9 +81,32 @@ const (
 	DefaultTotalRiskBudget   = 0.08
 	DefaultAnalysisInterval  = 15
 	defaultAIBackoffInterval = time.Minute
+
+	DefaultMarketKlineLimit = 240
+	MaxMarketKlineLimit     = 1000
 )
 
 var getMarketData = market.Get
+
+var marketKlineFetcher = market.GetKlines
+
+type MarketKlineLimitResolution struct {
+	Limit           int
+	ConfiguredLimit int
+	LimitSource     string
+}
+
+func SetMarketKlineFetcherForTest(fetcher func(symbol, timeframe string, limit int, closedOnly bool) ([]market.Kline, error)) func() {
+	previous := marketKlineFetcher
+	if fetcher == nil {
+		marketKlineFetcher = market.GetKlines
+	} else {
+		marketKlineFetcher = fetcher
+	}
+	return func() {
+		marketKlineFetcher = previous
+	}
+}
 
 // PositionSnapshot 持仓快照（用于检测自动平仓）
 type PositionSnapshot struct {
@@ -2618,7 +2641,56 @@ func (at *AutoTrader) GetLatestStrategySignals(symbol string) (*chanlun.SignalRe
 
 // GetMarketKlines 返回闭合 K 线，供策略检查区使用。
 func (at *AutoTrader) GetMarketKlines(symbol, timeframe string, limit int) ([]market.Kline, error) {
-	return market.GetKlines(symbol, timeframe, limit, true)
+	return marketKlineFetcher(symbol, timeframe, limit, true)
+}
+
+func (at *AutoTrader) ResolveMarketKlineLimit(timeframe string, explicitLimit int) MarketKlineLimitResolution {
+	if explicitLimit > 0 {
+		source := "query"
+		limit := explicitLimit
+		if limit > MaxMarketKlineLimit {
+			limit = MaxMarketKlineLimit
+			source = "query_capped"
+		}
+		return MarketKlineLimitResolution{Limit: limit, ConfiguredLimit: limit, LimitSource: source}
+	}
+
+	if at != nil && at.config.DecisionMode == "programmatic" {
+		if configured, ok := at.programmaticHistoryDepthForTimeframe(timeframe); ok && configured > 0 {
+			source := "programmatic_history_depth"
+			limit := configured
+			if limit > MaxMarketKlineLimit {
+				limit = MaxMarketKlineLimit
+				source = "programmatic_history_depth_capped"
+			}
+			return MarketKlineLimitResolution{Limit: limit, ConfiguredLimit: configured, LimitSource: source}
+		}
+	}
+
+	return MarketKlineLimitResolution{
+		Limit:           DefaultMarketKlineLimit,
+		ConfiguredLimit: 0,
+		LimitSource:     "default",
+	}
+}
+
+func (at *AutoTrader) programmaticHistoryDepthForTimeframe(timeframe string) (int, bool) {
+	if at == nil {
+		return 0, false
+	}
+	depth := at.config.ProgrammaticStrategyPolicy.HistoryDepth
+	switch strings.ToLower(strings.TrimSpace(timeframe)) {
+	case "3m":
+		return depth.M3, depth.M3 > 0
+	case "15m":
+		return depth.M15, depth.M15 > 0
+	case "1h":
+		return depth.H1, depth.H1 > 0
+	case "4h":
+		return depth.H4, depth.H4 > 0
+	default:
+		return 0, false
+	}
 }
 
 // GetStatus 获取系统状态（用于API）

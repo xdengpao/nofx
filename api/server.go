@@ -280,11 +280,16 @@ func (s *Server) handleMarketKlines(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "timeframe仅支持3m、15m、1h或4h"})
 		return
 	}
-	limit := parsePositiveInt(c.DefaultQuery("limit", "240"), 240)
-	if limit > 1000 {
-		limit = 1000
+	explicitLimit := 0
+	if rawLimit := strings.TrimSpace(c.Query("limit")); rawLimit != "" {
+		explicitLimit = parsePositiveInt(rawLimit, 240)
 	}
-	klines, err := s.traderManager.GetMarketKlines(traderID, symbol, timeframe, limit)
+	limitResolution, err := s.traderManager.ResolveMarketKlineLimit(traderID, timeframe, explicitLimit)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	klines, err := s.traderManager.GetMarketKlines(traderID, symbol, timeframe, limitResolution.Limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取K线失败: %v", err)})
 		return
@@ -302,10 +307,12 @@ func (s *Server) handleMarketKlines(c *gin.Context) {
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"symbol":    symbol,
-		"timeframe": timeframe,
-		"limit":     limit,
-		"klines":    response,
+		"symbol":           symbol,
+		"timeframe":        timeframe,
+		"limit":            limitResolution.Limit,
+		"configured_limit": limitResolution.ConfiguredLimit,
+		"limit_source":     limitResolution.LimitSource,
+		"klines":           response,
 	})
 }
 

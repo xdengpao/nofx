@@ -132,12 +132,12 @@ export const api = {
     return res.json();
   },
 
-  async getMarketKlines(traderId: string | undefined, symbol: string, timeframe = '1h', limit = 120): Promise<MarketKlineResponse> {
+  async getMarketKlines(traderId: string | undefined, symbol: string, timeframe = '1h', limit?: number): Promise<MarketKlineResponse> {
     const params = new URLSearchParams();
     if (traderId) params.set('trader_id', traderId);
     params.set('symbol', symbol);
     params.set('timeframe', timeframe);
-    params.set('limit', String(limit));
+    if (typeof limit === 'number' && limit > 0) params.set('limit', String(limit));
     const res = await fetch(`${API_BASE}/market/klines?${params.toString()}`);
     if (!res.ok) throw new Error('获取K线数据失败');
     return res.json();

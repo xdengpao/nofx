@@ -231,7 +231,12 @@ func (e *Engine) markRejectedStrategyDecisions(ctx *decision.Context, candidates
 		if reason == "" {
 			reason = "程序化动作被验证层拒绝"
 		}
-		e.StateStore.UpdateSignalMarkerStatus(ctx.TraderID, market.Normalize(d.Symbol), d.SignalID, "rejected", reason)
+		if marker, ok := e.decisionToMarker(d, "rejected"); ok {
+			marker.Reason = reason
+			e.StateStore.StoreSignalMarker(ctx.TraderID, market.Normalize(d.Symbol), marker)
+		} else {
+			e.StateStore.UpdateSignalMarkerStatus(ctx.TraderID, market.Normalize(d.Symbol), d.SignalID, "rejected", reason)
+		}
 	}
 }
 
@@ -334,7 +339,8 @@ func (e *Engine) OnExecutionResult(result ProgrammaticExecutionResult) {
 		reason = d.Reasoning
 	}
 	if marker, ok := e.decisionToMarker(d, status); ok {
-		marker.Action = firstNonEmptyString(result.FinalAction, d.Action)
+		marker.FinalAction = result.FinalAction
+		marker.TradeIntent = deriveTradeIntent(marker.Action, marker.FinalAction, marker.PositionSide, marker.Direction)
 		marker.Reason = reason
 		e.StateStore.StoreSignalMarker(result.TraderID, symbol, marker)
 	}
@@ -689,6 +695,7 @@ func signalToMarker(signal ChanlunSignal, sourceLayer, status, action, reason st
 		Status:      status,
 		SignalID:    signal.SignalID,
 		Action:      action,
+		TradeIntent: deriveTradeIntent(action, "", "", signal.Direction),
 		Price:       signal.Price,
 		Reason:      reason,
 	}
@@ -725,24 +732,86 @@ func (e *Engine) decisionToMarker(d decision.Decision, status string) (SignalMar
 	if direction == "" {
 		direction = directionForAction(d.Action)
 	}
+	positionSide := derivePositionSide(d, "")
 	price := d.StopLoss
 	if d.Action == "update_stop_loss" {
 		price = d.NewStopLoss
 	}
 	return SignalMarker{
-		Symbol:      market.Normalize(d.Symbol),
-		Timeframe:   timeframe,
-		CloseTime:   closeTime,
-		SignalType:  signalType,
-		Direction:   direction,
-		Level:       timeframe,
-		SourceLayer: layer,
-		Status:      status,
-		SignalID:    d.SignalID,
-		Action:      d.Action,
-		Price:       price,
-		Reason:      d.Reasoning,
+		Symbol:       market.Normalize(d.Symbol),
+		Timeframe:    timeframe,
+		CloseTime:    closeTime,
+		SignalType:   signalType,
+		Direction:    direction,
+		Level:        timeframe,
+		SourceLayer:  layer,
+		Status:       status,
+		SignalID:     d.SignalID,
+		Action:       d.Action,
+		TradeIntent:  deriveTradeIntent(d.Action, "", positionSide, direction),
+		PositionSide: positionSide,
+		Price:        price,
+		Reason:       d.Reasoning,
 	}, true
+}
+
+func derivePositionSide(d decision.Decision, finalAction string) string {
+	if side := normalizeSide(metadataString(d.StrategyMetadata, "side")); side != "" {
+		return side
+	}
+	if side := normalizeSide(metadataString(d.StrategyMetadata, "position_side")); side != "" {
+		return side
+	}
+	if side := directionForAction(finalAction); side != "" {
+		return side
+	}
+	if side := directionForAction(d.Action); side != "" {
+		return side
+	}
+	if side := normalizeSide(d.SignalType); side != "" {
+		return side
+	}
+	return ""
+}
+
+func deriveTradeIntent(action, finalAction, positionSide, direction string) string {
+	effective := effectiveMarkerAction(action, finalAction)
+	switch effective {
+	case "open_long", "open_short", "add_long", "add_short", "close_long", "close_short":
+		return effective
+	case "partial_close_skipped":
+		return "reduce_skipped"
+	case "partial_close":
+		side := normalizeSide(positionSide)
+		if side == "" {
+			side = normalizeSide(direction)
+		}
+		switch side {
+		case SideLong:
+			return "reduce_long"
+		case SideShort:
+			return "reduce_short"
+		}
+	}
+	return ""
+}
+
+func effectiveMarkerAction(action, finalAction string) string {
+	if finalAction != "" {
+		return finalAction
+	}
+	return action
+}
+
+func normalizeSide(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case SideLong, "buy", "bull", "bullish":
+		return SideLong
+	case SideShort, "sell", "bear", "bearish":
+		return SideShort
+	default:
+		return ""
+	}
 }
 
 func metadataInt64(values map[string]any, key string) (int64, bool) {

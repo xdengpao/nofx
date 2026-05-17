@@ -10,6 +10,8 @@ import (
 	"nofx/config"
 	"nofx/logger"
 	"nofx/manager"
+	"nofx/market"
+	"nofx/trader"
 	"testing"
 	"time"
 )
@@ -50,7 +52,7 @@ func newTestServerWithTrader(t *testing.T) *Server {
 	return NewServer(tm, 8080)
 }
 
-func newProgrammaticTestServer(t *testing.T) *Server {
+func newProgrammaticTestServer(t *testing.T, configure ...func(*config.Config)) *Server {
 	t.Helper()
 	tm := manager.NewTraderManager()
 	cfg := config.TraderConfig{
@@ -66,11 +68,14 @@ func newProgrammaticTestServer(t *testing.T) *Server {
 	root := &config.Config{Traders: []config.TraderConfig{cfg}}
 	root.Traders[0].ProgrammaticStrategy.Timeframes.Trade = "4h"
 	root.Traders[0].ProgrammaticStrategy.State.Path = t.TempDir() + "/state.json"
+	for _, fn := range configure {
+		fn(root)
+	}
 	profiles, err := root.NormalizeProgrammaticStrategies()
 	if err != nil {
 		t.Fatalf("归一化程序化策略失败: %v", err)
 	}
-	if err := tm.AddTraderWithPolicies(cfg, "", 10, 20, 60,
+	if err := tm.AddTraderWithPolicies(root.Traders[0], "", 10, 20, 60,
 		config.LeverageConfig{BTCETHLeverage: 5, AltcoinLeverage: 5},
 		config.TradingFrequencyProfile{Legacy: true, Mode: config.TradingFrequencyModeLegacy, EffectiveMode: config.TradingFrequencyModeLegacy, AnalysisIntervalMinutes: 15, PromptCandidateLimit: 8},
 		config.StrategyRiskProfile{Legacy: true, RollbackLegacyValidation: true, FeeSlippagePct: 0.002, DefaultMinNetRR: 2.5, ADXTimeframe: "1h"},
@@ -477,6 +482,82 @@ func TestMarketKlinesRejectsUnsupportedTimeframe(t *testing.T) {
 	if body["error"] == "" {
 		t.Fatalf("应返回中文错误: %+v", body)
 	}
+}
+
+func TestMarketKlinesUsesProgrammaticHistoryDepthWhenLimitMissing(t *testing.T) {
+	var gotSymbol, gotTimeframe string
+	var gotLimit int
+	var gotClosedOnly bool
+	restore := trader.SetMarketKlineFetcherForTest(func(symbol, timeframe string, limit int, closedOnly bool) ([]market.Kline, error) {
+		gotSymbol = symbol
+		gotTimeframe = timeframe
+		gotLimit = limit
+		gotClosedOnly = closedOnly
+		return fakeMarketKlines(limit), nil
+	})
+	defer restore()
+
+	s := newProgrammaticTestServer(t, func(root *config.Config) {
+		root.Traders[0].ProgrammaticStrategy.Timeframes.Trade = "15m"
+		root.Traders[0].ProgrammaticStrategy.HistoryDepth.M15 = 96
+	})
+	w := doRequest(s, "GET", "/api/market/klines?trader_id=programmatic-trader&symbol=ETHUSDT&timeframe=15m")
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/market/klines: 期望200，实际=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSON(t, w)
+	if gotSymbol != "ETHUSDT" || gotTimeframe != "15m" || gotLimit != 96 || !gotClosedOnly {
+		t.Fatalf("fetcher参数不符合配置深度: symbol=%s timeframe=%s limit=%d closed=%v", gotSymbol, gotTimeframe, gotLimit, gotClosedOnly)
+	}
+	if body["limit"] != float64(96) || body["configured_limit"] != float64(96) || body["limit_source"] != "programmatic_history_depth" {
+		t.Fatalf("响应应说明使用程序化history_depth: %+v", body)
+	}
+	if klines, ok := body["klines"].([]interface{}); !ok || len(klines) != 96 {
+		t.Fatalf("响应K线数量应等于配置深度: %+v", body["klines"])
+	}
+}
+
+func TestMarketKlinesExplicitLimitOverridesProgrammaticHistoryDepth(t *testing.T) {
+	var gotLimit int
+	restore := trader.SetMarketKlineFetcherForTest(func(symbol, timeframe string, limit int, closedOnly bool) ([]market.Kline, error) {
+		gotLimit = limit
+		return fakeMarketKlines(limit), nil
+	})
+	defer restore()
+
+	s := newProgrammaticTestServer(t, func(root *config.Config) {
+		root.Traders[0].ProgrammaticStrategy.Timeframes.Trade = "15m"
+		root.Traders[0].ProgrammaticStrategy.HistoryDepth.M15 = 96
+	})
+	w := doRequest(s, "GET", "/api/market/klines?trader_id=programmatic-trader&symbol=ETHUSDT&timeframe=15m&limit=12")
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/market/klines: 期望200，实际=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSON(t, w)
+	if gotLimit != 12 {
+		t.Fatalf("显式query limit应优先: got=%d", gotLimit)
+	}
+	if body["limit"] != float64(12) || body["configured_limit"] != float64(12) || body["limit_source"] != "query" {
+		t.Fatalf("响应应说明使用query limit: %+v", body)
+	}
+}
+
+func fakeMarketKlines(count int) []market.Kline {
+	klines := make([]market.Kline, 0, count)
+	base := time.Date(2026, 5, 17, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < count; i++ {
+		open := 100 + float64(i)*0.5
+		klines = append(klines, market.Kline{
+			OpenTime:  base.Add(time.Duration(i) * time.Minute).UnixMilli(),
+			CloseTime: base.Add(time.Duration(i+1) * time.Minute).Add(-time.Millisecond).UnixMilli(),
+			Open:      open,
+			High:      open + 1,
+			Low:       open - 1,
+			Close:     open + 0.25,
+			Volume:    10 + float64(i),
+		})
+	}
+	return klines
 }
 
 // ============================================================================

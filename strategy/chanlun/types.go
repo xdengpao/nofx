@@ -114,18 +114,21 @@ type SignalReport struct {
 }
 
 type SignalMarker struct {
-	Symbol      string  `json:"symbol"`
-	Timeframe   string  `json:"timeframe"`
-	CloseTime   int64   `json:"close_time"`
-	SignalType  string  `json:"signal_type"`
-	Direction   string  `json:"direction"`
-	Level       string  `json:"level"`
-	SourceLayer string  `json:"source_layer"`
-	Status      string  `json:"status"`
-	SignalID    string  `json:"signal_id"`
-	Action      string  `json:"action,omitempty"`
-	Price       float64 `json:"price,omitempty"`
-	Reason      string  `json:"reason,omitempty"`
+	Symbol       string  `json:"symbol"`
+	Timeframe    string  `json:"timeframe"`
+	CloseTime    int64   `json:"close_time"`
+	SignalType   string  `json:"signal_type"`
+	Direction    string  `json:"direction"`
+	Level        string  `json:"level"`
+	SourceLayer  string  `json:"source_layer"`
+	Status       string  `json:"status"`
+	SignalID     string  `json:"signal_id"`
+	Action       string  `json:"action,omitempty"`
+	FinalAction  string  `json:"final_action,omitempty"`
+	TradeIntent  string  `json:"trade_intent,omitempty"`
+	PositionSide string  `json:"position_side,omitempty"`
+	Price        float64 `json:"price,omitempty"`
+	Reason       string  `json:"reason,omitempty"`
 }
 
 type StrategySymbol struct {

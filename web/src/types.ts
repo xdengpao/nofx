@@ -294,6 +294,9 @@ export interface SignalMarker {
   status: string;
   signal_id: string;
   action?: string;
+  final_action?: string;
+  trade_intent?: string;
+  position_side?: string;
   price?: number;
   reason?: string;
 }
@@ -327,5 +330,7 @@ export interface MarketKlineResponse {
   symbol: string;
   timeframe: string;
   limit: number;
+  configured_limit?: number;
+  limit_source?: string;
   klines: MarketKline[];
 }

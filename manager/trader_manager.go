@@ -534,6 +534,14 @@ func (tm *TraderManager) GetMarketKlines(traderID, symbol, timeframe string, lim
 	return t.GetMarketKlines(symbol, timeframe, limit)
 }
 
+func (tm *TraderManager) ResolveMarketKlineLimit(traderID, timeframe string, explicitLimit int) (trader.MarketKlineLimitResolution, error) {
+	t, err := tm.GetTrader(traderID)
+	if err != nil {
+		return trader.MarketKlineLimitResolution{}, err
+	}
+	return t.ResolveMarketKlineLimit(timeframe, explicitLimit), nil
+}
+
 // GetAllTraders 获取所有trader
 func (tm *TraderManager) GetAllTraders() map[string]*trader.AutoTrader {
 	tm.mu.RLock()
