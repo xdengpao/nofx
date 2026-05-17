@@ -30,18 +30,15 @@ type FuturesTrader struct {
 }
 
 func (t *FuturesTrader) GetOrderStatus(symbol string, orderID int64) (*OrderRecord, error) {
-	//TODO implement me
-	panic("implement me")
+	return nil, fmt.Errorf("binance futures订单状态对账暂未实现")
 }
 
 func (t *FuturesTrader) GetTradeHistory(symbol string, startTime, endTime int64, limit int) ([]TradeRecord, error) {
-	//TODO implement me
-	panic("implement me")
+	return nil, fmt.Errorf("binance futures成交历史对账暂未实现")
 }
 
 func (t *FuturesTrader) GetOrderHistory(symbol string, startTime, endTime int64, limit int) ([]OrderRecord, error) {
-	//TODO implement me
-	panic("implement me")
+	return nil, fmt.Errorf("binance futures订单历史对账暂未实现")
 }
 
 // NewFuturesTrader 创建合约交易器

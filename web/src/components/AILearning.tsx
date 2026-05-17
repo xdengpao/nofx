@@ -22,6 +22,22 @@ interface TradeOutcome {
   open_time: string;
   close_time: string;
   was_stop_loss: boolean;
+  event_type?: string;
+  is_partial?: boolean;
+  close_quantity?: number;
+  remaining_quantity?: number;
+  requested_close_percentage?: number;
+  executed_close_percentage?: number;
+  order_id?: number;
+  signal_id?: string;
+  strategy_name?: string;
+  strategy_version?: string;
+  pnl_source?: string;
+  reconciled?: boolean;
+  reconciliation_status?: string;
+  reconciliation_reason?: string;
+  open_reason?: string;
+  close_reason?: string;
 }
 
 interface SymbolPerformance {
@@ -44,6 +60,17 @@ interface PerformanceAnalysis {
   profit_factor: number;
   sharpe_ratio: number;
   recent_trades: TradeOutcome[];
+  recent_trade_events?: TradeOutcome[];
+  trade_event_stats?: {
+    total_events: number;
+    full_close_events: number;
+    auto_close_events: number;
+    partial_close_events: number;
+    partial_close_realized_pnl: number;
+    partial_close_estimated_pnl: number;
+    partial_close_reconciled: number;
+    partial_close_pending: number;
+  };
   unmatched?: unknown[];
   rolling?: {
     effective_max_risk_per_trade: number;
@@ -79,6 +106,44 @@ interface AILearningProps {
   traderId: string;
 }
 
+function tradeEventLabel(trade: TradeOutcome, language: string): string {
+  const eventType = trade.event_type || (trade.is_partial ? 'partial_close' : 'full_close');
+  if (eventType === 'partial_close') return language === 'zh' ? '部分平仓' : 'Partial';
+  if (eventType === 'auto_close') return language === 'zh' ? '自动平仓' : 'Auto Close';
+  return language === 'zh' ? '完整平仓' : 'Full Close';
+}
+
+function tradeEventColor(trade: TradeOutcome): { bg: string; color: string } {
+  const eventType = trade.event_type || (trade.is_partial ? 'partial_close' : 'full_close');
+  if (eventType === 'partial_close') {
+    return { bg: 'rgba(240, 185, 11, 0.18)', color: '#FCD34D' };
+  }
+  if (eventType === 'auto_close') {
+    return { bg: 'rgba(96, 165, 250, 0.18)', color: '#60A5FA' };
+  }
+  return { bg: 'rgba(148, 163, 184, 0.16)', color: '#CBD5E1' };
+}
+
+function reconciliationLabel(trade: TradeOutcome, language: string): string {
+  if (trade.event_type !== 'partial_close' && !trade.is_partial) return '-';
+  if (trade.pnl_source === 'exchange' || trade.reconciled) {
+    return language === 'zh' ? '真实成交' : 'Exchange';
+  }
+  if (trade.reconciliation_status === 'pending' || trade.reconciliation_status === 'partial_or_pending') {
+    return language === 'zh' ? '待对账' : 'Pending';
+  }
+  if (trade.reconciliation_status === 'unsupported') {
+    return language === 'zh' ? '不支持' : 'Unsupported';
+  }
+  return language === 'zh' ? '估算' : 'Estimated';
+}
+
+function closeReasonText(trade: TradeOutcome, language: string): string {
+  if (trade.close_reason) return trade.close_reason;
+  if (trade.was_stop_loss) return language === 'zh' ? '止损/亏损平仓' : 'Stop Loss';
+  return language === 'zh' ? '止盈/手动' : 'Take Profit / Manual';
+}
+
 export default function AILearning({ traderId }: AILearningProps) {
   const { language } = useLanguage();
   const [currentPage, setCurrentPage] = useState(1);
@@ -95,7 +160,9 @@ export default function AILearning({ traderId }: AILearningProps) {
   );
 
   // 分页计算
-  const allTrades = performance?.recent_trades || [];
+  const allTrades = performance?.recent_trade_events?.length
+    ? performance.recent_trade_events
+    : performance?.recent_trades || [];
   const totalRecords = allTrades.length;
   const { displayItems: displayTrades, totalPages, enablePagination } = paginate(allTrades, currentPage, pageSize);
 
@@ -115,7 +182,7 @@ export default function AILearning({ traderId }: AILearningProps) {
     );
   }
 
-  if (!performance || performance.total_trades === 0) {
+  if (!performance || (performance.total_trades === 0 && allTrades.length === 0)) {
     return (
       <div className="rounded p-6" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
         <div className="flex items-center gap-2 mb-2">
@@ -597,25 +664,25 @@ export default function AILearning({ traderId }: AILearningProps) {
               <div>
                 <h3 className="font-bold text-lg" style={{ color: '#FCD34D' }}>{t('tradeHistory', language)}</h3>
                 <p className="text-xs" style={{ color: '#94A3B8' }}>
-                  {performance?.recent_trades && performance.recent_trades.length > 0
-                    ? t('completedTrades', language, { count: performance.recent_trades.length })
+                  {allTrades.length > 0
+                    ? t('completedTrades', language, { count: allTrades.length })
                     : t('completedTradesWillAppear', language)}
                 </p>
               </div>
             </div>
             <button
-              onClick={() => exportTradeHistoryCSV(performance?.recent_trades || [], traderId)}
-              disabled={!performance?.recent_trades || performance.recent_trades.length === 0}
+              onClick={() => exportTradeHistoryCSV(allTrades, traderId)}
+              disabled={allTrades.length === 0}
               className="px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors"
               style={{
-                background: (!performance?.recent_trades || performance.recent_trades.length === 0)
+                background: allTrades.length === 0
                   ? 'rgba(148, 163, 184, 0.1)'
                   : 'rgba(240, 185, 11, 0.2)',
-                color: (!performance?.recent_trades || performance.recent_trades.length === 0)
+                color: allTrades.length === 0
                   ? '#4B5563'
                   : '#FCD34D',
-                border: `1px solid ${(!performance?.recent_trades || performance.recent_trades.length === 0) ? 'rgba(148, 163, 184, 0.1)' : 'rgba(240, 185, 11, 0.4)'}`,
-                cursor: (!performance?.recent_trades || performance.recent_trades.length === 0) ? 'not-allowed' : 'pointer',
+                border: `1px solid ${allTrades.length === 0 ? 'rgba(148, 163, 184, 0.1)' : 'rgba(240, 185, 11, 0.4)'}`,
+                cursor: allTrades.length === 0 ? 'not-allowed' : 'pointer',
               }}
             >
               📥 {t('exportCSV', language)}
@@ -623,13 +690,14 @@ export default function AILearning({ traderId }: AILearningProps) {
           </div>
         </div>
 
-        {performance?.recent_trades && performance.recent_trades.length > 0 ? (
+        {allTrades.length > 0 ? (
           <>
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
                 <tr style={{ background: 'rgba(15, 23, 42, 0.95)' }}>
                   <th className="text-left px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('symbol', language)}</th>
+                  <th className="text-center px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{language === 'zh' ? '类型' : 'Type'}</th>
                   <th className="text-center px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('side', language)}</th>
                   <th className="text-left px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('openTime', language)}</th>
                   <th className="text-left px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('closeTime', language)}</th>
@@ -641,16 +709,27 @@ export default function AILearning({ traderId }: AILearningProps) {
                   <th className="text-right px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('marginUsed', language)}</th>
                   <th className="text-right px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('pnlAmount', language)}</th>
                   <th className="text-right px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('pnlPercent', language)}</th>
+                  <th className="text-center px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{language === 'zh' ? '对账' : 'Reconcile'}</th>
+                  <th className="text-left px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{language === 'zh' ? '原因' : 'Reason'}</th>
                 </tr>
               </thead>
               <tbody>
                 {displayTrades.map((trade: TradeOutcome, idx: number) => {
                   const isProfitable = trade.pn_l >= 0;
+                  const eventStyle = tradeEventColor(trade);
                   return (
                     <tr key={idx} className="transition-colors hover:bg-white/5" style={{
                       borderTop: idx > 0 ? '1px solid rgba(240, 185, 11, 0.1)' : 'none'
                     }}>
                       <td className="px-3 py-3 font-bold mono whitespace-nowrap" style={{ color: '#E0E7FF' }}>{trade.symbol}</td>
+                      <td className="px-3 py-3 text-center">
+                        <span className="px-2 py-0.5 rounded font-bold whitespace-nowrap" style={{
+                          background: eventStyle.bg,
+                          color: eventStyle.color
+                        }}>
+                          {tradeEventLabel(trade, language)}
+                        </span>
+                      </td>
                       <td className="px-3 py-3 text-center">
                         <span className="px-2 py-0.5 rounded font-bold" style={{
                           background: trade.side === 'long' ? 'rgba(14, 203, 129, 0.2)' : 'rgba(246, 70, 93, 0.2)',
@@ -673,6 +752,8 @@ export default function AILearning({ traderId }: AILearningProps) {
                       <td className="px-3 py-3 text-right mono font-bold whitespace-nowrap" style={{ color: isProfitable ? '#10B981' : '#F87171' }}>
                         {isProfitable ? '+' : ''}{trade.pn_l_pct.toFixed(2)}%
                       </td>
+                      <td className="px-3 py-3 text-center whitespace-nowrap" style={{ color: '#CBD5E1' }}>{reconciliationLabel(trade, language)}</td>
+                      <td className="px-3 py-3 min-w-[220px]" style={{ color: '#CBD5E1' }}>{closeReasonText(trade, language)}</td>
                     </tr>
                   );
                 })}

@@ -3,7 +3,7 @@ import * as fc from 'fast-check';
 import { generateTradeHistoryCSV, CSV_HEADERS } from './exportCSV';
 
 // Feature: quant-trading-system, Property 48: CSV 导出字段完整性
-// 对任意非空的 TradeOutcome 列表，exportTradeHistoryCSV 生成的 CSV 字符串应包含 14 列表头，
+// 对任意非空的 TradeOutcome 列表，exportTradeHistoryCSV 生成的 CSV 字符串应包含完整表头，
 // 且数据行数等于输入列表长度
 // 验证: 需求 13.13
 
@@ -26,10 +26,21 @@ const tradeOutcomeArb = fc.record({
   open_time: fc.date({ min: new Date('2020-01-01'), max: new Date('2026-12-31') }).filter((d) => !isNaN(d.getTime())).map((d) => d.toISOString()),
   close_time: fc.date({ min: new Date('2020-01-01'), max: new Date('2026-12-31') }).filter((d) => !isNaN(d.getTime())).map((d) => d.toISOString()),
   was_stop_loss: fc.boolean(),
+  event_type: fc.constantFrom('full_close', 'partial_close', 'auto_close'),
+  is_partial: fc.boolean(),
+  close_quantity: fc.double({ min: 0, max: 10000, noNaN: true }),
+  requested_close_percentage: fc.double({ min: 0, max: 100, noNaN: true }),
+  executed_close_percentage: fc.double({ min: 0, max: 100, noNaN: true }),
+  order_id: fc.integer({ min: 0, max: 999999999 }),
+  signal_id: fc.string({ maxLength: 24 }),
+  pnl_source: fc.constantFrom('exchange', 'estimated', ''),
+  reconciled: fc.boolean(),
+  reconciliation_status: fc.constantFrom('matched', 'pending', 'unsupported', 'estimated_from_decision_log', ''),
+  close_reason: fc.string({ maxLength: 80 }).filter((s) => !s.includes('\n') && !s.includes('\r')),
 });
 
 describe('Property 48: CSV 导出字段完整性', () => {
-  it('对任意非空 TradeOutcome 列表，CSV 应包含 14 列表头且数据行数等于输入长度', () => {
+  it('对任意非空 TradeOutcome 列表，CSV 应包含完整表头且数据行数等于输入长度', () => {
     fc.assert(
       fc.property(
         fc.array(tradeOutcomeArb, { minLength: 1, maxLength: 50 }),
@@ -44,10 +55,10 @@ describe('Property 48: CSV 导出字段完整性', () => {
           // 第一行是表头
           const headerLine = lines[0];
           const headerColumns = headerLine.split(',');
-          expect(headerColumns).toHaveLength(14);
+          expect(headerColumns).toHaveLength(CSV_HEADERS.length);
 
           // 表头内容应与 CSV_HEADERS 一致
-          for (let i = 0; i < 14; i++) {
+          for (let i = 0; i < CSV_HEADERS.length; i++) {
             expect(headerColumns[i]).toBe(CSV_HEADERS[i]);
           }
 
@@ -55,7 +66,7 @@ describe('Property 48: CSV 导出字段完整性', () => {
           const dataLines = lines.slice(1);
           expect(dataLines).toHaveLength(trades.length);
 
-          // 每个数据行也应有 14 列（考虑 CSV 转义后的解析）
+          // 每个数据行也应有完整列数（考虑 CSV 转义后的解析）
           for (const line of dataLines) {
             // 简单计数：未被引号包裹的逗号数 = 列数 - 1
             let cols = 0;
@@ -64,7 +75,7 @@ describe('Property 48: CSV 导出字段完整性', () => {
               if (ch === '"') inQuotes = !inQuotes;
               if (ch === ',' && !inQuotes) cols++;
             }
-            expect(cols).toBe(13); // 13 个逗号 = 14 列
+            expect(cols).toBe(CSV_HEADERS.length - 1);
           }
         },
       ),

@@ -5,6 +5,7 @@ package trader
 // 覆盖需求: 2.1, 2.5, 2.7, 8.1, 8.2, 8.3, 8.4, 8.5, 8.6
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"nofx/decision"
@@ -27,6 +28,34 @@ import (
 func TestCalculatePrecision_WholeNumber(t *testing.T) {
 	if p := calculatePrecision("1"); p != 0 {
 		t.Errorf("stepSize=1: 期望精度0, 实际=%d", p)
+	}
+}
+
+func TestExtractOrderID_SupportsCommonJSONTypes(t *testing.T) {
+	cases := []struct {
+		name  string
+		value any
+		want  int64
+	}{
+		{name: "int64", value: int64(12345), want: 12345},
+		{name: "int", value: int(12346), want: 12346},
+		{name: "float64", value: float64(12347), want: 12347},
+		{name: "json_number", value: json.Number("12348"), want: 12348},
+		{name: "string", value: "12349", want: 12349},
+		{name: "float_string", value: "12350.0", want: 12350},
+		{name: "invalid", value: "abc", want: 0},
+		{name: "missing", value: nil, want: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			order := map[string]interface{}{}
+			if tc.value != nil {
+				order["orderId"] = tc.value
+			}
+			if got := extractOrderID(order); got != tc.want {
+				t.Fatalf("orderId解析错误: got=%d want=%d", got, tc.want)
+			}
+		})
 	}
 }
 

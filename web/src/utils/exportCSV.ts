@@ -15,18 +15,31 @@ interface TradeOutcome {
   open_time: string;
   close_time: string;
   was_stop_loss: boolean;
+  event_type?: string;
+  is_partial?: boolean;
+  close_quantity?: number;
+  requested_close_percentage?: number;
+  executed_close_percentage?: number;
+  order_id?: number;
+  signal_id?: string;
+  pnl_source?: string;
+  reconciled?: boolean;
+  reconciliation_status?: string;
+  close_reason?: string;
 }
 
 export const CSV_HEADERS = [
-  'Symbol', 'Side', 'Open Time', 'Close Time',
+  'Event Type', 'Is Partial', 'Symbol', 'Side', 'Open Time', 'Close Time',
   'Open Price', 'Close Price', 'Quantity', 'Leverage',
   'Position Value', 'Margin Used', 'PnL', 'PnL %',
-  'Duration', 'Close Reason',
+  'Duration', 'Close Quantity', 'Requested Close %', 'Executed Close %',
+  'Order ID', 'Signal ID', 'PnL Source', 'Reconciled', 'Reconciliation Status',
+  'Close Reason',
 ] as const;
 
 /**
  * 生成成交历史 CSV 字符串（纯函数，可测试）
- * - 14 列表头 + 数据行
+ * - 扩展事件字段表头 + 数据行
  * - 数据行按平仓时间降序排列
  * - 价格保留 4 位小数，盈亏保留 2 位小数
  */
@@ -41,6 +54,8 @@ export function generateTradeHistoryCSV(trades: TradeOutcome[]): string {
   });
 
   const rows = sorted.map((t) => [
+    t.event_type || (t.is_partial ? 'partial_close' : 'full_close'),
+    t.is_partial ? 'true' : 'false',
     t.symbol,
     t.side,
     t.open_time || '',
@@ -54,7 +69,15 @@ export function generateTradeHistoryCSV(trades: TradeOutcome[]): string {
     t.pn_l.toFixed(2),
     t.pn_l_pct.toFixed(2),
     t.duration || '',
-    t.was_stop_loss ? 'Stop Loss' : 'Take Profit / Manual',
+    t.close_quantity ? t.close_quantity.toFixed(4) : '',
+    t.requested_close_percentage ? t.requested_close_percentage.toFixed(2) : '',
+    t.executed_close_percentage ? t.executed_close_percentage.toFixed(2) : '',
+    t.order_id ? String(t.order_id) : '',
+    t.signal_id || '',
+    t.pnl_source || '',
+    typeof t.reconciled === 'boolean' ? String(t.reconciled) : '',
+    t.reconciliation_status || '',
+    t.close_reason || (t.was_stop_loss ? 'Stop Loss' : 'Take Profit / Manual'),
   ]);
 
   return [

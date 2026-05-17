@@ -89,6 +89,95 @@ export interface DecisionExplanation {
   details?: Record<string, unknown>;
 }
 
+export interface TradeOutcome {
+  symbol: string;
+  side: string;
+  quantity: number;
+  leverage: number;
+  open_price: number;
+  close_price: number;
+  position_value: number;
+  margin_used: number;
+  pn_l: number;
+  pn_l_pct: number;
+  duration: string;
+  open_time: string;
+  close_time: string;
+  was_stop_loss: boolean;
+  event_type?: string;
+  is_partial?: boolean;
+  close_quantity?: number;
+  remaining_quantity?: number;
+  requested_close_percentage?: number;
+  executed_close_percentage?: number;
+  order_id?: number;
+  signal_id?: string;
+  strategy_name?: string;
+  strategy_version?: string;
+  commission?: number;
+  pnl_source?: string;
+  reconciled?: boolean;
+  reconciliation_status?: string;
+  reconciliation_reason?: string;
+  open_reason?: string;
+  close_reason?: string;
+}
+
+export interface TradeEventStats {
+  total_events: number;
+  full_close_events: number;
+  auto_close_events: number;
+  partial_close_events: number;
+  partial_close_realized_pnl: number;
+  partial_close_estimated_pnl: number;
+  partial_close_reconciled: number;
+  partial_close_pending: number;
+}
+
+export interface ExecutionRiskEvent {
+  timestamp: string;
+  symbol?: string;
+  action?: string;
+  risk_type: string;
+  reason: string;
+}
+
+export interface ExecutionQuality {
+  total_actions: number;
+  open_attempts?: number;
+  open_failures?: number;
+  open_rejected_count?: number;
+  partial_close_attempts: number;
+  partial_close_failures: number;
+  partial_close_failure_rate: number;
+  protection_order_failures?: number;
+  high_risk_execution_failures?: number;
+  ai_failure_count: number;
+  unmatched_action_count: number;
+  recent_high_risk_errors?: ExecutionRiskEvent[];
+  recent_open_rejection_reasons?: string[];
+  protection_order_failure_rate?: number;
+  high_risk_execution_failure_rate?: number;
+}
+
+export interface PerformanceAnalysis {
+  total_trades: number;
+  winning_trades: number;
+  losing_trades: number;
+  win_rate: number;
+  avg_win: number;
+  avg_loss: number;
+  profit_factor: number;
+  sharpe_ratio: number;
+  recent_trades: TradeOutcome[];
+  recent_trade_events: TradeOutcome[];
+  trade_event_stats?: TradeEventStats;
+  execution_quality?: ExecutionQuality;
+  symbol_stats: Record<string, unknown>;
+  best_symbol: string;
+  worst_symbol: string;
+}
+
 export interface AccountSnapshot {
   total_balance: number;
   available_balance: number;

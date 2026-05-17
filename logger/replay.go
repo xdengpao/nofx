@@ -36,6 +36,7 @@ type ReplayReport struct {
 	DuplicateCloseCandidates      []DuplicateCloseCandidate   `json:"duplicate_close_candidates,omitempty"`
 	ExchangeReconciliation        *ExchangeReconciliation     `json:"exchange_reconciliation,omitempty"`
 	Rolling                       *RollingPerformanceSnapshot `json:"rolling,omitempty"`
+	TradeEventStats               *TradeEventStats            `json:"trade_event_stats,omitempty"`
 	Execution                     ExecutionQualityStats       `json:"execution_quality"`
 	StrategyDisease               StrategyDiseaseReport       `json:"strategy_disease"`
 	ReportOnly                    bool                        `json:"report_only"`
@@ -233,7 +234,10 @@ func recordMatchesTrader(record *DecisionRecord, traderID string) bool {
 
 // BuildReplayReport 根据决策日志生成离线复盘报告。
 func BuildReplayReport(records []*DecisionRecord, reportOnly bool, dryRun bool) ReplayReport {
-	outcomes, unmatched := BuildTradeOutcomes(records)
+	replay := BuildTradeReplay(records)
+	outcomes := replay.FullOutcomes
+	unmatched := replay.Unmatched
+	eventStats := BuildTradeEventStats(replay.Events)
 	report := ReplayReport{
 		GeneratedAt:                   time.Now(),
 		RecordCount:                   len(records),
@@ -246,6 +250,7 @@ func BuildReplayReport(records []*DecisionRecord, reportOnly bool, dryRun bool) 
 		TradeCount:                    len(outcomes),
 		DuplicateCloseGroups:          make(map[string]int),
 		Rolling:                       BuildRollingPerformance(outcomes, time.Now()),
+		TradeEventStats:               &eventStats,
 		Execution:                     BuildExecutionQuality(records, len(unmatched)),
 		ReportOnly:                    reportOnly,
 		DryRun:                        dryRun,

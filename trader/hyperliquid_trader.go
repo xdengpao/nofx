@@ -21,18 +21,15 @@ type HyperliquidTrader struct {
 }
 
 func (t *HyperliquidTrader) GetOrderStatus(symbol string, orderID int64) (*OrderRecord, error) {
-	//TODO implement me
-	panic("implement me")
+	return nil, fmt.Errorf("hyperliquid订单状态对账暂未实现")
 }
 
 func (t *HyperliquidTrader) GetTradeHistory(symbol string, startTime, endTime int64, limit int) ([]TradeRecord, error) {
-	//TODO implement me
-	panic("implement me")
+	return nil, fmt.Errorf("hyperliquid成交历史对账暂未实现")
 }
 
 func (t *HyperliquidTrader) GetOrderHistory(symbol string, startTime, endTime int64, limit int) ([]OrderRecord, error) {
-	//TODO implement me
-	panic("implement me")
+	return nil, fmt.Errorf("hyperliquid订单历史对账暂未实现")
 }
 
 // NewHyperliquidTrader 创建Hyperliquid交易器

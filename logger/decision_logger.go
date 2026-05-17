@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -439,6 +440,22 @@ type TradeOutcome struct {
 	WasStopLoss   bool      `json:"was_stop_loss"`  // 是否止损
 	OpenReason    string    `json:"open_reason,omitempty"`
 	CloseReason   string    `json:"close_reason,omitempty"`
+
+	EventType                string  `json:"event_type,omitempty"` // full_close, auto_close, partial_close
+	IsPartial                bool    `json:"is_partial,omitempty"`
+	CloseQuantity            float64 `json:"close_quantity,omitempty"`
+	RemainingQuantity        float64 `json:"remaining_quantity,omitempty"`
+	RequestedClosePercentage float64 `json:"requested_close_percentage,omitempty"`
+	ExecutedClosePercentage  float64 `json:"executed_close_percentage,omitempty"`
+	OrderID                  int64   `json:"order_id,omitempty"`
+	SignalID                 string  `json:"signal_id,omitempty"`
+	StrategyName             string  `json:"strategy_name,omitempty"`
+	StrategyVersion          string  `json:"strategy_version,omitempty"`
+	Commission               float64 `json:"commission,omitempty"`
+	PnLSource                string  `json:"pnl_source,omitempty"`
+	Reconciled               *bool   `json:"reconciled,omitempty"`
+	ReconciliationStatus     string  `json:"reconciliation_status,omitempty"`
+	ReconciliationReason     string  `json:"reconciliation_reason,omitempty"`
 }
 
 // RecentClosedTradeStats 汇总指定窗口内闭合交易表现。
@@ -449,6 +466,18 @@ type RecentClosedTradeStats struct {
 	NetPnL         float64 `json:"net_pn_l"`
 	ProfitFactor   float64 `json:"profit_factor"`
 	MaxDrawdownUSD float64 `json:"max_drawdown_usd"`
+}
+
+// TradeEventStats 汇总完整平仓与部分平仓成交事件。
+type TradeEventStats struct {
+	TotalEvents              int     `json:"total_events"`
+	FullCloseEvents          int     `json:"full_close_events"`
+	AutoCloseEvents          int     `json:"auto_close_events"`
+	PartialCloseEvents       int     `json:"partial_close_events"`
+	PartialCloseRealizedPnL  float64 `json:"partial_close_realized_pnl"`
+	PartialCloseEstimatedPnL float64 `json:"partial_close_estimated_pnl"`
+	PartialCloseReconciled   int     `json:"partial_close_reconciled"`
+	PartialClosePending      int     `json:"partial_close_pending"`
 }
 
 // UnmatchedAction 表示无法配对为完整交易的执行动作。
@@ -462,21 +491,23 @@ type UnmatchedAction struct {
 
 // PerformanceAnalysis 交易表现分析
 type PerformanceAnalysis struct {
-	TotalTrades   int                           `json:"total_trades"`   // 总交易数
-	WinningTrades int                           `json:"winning_trades"` // 盈利交易数
-	LosingTrades  int                           `json:"losing_trades"`  // 亏损交易数
-	WinRate       float64                       `json:"win_rate"`       // 胜率
-	AvgWin        float64                       `json:"avg_win"`        // 平均盈利
-	AvgLoss       float64                       `json:"avg_loss"`       // 平均亏损
-	ProfitFactor  float64                       `json:"profit_factor"`  // 盈亏比
-	SharpeRatio   float64                       `json:"sharpe_ratio"`   // 夏普比率（风险调整后收益）
-	RecentTrades  []TradeOutcome                `json:"recent_trades"`  // 最近N笔交易
-	Unmatched     []UnmatchedAction             `json:"unmatched,omitempty"`
-	Rolling       *RollingPerformanceSnapshot   `json:"rolling,omitempty"`
-	Execution     ExecutionQualityStats         `json:"execution_quality"`
-	SymbolStats   map[string]*SymbolPerformance `json:"symbol_stats"` // 各币种表现
-	BestSymbol    string                        `json:"best_symbol"`  // 表现最好的币种
-	WorstSymbol   string                        `json:"worst_symbol"` // 表现最差的币种
+	TotalTrades       int                           `json:"total_trades"`   // 总交易数
+	WinningTrades     int                           `json:"winning_trades"` // 盈利交易数
+	LosingTrades      int                           `json:"losing_trades"`  // 亏损交易数
+	WinRate           float64                       `json:"win_rate"`       // 胜率
+	AvgWin            float64                       `json:"avg_win"`        // 平均盈利
+	AvgLoss           float64                       `json:"avg_loss"`       // 平均亏损
+	ProfitFactor      float64                       `json:"profit_factor"`  // 盈亏比
+	SharpeRatio       float64                       `json:"sharpe_ratio"`   // 夏普比率（风险调整后收益）
+	RecentTrades      []TradeOutcome                `json:"recent_trades"`  // 最近N笔交易
+	RecentTradeEvents []TradeOutcome                `json:"recent_trade_events"`
+	TradeEventStats   *TradeEventStats              `json:"trade_event_stats,omitempty"`
+	Unmatched         []UnmatchedAction             `json:"unmatched,omitempty"`
+	Rolling           *RollingPerformanceSnapshot   `json:"rolling,omitempty"`
+	Execution         ExecutionQualityStats         `json:"execution_quality"`
+	SymbolStats       map[string]*SymbolPerformance `json:"symbol_stats"` // 各币种表现
+	BestSymbol        string                        `json:"best_symbol"`  // 表现最好的币种
+	WorstSymbol       string                        `json:"worst_symbol"` // 表现最差的币种
 }
 
 // SymbolPerformance 币种表现统计
@@ -556,19 +587,32 @@ type ExecutionRiskEvent struct {
 }
 
 type openPositionTrace struct {
-	symbol    string
-	side      string
-	price     float64
-	time      time.Time
-	quantity  float64
-	leverage  int
-	reasoning string
+	symbol            string
+	side              string
+	price             float64
+	time              time.Time
+	quantity          float64
+	remainingQuantity float64
+	leverage          int
+	reasoning         string
 }
 
-// BuildTradeOutcomes 将决策日志中的开平仓动作配对为可复盘的闭合交易。
-func BuildTradeOutcomes(records []*DecisionRecord) ([]TradeOutcome, []UnmatchedAction) {
+type closedLotFragment struct {
+	open     openPositionTrace
+	quantity float64
+}
+
+// TradeReplayResult 同时保存完整闭合交易和可展示成交事件。
+type TradeReplayResult struct {
+	FullOutcomes []TradeOutcome
+	Events       []TradeOutcome
+	Unmatched    []UnmatchedAction
+}
+
+// BuildTradeReplay 将决策日志中的开平仓动作还原为完整交易与成交事件。
+func BuildTradeReplay(records []*DecisionRecord) TradeReplayResult {
 	if len(records) == 0 {
-		return []TradeOutcome{}, []UnmatchedAction{}
+		return TradeReplayResult{FullOutcomes: []TradeOutcome{}, Events: []TradeOutcome{}, Unmatched: []UnmatchedAction{}}
 	}
 
 	sortedRecords := append([]*DecisionRecord(nil), records...)
@@ -577,7 +621,7 @@ func BuildTradeOutcomes(records []*DecisionRecord) ([]TradeOutcome, []UnmatchedA
 	})
 
 	openPositions := make(map[string][]openPositionTrace)
-	var outcomes []TradeOutcome
+	var result TradeReplayResult
 	var unmatched []UnmatchedAction
 
 	for _, record := range sortedRecords {
@@ -587,8 +631,7 @@ func BuildTradeOutcomes(records []*DecisionRecord) ([]TradeOutcome, []UnmatchedA
 				continue
 			}
 
-			side, ok := actionSide(action.Action)
-			if !ok || action.Symbol == "" {
+			if action.Symbol == "" {
 				continue
 			}
 
@@ -601,19 +644,29 @@ func BuildTradeOutcomes(records []*DecisionRecord) ([]TradeOutcome, []UnmatchedA
 				reasoning = reasoningByAction[actionReasonKey(action.Symbol, action.Action)]
 			}
 
-			key := action.Symbol + "_" + side
 			switch action.Action {
 			case "open_long", "open_short", "add_long", "add_short":
+				side, ok := actionSide(action.Action)
+				if !ok || action.Quantity <= 0 {
+					continue
+				}
+				key := action.Symbol + "_" + side
 				openPositions[key] = append(openPositions[key], openPositionTrace{
-					symbol:    action.Symbol,
-					side:      side,
-					price:     action.Price,
-					time:      actionTime,
-					quantity:  action.Quantity,
-					leverage:  action.Leverage,
-					reasoning: reasoning,
+					symbol:            action.Symbol,
+					side:              side,
+					price:             action.Price,
+					time:              actionTime,
+					quantity:          action.Quantity,
+					remainingQuantity: action.Quantity,
+					leverage:          action.Leverage,
+					reasoning:         reasoning,
 				})
 			case "close_long", "close_short", "auto_close_long", "auto_close_short":
+				side, ok := actionSide(action.Action)
+				if !ok {
+					continue
+				}
+				key := action.Symbol + "_" + side
 				opens := openPositions[key]
 				if len(opens) == 0 {
 					unmatched = append(unmatched, UnmatchedAction{
@@ -627,15 +680,75 @@ func BuildTradeOutcomes(records []*DecisionRecord) ([]TradeOutcome, []UnmatchedA
 				}
 
 				for _, open := range opens {
-					outcomes = append(outcomes, buildTradeOutcome(open, action, actionTime, reasoning))
+					if open.remainingQuantity <= 0 {
+						continue
+					}
+					outcome := buildTradeOutcome(open, action, actionTime, reasoning)
+					if strings.HasPrefix(action.Action, "auto_close_") {
+						outcome.EventType = "auto_close"
+					} else {
+						outcome.EventType = "full_close"
+					}
+					outcome.CloseQuantity = outcome.Quantity
+					outcome.OrderID = action.OrderID
+					outcome.SignalID = action.SignalID
+					outcome.StrategyName = action.StrategyName
+					outcome.StrategyVersion = action.StrategyVersion
+					result.FullOutcomes = append(result.FullOutcomes, outcome)
+					result.Events = append(result.Events, outcome)
 				}
 				delete(openPositions, key)
+			case "partial_close":
+				if isSkippedPartialClose(action) {
+					continue
+				}
+				closeQuantity := effectiveCloseQuantity(action)
+				if closeQuantity <= 0 {
+					continue
+				}
+				side, ok := resolvePartialCloseSide(action, record, openPositions)
+				if !ok {
+					unmatched = append(unmatched, UnmatchedAction{
+						Timestamp: actionTime,
+						Symbol:    action.Symbol,
+						Action:    action.Action,
+						Reason:    "missing_side_for_partial_close",
+					})
+					continue
+				}
+				key := action.Symbol + "_" + side
+				fragments, unmatchedQty := consumeOpenLots(openPositions, key, closeQuantity)
+				if len(fragments) == 0 {
+					unmatched = append(unmatched, UnmatchedAction{
+						Timestamp: actionTime,
+						Symbol:    action.Symbol,
+						Side:      side,
+						Action:    action.Action,
+						Reason:    "missing_open_for_partial_close",
+					})
+					continue
+				}
+				if unmatchedQty > 0 {
+					unmatched = append(unmatched, UnmatchedAction{
+						Timestamp: actionTime,
+						Symbol:    action.Symbol,
+						Side:      side,
+						Action:    action.Action,
+						Reason:    "partial_close_exceeds_open_quantity",
+					})
+				}
+				event := buildTradeEventFromFragments(fragments, action, actionTime, reasoning, "partial_close")
+				event.RemainingQuantity = remainingOpenQuantity(openPositions[key])
+				result.Events = append(result.Events, event)
 			}
 		}
 	}
 
 	for _, opens := range openPositions {
 		for _, open := range opens {
+			if open.remainingQuantity <= 0 {
+				continue
+			}
 			unmatched = append(unmatched, UnmatchedAction{
 				Timestamp: open.time,
 				Symbol:    open.symbol,
@@ -646,7 +759,29 @@ func BuildTradeOutcomes(records []*DecisionRecord) ([]TradeOutcome, []UnmatchedA
 		}
 	}
 
-	return outcomes, unmatched
+	result.Unmatched = unmatched
+	if result.FullOutcomes == nil {
+		result.FullOutcomes = []TradeOutcome{}
+	}
+	if result.Events == nil {
+		result.Events = []TradeOutcome{}
+	}
+	if result.Unmatched == nil {
+		result.Unmatched = []UnmatchedAction{}
+	}
+	return result
+}
+
+// BuildTradeOutcomes 将决策日志中的开平仓动作配对为可复盘的闭合交易。
+func BuildTradeOutcomes(records []*DecisionRecord) ([]TradeOutcome, []UnmatchedAction) {
+	result := BuildTradeReplay(records)
+	return result.FullOutcomes, result.Unmatched
+}
+
+// BuildTradeEvents 返回完整平仓、自动平仓和部分平仓成交事件。
+func BuildTradeEvents(records []*DecisionRecord) ([]TradeOutcome, []UnmatchedAction) {
+	result := BuildTradeReplay(records)
+	return result.Events, result.Unmatched
 }
 
 // CountSuccessfulOpens 统计窗口内成功新增开仓数。
@@ -1165,20 +1300,240 @@ func appendLimitedString(items []string, item string, limit int) []string {
 	return items[len(items)-limit:]
 }
 
+func effectiveCloseQuantity(action DecisionAction) float64 {
+	if value, ok := metadataFloat(action.StrategyMetadata, "filled_quantity"); ok && value > 0 {
+		return value
+	}
+	if action.CloseQuantity > 0 {
+		return action.CloseQuantity
+	}
+	return action.Quantity
+}
+
+func isSkippedPartialClose(action DecisionAction) bool {
+	return action.FinalAction == "partial_close_skipped" || effectiveCloseQuantity(action) <= 0
+}
+
+func resolvePartialCloseSide(action DecisionAction, record *DecisionRecord, openPositions map[string][]openPositionTrace) (string, bool) {
+	if side, ok := metadataString(action.StrategyMetadata, "side"); ok {
+		side = strings.ToLower(side)
+		if side == "long" || side == "short" {
+			return side, true
+		}
+	}
+	if record != nil {
+		var found string
+		for _, pos := range record.Positions {
+			if pos.Symbol != action.Symbol || pos.Side == "" {
+				continue
+			}
+			side := strings.ToLower(pos.Side)
+			if side != "long" && side != "short" {
+				continue
+			}
+			if found != "" && found != side {
+				return "", false
+			}
+			found = side
+		}
+		if found != "" {
+			return found, true
+		}
+	}
+
+	var found string
+	for _, side := range []string{"long", "short"} {
+		for _, open := range openPositions[action.Symbol+"_"+side] {
+			if open.remainingQuantity <= 0 {
+				continue
+			}
+			if found != "" && found != side {
+				return "", false
+			}
+			found = side
+			break
+		}
+	}
+	if found != "" {
+		return found, true
+	}
+	return "", false
+}
+
+func consumeOpenLots(openPositions map[string][]openPositionTrace, key string, closeQuantity float64) ([]closedLotFragment, float64) {
+	opens := openPositions[key]
+	if closeQuantity <= 0 || len(opens) == 0 {
+		return nil, closeQuantity
+	}
+	remainingToClose := closeQuantity
+	fragments := make([]closedLotFragment, 0, len(opens))
+	nextOpens := opens[:0]
+	for _, open := range opens {
+		if open.remainingQuantity <= 0 {
+			continue
+		}
+		if remainingToClose <= 0 {
+			nextOpens = append(nextOpens, open)
+			continue
+		}
+		closed := math.Min(open.remainingQuantity, remainingToClose)
+		if closed > 0 {
+			fragments = append(fragments, closedLotFragment{open: open, quantity: closed})
+			open.remainingQuantity -= closed
+			remainingToClose -= closed
+		}
+		if open.remainingQuantity > 1e-12 {
+			nextOpens = append(nextOpens, open)
+		}
+	}
+	if len(nextOpens) == 0 {
+		delete(openPositions, key)
+	} else {
+		openPositions[key] = nextOpens
+	}
+	return fragments, math.Max(0, remainingToClose)
+}
+
+func remainingOpenQuantity(opens []openPositionTrace) float64 {
+	total := 0.0
+	for _, open := range opens {
+		if open.remainingQuantity > 0 {
+			total += open.remainingQuantity
+		}
+	}
+	return total
+}
+
+func buildTradeEventFromFragments(fragments []closedLotFragment, action DecisionAction, closeTime time.Time, closeReason string, eventType string) TradeOutcome {
+	if len(fragments) == 0 {
+		return TradeOutcome{}
+	}
+	closePrice := action.Price
+	if value, ok := metadataFloat(action.StrategyMetadata, "avg_fill_price"); ok && value > 0 {
+		closePrice = value
+	}
+
+	totalQty := 0.0
+	positionValue := 0.0
+	estimatedPnL := 0.0
+	weightedOpenPrice := 0.0
+	leverage := fragments[0].open.leverage
+	if leverage <= 0 {
+		leverage = 1
+	}
+	openTime := fragments[0].open.time
+	openReason := fragments[0].open.reasoning
+	symbol := fragments[0].open.symbol
+	side := fragments[0].open.side
+	for _, fragment := range fragments {
+		qty := fragment.quantity
+		if qty <= 0 {
+			continue
+		}
+		totalQty += qty
+		positionValue += qty * fragment.open.price
+		weightedOpenPrice += qty * fragment.open.price
+		if fragment.open.time.Before(openTime) {
+			openTime = fragment.open.time
+		}
+		if openReason == "" {
+			openReason = fragment.open.reasoning
+		}
+		if side == "long" {
+			estimatedPnL += qty * (closePrice - fragment.open.price)
+		} else {
+			estimatedPnL += qty * (fragment.open.price - closePrice)
+		}
+	}
+	openPrice := 0.0
+	if totalQty > 0 {
+		openPrice = weightedOpenPrice / totalQty
+	}
+
+	pnl := estimatedPnL
+	pnlSource := "estimated"
+	reconciled := false
+	reconciliationStatus := "estimated_from_decision_log"
+	reconciliationReason := ""
+	if value, ok := metadataFloat(action.StrategyMetadata, "realized_pnl"); ok {
+		pnl = value
+		pnlSource = "exchange"
+	}
+	if value, ok := metadataBool(action.StrategyMetadata, "reconciled"); ok {
+		reconciled = value
+		if value && pnlSource == "exchange" {
+			reconciliationStatus = "matched"
+		}
+	}
+	if status, ok := metadataString(action.StrategyMetadata, "reconciliation_status"); ok {
+		reconciliationStatus = status
+	}
+	if reason, ok := metadataString(action.StrategyMetadata, "reconciliation_reason"); ok {
+		reconciliationReason = reason
+	}
+	commission, _ := metadataFloat(action.StrategyMetadata, "commission")
+
+	marginUsed := 0.0
+	if leverage > 0 {
+		marginUsed = positionValue / float64(leverage)
+	}
+	pnlPct := 0.0
+	if marginUsed > 0 {
+		pnlPct = (pnl / marginUsed) * 100
+	}
+
+	return TradeOutcome{
+		Symbol:                   symbol,
+		Side:                     side,
+		Quantity:                 totalQty,
+		Leverage:                 leverage,
+		OpenPrice:                openPrice,
+		ClosePrice:               closePrice,
+		PositionValue:            positionValue,
+		MarginUsed:               marginUsed,
+		PnL:                      pnl,
+		PnLPct:                   pnlPct,
+		Duration:                 closeTime.Sub(openTime).String(),
+		OpenTime:                 openTime,
+		CloseTime:                closeTime,
+		WasStopLoss:              pnl < 0,
+		OpenReason:               openReason,
+		CloseReason:              closeReason,
+		EventType:                eventType,
+		IsPartial:                eventType == "partial_close",
+		CloseQuantity:            totalQty,
+		RequestedClosePercentage: action.RequestedClosePercentage,
+		ExecutedClosePercentage:  action.ExecutedClosePercentage,
+		OrderID:                  action.OrderID,
+		SignalID:                 action.SignalID,
+		StrategyName:             action.StrategyName,
+		StrategyVersion:          action.StrategyVersion,
+		Commission:               commission,
+		PnLSource:                pnlSource,
+		Reconciled:               &reconciled,
+		ReconciliationStatus:     reconciliationStatus,
+		ReconciliationReason:     reconciliationReason,
+	}
+}
+
 func buildTradeOutcome(open openPositionTrace, closeAction DecisionAction, closeTime time.Time, closeReason string) TradeOutcome {
 	leverage := open.leverage
 	if leverage <= 0 {
 		leverage = 1
 	}
+	quantity := open.remainingQuantity
+	if quantity <= 0 {
+		quantity = open.quantity
+	}
 
 	var pnl float64
 	if open.side == "long" {
-		pnl = open.quantity * (closeAction.Price - open.price)
+		pnl = quantity * (closeAction.Price - open.price)
 	} else {
-		pnl = open.quantity * (open.price - closeAction.Price)
+		pnl = quantity * (open.price - closeAction.Price)
 	}
 
-	positionValue := open.quantity * open.price
+	positionValue := quantity * open.price
 	marginUsed := positionValue / float64(leverage)
 	pnlPct := 0.0
 	if marginUsed > 0 {
@@ -1188,7 +1543,7 @@ func buildTradeOutcome(open openPositionTrace, closeAction DecisionAction, close
 	return TradeOutcome{
 		Symbol:        open.symbol,
 		Side:          open.side,
-		Quantity:      open.quantity,
+		Quantity:      quantity,
 		Leverage:      leverage,
 		OpenPrice:     open.price,
 		ClosePrice:    closeAction.Price,
@@ -1202,6 +1557,76 @@ func buildTradeOutcome(open openPositionTrace, closeAction DecisionAction, close
 		WasStopLoss:   pnl < 0,
 		OpenReason:    open.reasoning,
 		CloseReason:   closeReason,
+	}
+}
+
+func metadataString(values map[string]any, key string) (string, bool) {
+	if len(values) == 0 {
+		return "", false
+	}
+	value, ok := values[key]
+	if !ok || value == nil {
+		return "", false
+	}
+	switch v := value.(type) {
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return "", false
+		}
+		return v, true
+	default:
+		text := fmt.Sprint(v)
+		if strings.TrimSpace(text) == "" {
+			return "", false
+		}
+		return text, true
+	}
+}
+
+func metadataFloat(values map[string]any, key string) (float64, bool) {
+	if len(values) == 0 {
+		return 0, false
+	}
+	value, ok := values[key]
+	if !ok || value == nil {
+		return 0, false
+	}
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case json.Number:
+		n, err := v.Float64()
+		return n, err == nil
+	case string:
+		n, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		return n, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func metadataBool(values map[string]any, key string) (bool, bool) {
+	if len(values) == 0 {
+		return false, false
+	}
+	value, ok := values[key]
+	if !ok || value == nil {
+		return false, false
+	}
+	switch v := value.(type) {
+	case bool:
+		return v, true
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(v))
+		return parsed, err == nil
+	default:
+		return false, false
 	}
 }
 
@@ -1275,14 +1700,18 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 
 	if len(records) == 0 {
 		return &PerformanceAnalysis{
-			RecentTrades: []TradeOutcome{},
-			SymbolStats:  make(map[string]*SymbolPerformance),
+			RecentTrades:      []TradeOutcome{},
+			RecentTradeEvents: []TradeOutcome{},
+			TradeEventStats:   &TradeEventStats{},
+			SymbolStats:       make(map[string]*SymbolPerformance),
 		}, nil
 	}
 
 	analysis := &PerformanceAnalysis{
-		RecentTrades: []TradeOutcome{},
-		SymbolStats:  make(map[string]*SymbolPerformance),
+		RecentTrades:      []TradeOutcome{},
+		RecentTradeEvents: []TradeOutcome{},
+		TradeEventStats:   &TradeEventStats{},
+		SymbolStats:       make(map[string]*SymbolPerformance),
 	}
 
 	// 为了避免开仓记录在窗口外导致匹配失败，需要先从所有历史记录中找出未平仓的持仓
@@ -1292,10 +1721,23 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 		allRecords = records
 	}
 
-	outcomes, unmatched := BuildTradeOutcomes(allRecords)
+	replay := BuildTradeReplay(allRecords)
+	outcomes := replay.FullOutcomes
+	unmatched := replay.Unmatched
 	analysis.Rolling = BuildRollingPerformance(outcomes, time.Now())
 	analysis.Execution = BuildExecutionQuality(allRecords, len(unmatched))
 	windowStart := earliestRecordEventTime(records)
+	windowEvents := make([]TradeOutcome, 0, len(replay.Events))
+	for _, event := range replay.Events {
+		if !windowStart.IsZero() && event.CloseTime.Before(windowStart) {
+			continue
+		}
+		windowEvents = append(windowEvents, event)
+	}
+	stats := BuildTradeEventStats(windowEvents)
+	analysis.TradeEventStats = &stats
+	analysis.RecentTradeEvents = recentEventsDescending(windowEvents, 100)
+
 	for _, outcome := range outcomes {
 		if !windowStart.IsZero() && outcome.CloseTime.Before(windowStart) {
 			continue
@@ -1395,6 +1837,46 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 	analysis.SharpeRatio = l.calculateSharpeRatio(records)
 
 	return analysis, nil
+}
+
+func BuildTradeEventStats(events []TradeOutcome) TradeEventStats {
+	var stats TradeEventStats
+	for _, event := range events {
+		stats.TotalEvents++
+		switch event.EventType {
+		case "partial_close":
+			stats.PartialCloseEvents++
+			if event.PnLSource == "exchange" {
+				stats.PartialCloseRealizedPnL += event.PnL
+			} else {
+				stats.PartialCloseEstimatedPnL += event.PnL
+			}
+			if event.Reconciled != nil && *event.Reconciled {
+				stats.PartialCloseReconciled++
+			} else {
+				stats.PartialClosePending++
+			}
+		case "auto_close":
+			stats.AutoCloseEvents++
+		default:
+			stats.FullCloseEvents++
+		}
+	}
+	return stats
+}
+
+func recentEventsDescending(events []TradeOutcome, limit int) []TradeOutcome {
+	if len(events) == 0 {
+		return []TradeOutcome{}
+	}
+	result := append([]TradeOutcome(nil), events...)
+	sort.SliceStable(result, func(i, j int) bool {
+		return result[i].CloseTime.After(result[j].CloseTime)
+	})
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result
 }
 
 // calculateSharpeRatio 计算夏普比率

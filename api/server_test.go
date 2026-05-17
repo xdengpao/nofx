@@ -560,6 +560,12 @@ func TestPerformance_WithTrader(t *testing.T) {
 	if _, ok := result["win_rate"]; !ok {
 		t.Error("performance 应包含 win_rate 字段")
 	}
+	if _, ok := result["recent_trade_events"]; !ok {
+		t.Error("performance 应包含 recent_trade_events 字段")
+	}
+	if _, ok := result["trade_event_stats"]; !ok {
+		t.Error("performance 应包含 trade_event_stats 字段")
+	}
 	if execution, ok := result["execution_quality"].(map[string]interface{}); !ok {
 		t.Error("performance 应包含 execution_quality 字段")
 	} else {

@@ -116,6 +116,162 @@ func TestBuildTradeOutcomes_UnmatchedCloseIsReported(t *testing.T) {
 	}
 }
 
+func TestBuildTradeReplay_PartialCloseDoesNotCloseLifecycle(t *testing.T) {
+	baseTime := time.Date(2026, 5, 17, 16, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{
+		{
+			Timestamp: baseTime,
+			Decisions: []DecisionAction{{
+				Action:    "open_short",
+				Symbol:    "ETHUSDT",
+				Quantity:  1,
+				Leverage:  5,
+				Price:     100,
+				Timestamp: baseTime,
+				Success:   true,
+			}},
+		},
+		{
+			Timestamp: baseTime.Add(time.Minute),
+			Decisions: []DecisionAction{{
+				Action:           "partial_close",
+				Symbol:           "ETHUSDT",
+				Quantity:         0.4,
+				CloseQuantity:    0.4,
+				Price:            90,
+				Timestamp:        baseTime.Add(time.Minute),
+				Success:          true,
+				Reasoning:        "浮盈回撤减仓",
+				StrategyMetadata: map[string]any{"side": "short"},
+			}},
+		},
+		{
+			Timestamp: baseTime.Add(2 * time.Minute),
+			Decisions: []DecisionAction{{
+				Action:    "close_short",
+				Symbol:    "ETHUSDT",
+				Price:     80,
+				Timestamp: baseTime.Add(2 * time.Minute),
+				Success:   true,
+				Reasoning: "最终平仓",
+			}},
+		},
+	}
+
+	replay := BuildTradeReplay(records)
+	if len(replay.Unmatched) != 0 {
+		t.Fatalf("不应有 unmatched: %+v", replay.Unmatched)
+	}
+	if len(replay.FullOutcomes) != 1 {
+		t.Fatalf("只应有1笔完整闭合交易，实际=%d", len(replay.FullOutcomes))
+	}
+	if got := replay.FullOutcomes[0].Quantity; mathAbs(got-0.6) > 0.0001 {
+		t.Fatalf("最终全平应只统计剩余0.6，实际=%.4f", got)
+	}
+	if got := replay.FullOutcomes[0].PnL; mathAbs(got-12) > 0.0001 {
+		t.Fatalf("最终全平PnL应按剩余数量计算，实际=%.4f", got)
+	}
+	if len(replay.Events) != 2 {
+		t.Fatalf("应有partial_close和full_close两个成交事件，实际=%d", len(replay.Events))
+	}
+	partial := replay.Events[0]
+	if partial.EventType != "partial_close" || !partial.IsPartial {
+		t.Fatalf("第一条事件应为部分平仓: %+v", partial)
+	}
+	if mathAbs(partial.Quantity-0.4) > 0.0001 || mathAbs(partial.PnL-4) > 0.0001 {
+		t.Fatalf("部分平仓数量/PnL错误: %+v", partial)
+	}
+	if mathAbs(partial.RemainingQuantity-0.6) > 0.0001 {
+		t.Fatalf("部分平仓后剩余数量错误: %.4f", partial.RemainingQuantity)
+	}
+}
+
+func TestBuildTradeReplay_PartialCloseAcrossLotsUsesFIFO(t *testing.T) {
+	baseTime := time.Date(2026, 5, 17, 17, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{
+		{Timestamp: baseTime, Decisions: []DecisionAction{{Action: "open_long", Symbol: "BTCUSDT", Quantity: 1, Leverage: 10, Price: 100, Timestamp: baseTime, Success: true}}},
+		{Timestamp: baseTime.Add(time.Minute), Decisions: []DecisionAction{{Action: "add_long", Symbol: "BTCUSDT", Quantity: 1, Leverage: 10, Price: 110, Timestamp: baseTime.Add(time.Minute), Success: true}}},
+		{Timestamp: baseTime.Add(2 * time.Minute), Decisions: []DecisionAction{{Action: "partial_close", Symbol: "BTCUSDT", Quantity: 1.5, Price: 120, Timestamp: baseTime.Add(2 * time.Minute), Success: true, StrategyMetadata: map[string]any{"side": "long"}}}},
+		{Timestamp: baseTime.Add(3 * time.Minute), Decisions: []DecisionAction{{Action: "close_long", Symbol: "BTCUSDT", Price: 130, Timestamp: baseTime.Add(3 * time.Minute), Success: true}}},
+	}
+
+	replay := BuildTradeReplay(records)
+	if len(replay.Unmatched) != 0 {
+		t.Fatalf("不应有 unmatched: %+v", replay.Unmatched)
+	}
+	if len(replay.Events) != 2 || len(replay.FullOutcomes) != 1 {
+		t.Fatalf("事件/完整交易数量错误: events=%d full=%d", len(replay.Events), len(replay.FullOutcomes))
+	}
+	partial := replay.Events[0]
+	if mathAbs(partial.Quantity-1.5) > 0.0001 || mathAbs(partial.OpenPrice-103.3333333) > 0.0001 {
+		t.Fatalf("跨lot部分平仓数量或加权开仓价错误: %+v", partial)
+	}
+	if mathAbs(partial.PnL-25) > 0.0001 {
+		t.Fatalf("跨lot部分平仓PnL错误: %.4f", partial.PnL)
+	}
+	full := replay.FullOutcomes[0]
+	if mathAbs(full.Quantity-0.5) > 0.0001 || mathAbs(full.PnL-10) > 0.0001 {
+		t.Fatalf("最终平仓剩余lot统计错误: %+v", full)
+	}
+}
+
+func TestBuildTradeReplay_SkippedPartialCloseIsNotTradeEvent(t *testing.T) {
+	baseTime := time.Date(2026, 5, 17, 18, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{
+		{Timestamp: baseTime, Decisions: []DecisionAction{{Action: "open_long", Symbol: "SOLUSDT", Quantity: 1, Leverage: 5, Price: 100, Timestamp: baseTime, Success: true}}},
+		{Timestamp: baseTime.Add(time.Minute), Decisions: []DecisionAction{{Action: "partial_close", FinalAction: "partial_close_skipped", Symbol: "SOLUSDT", Quantity: 0, CloseQuantity: 0, Price: 101, Timestamp: baseTime.Add(time.Minute), Success: true}}},
+		{Timestamp: baseTime.Add(2 * time.Minute), Decisions: []DecisionAction{{Action: "close_long", Symbol: "SOLUSDT", Price: 110, Timestamp: baseTime.Add(2 * time.Minute), Success: true}}},
+	}
+
+	replay := BuildTradeReplay(records)
+	if len(replay.Events) != 1 || replay.Events[0].EventType != "full_close" {
+		t.Fatalf("跳过的部分平仓不应进入成交事件: %+v", replay.Events)
+	}
+}
+
+func TestBuildTradeReplay_OldPartialCloseLogFallsBackToQuantity(t *testing.T) {
+	baseTime := time.Date(2026, 5, 17, 19, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{
+		{Timestamp: baseTime, Decisions: []DecisionAction{{Action: "open_short", Symbol: "ETHUSDT", Quantity: 1, Leverage: 5, Price: 100, Timestamp: baseTime, Success: true}}},
+		{Timestamp: baseTime.Add(time.Minute), Decisions: []DecisionAction{{Action: "partial_close", Symbol: "ETHUSDT", Quantity: 0.3, Price: 95, Timestamp: baseTime.Add(time.Minute), Success: true}}},
+	}
+
+	replay := BuildTradeReplay(records)
+	if len(replay.Events) != 1 {
+		t.Fatalf("旧日志应生成1条部分平仓事件，实际=%d", len(replay.Events))
+	}
+	event := replay.Events[0]
+	if event.EventType != "partial_close" || mathAbs(event.Quantity-0.3) > 0.0001 {
+		t.Fatalf("旧日志部分平仓兼容失败: %+v", event)
+	}
+	if event.Reconciled == nil || *event.Reconciled {
+		t.Fatalf("旧日志部分平仓应标记为估算/未对账: %+v", event)
+	}
+	if len(replay.Unmatched) != 1 || replay.Unmatched[0].Reason != "missing_close" {
+		t.Fatalf("剩余持仓应报告missing_close: %+v", replay.Unmatched)
+	}
+}
+
+func TestBuildTradeReplay_PartialCloseMissingSideIsUnmatched(t *testing.T) {
+	baseTime := time.Date(2026, 5, 17, 20, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{{Timestamp: baseTime, Decisions: []DecisionAction{{Action: "partial_close", Symbol: "ETHUSDT", Quantity: 0.1, Price: 100, Timestamp: baseTime, Success: true}}}}
+
+	replay := BuildTradeReplay(records)
+	if len(replay.Events) != 0 {
+		t.Fatalf("无法识别方向时不应生成事件: %+v", replay.Events)
+	}
+	if len(replay.Unmatched) != 1 || replay.Unmatched[0].Reason != "missing_side_for_partial_close" {
+		t.Fatalf("应记录missing_side_for_partial_close: %+v", replay.Unmatched)
+	}
+}
+
+func mathAbs(value float64) float64 {
+	if value < 0 {
+		return -value
+	}
+	return value
+}
+
 func TestBuildRollingPerformance_SymbolAndSideGates(t *testing.T) {
 	now := time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC)
 	var outcomes []TradeOutcome

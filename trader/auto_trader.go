@@ -1601,13 +1601,164 @@ func sameSidePositionQuantity(positions []map[string]interface{}, symbol, side s
 }
 
 func extractOrderID(order map[string]interface{}) int64 {
-	if id, ok := order["orderId"].(int64); ok {
-		return id
+	value, ok := order["orderId"]
+	if !ok || value == nil {
+		return 0
 	}
-	if id, ok := order["orderId"].(float64); ok {
+	switch id := value.(type) {
+	case int64:
+		return id
+	case int:
 		return int64(id)
+	case int32:
+		return int64(id)
+	case float64:
+		return int64(id)
+	case float32:
+		return int64(id)
+	case json.Number:
+		parsed, err := id.Int64()
+		if err == nil {
+			return parsed
+		}
+		parsedFloat, err := id.Float64()
+		if err == nil {
+			return int64(parsedFloat)
+		}
+	case string:
+		text := strings.TrimSpace(id)
+		if text == "" {
+			return 0
+		}
+		parsed, err := strconv.ParseInt(text, 10, 64)
+		if err == nil {
+			return parsed
+		}
+		parsedFloat, err := strconv.ParseFloat(text, 64)
+		if err == nil {
+			return int64(parsedFloat)
+		}
 	}
 	return 0
+}
+
+func (at *AutoTrader) enrichCloseFillMetadata(d *decision.Decision, actionRecord *logger.DecisionAction, orderID int64, fallbackQuantity float64, fallbackPrice float64) {
+	if at == nil || at.trader == nil || d == nil || actionRecord == nil {
+		return
+	}
+	if actionRecord.StrategyMetadata == nil {
+		actionRecord.StrategyMetadata = map[string]any{}
+	}
+	meta := actionRecord.StrategyMetadata
+	meta["reconciled"] = false
+	meta["reconciliation_status"] = "estimated_from_decision_log"
+	if orderID <= 0 {
+		meta["reconciliation_reason"] = "交易所未返回有效订单ID，使用决策日志估算"
+		return
+	}
+	if at.exchange != "aster" {
+		meta["reconciliation_status"] = "unsupported"
+		meta["reconciliation_reason"] = fmt.Sprintf("%s 暂未启用成交明细对账，使用决策日志估算", at.exchange)
+		return
+	}
+
+	start := actionRecord.Timestamp.Add(-2 * time.Minute).UnixMilli()
+	if actionRecord.Timestamp.IsZero() {
+		start = time.Now().Add(-5 * time.Minute).UnixMilli()
+	}
+	end := time.Now().Add(2 * time.Minute).UnixMilli()
+	trades, err := at.trader.GetTradeHistory(d.Symbol, start, end, 50)
+	if err == nil {
+		fillQty, quoteQty, realizedPnL, commission := aggregateTradesForOrder(trades, orderID)
+		if fillQty > 0 {
+			avgPrice := fallbackPrice
+			if quoteQty > 0 {
+				avgPrice = quoteQty / fillQty
+			}
+			meta["reconciled"] = true
+			meta["reconciliation_status"] = "matched"
+			meta["filled_quantity"] = fillQty
+			meta["avg_fill_price"] = avgPrice
+			meta["realized_pnl"] = realizedPnL
+			meta["commission"] = commission
+			actionRecord.CloseQuantity = fillQty
+			actionRecord.Quantity = fillQty
+			if avgPrice > 0 {
+				actionRecord.Price = avgPrice
+			}
+			return
+		}
+	} else {
+		meta["reconciliation_reason"] = fmt.Sprintf("查询成交明细失败: %v", err)
+	}
+
+	order, orderErr := at.trader.GetOrderStatus(d.Symbol, orderID)
+	if orderErr == nil && order != nil {
+		meta["order_status"] = order.Status
+		if order.ExecutedQty > 0 {
+			avgPrice := order.AvgPrice
+			if avgPrice <= 0 {
+				avgPrice = fallbackPrice
+			}
+			meta["filled_quantity"] = order.ExecutedQty
+			meta["avg_fill_price"] = avgPrice
+			meta["realized_pnl"] = order.RealizedPnL
+			meta["commission"] = order.Commission
+			if strings.EqualFold(order.Status, "FILLED") {
+				meta["reconciled"] = true
+				meta["reconciliation_status"] = "matched"
+			} else {
+				meta["reconciliation_status"] = "partial_or_pending"
+			}
+			actionRecord.CloseQuantity = order.ExecutedQty
+			actionRecord.Quantity = order.ExecutedQty
+			if avgPrice > 0 {
+				actionRecord.Price = avgPrice
+			}
+			return
+		}
+		meta["reconciliation_status"] = "pending"
+		meta["reconciliation_reason"] = fmt.Sprintf("订单状态为%s，暂未查询到成交数量", order.Status)
+		return
+	}
+	if orderErr != nil && meta["reconciliation_reason"] == nil {
+		meta["reconciliation_reason"] = fmt.Sprintf("查询订单状态失败: %v", orderErr)
+	}
+	meta["reconciliation_status"] = "pending"
+	if fallbackQuantity > 0 {
+		meta["filled_quantity"] = fallbackQuantity
+	}
+	if fallbackPrice > 0 {
+		meta["avg_fill_price"] = fallbackPrice
+	}
+}
+
+func aggregateTradesForOrder(trades []TradeRecord, orderID int64) (qty, quoteQty, realizedPnL, commission float64) {
+	for _, trade := range trades {
+		if trade.OrderID != orderID {
+			continue
+		}
+		qty += trade.Qty
+		if trade.QuoteQty > 0 {
+			quoteQty += trade.QuoteQty
+		} else {
+			quoteQty += trade.Qty * trade.Price
+		}
+		realizedPnL += trade.RealizedPnL
+		commission += trade.Commission
+	}
+	return qty, quoteQty, realizedPnL, commission
+}
+
+func markPartialCloseProtectionFailure(actionRecord *logger.DecisionAction, reason string) {
+	if actionRecord == nil {
+		return
+	}
+	actionRecord.StopLossSet = boolPtr(false)
+	actionRecord.ProtectionError = reason
+	actionRecord.ExecutionRisk = "high"
+	actionRecord.HighRisk = true
+	actionRecord.HighRiskReason = "部分平仓后剩余仓位保护单未能建立"
 }
 
 func sideIcon(side string) string {
@@ -1677,9 +1828,7 @@ func (at *AutoTrader) executeCloseLongWithRecord(d *decision.Decision, actionRec
 		return err
 	}
 
-	if orderID, ok := order["orderId"].(int64); ok {
-		actionRecord.OrderID = orderID
-	}
+	actionRecord.OrderID = extractOrderID(order)
 	// 🆕 停止追踪（手动平仓）
 	at.orderTracker.StopTracking(d.Symbol, "long")
 
@@ -1736,9 +1885,7 @@ func (at *AutoTrader) executeCloseShortWithRecord(d *decision.Decision, actionRe
 	// 🆕 停止追踪（手动平仓）
 	at.orderTracker.StopTracking(d.Symbol, "short")
 
-	if orderID, ok := order["orderId"].(int64); ok {
-		actionRecord.OrderID = orderID
-	}
+	actionRecord.OrderID = extractOrderID(order)
 
 	// ✅ 新增：调用平仓回调
 	decision.OnPositionClosedScoped(at.id, d.Symbol, "short", marketData.CurrentPrice, pnlPercent, pnlUSD, d.Reasoning)
@@ -2296,6 +2443,7 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 		actionRecord.StrategyMetadata = map[string]any{}
 	}
 	actionRecord.StrategyMetadata["position_quantity_before"] = totalQuantity
+	actionRecord.StrategyMetadata["side"] = side
 
 	// ✅ Layer 2: 最小仓位检查（防止产生小额剩余）
 	markPrice, ok := targetPosition["markPrice"].(float64)
@@ -2376,10 +2524,7 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 		return fmt.Errorf("部分平仓失败: %w", err)
 	}
 
-	// 记录订单ID
-	if orderID, ok := order["orderId"].(int64); ok {
-		actionRecord.OrderID = orderID
-	}
+	actionRecord.OrderID = extractOrderID(order)
 
 	log.Printf("  ✓ 部分平仓成功: 平仓 %.4f (%.1f%%), 剩余 %.4f",
 		closeQuantity, d.ClosePercentage, remainingQuantity)
@@ -2388,6 +2533,7 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 	if totalQuantity > 0 {
 		actionRecord.ExecutedClosePercentage = closeQuantity / totalQuantity * 100
 	}
+	at.enrichCloseFillMetadata(d, actionRecord, actionRecord.OrderID, closeQuantity, actionRecord.Price)
 
 	// 🔧 FIX: 部分平仓后重新设置止盈止损（基于剩余数量）
 	// 币安会自动取消原来的止盈止损订单（因为数量不匹配），所以必须重新设置。
@@ -2396,11 +2542,15 @@ func (at *AutoTrader) executePartialCloseWithRecord(d *decision.Decision, action
 		log.Printf("  🎯 更新剩余仓位的止盈止损...")
 
 		if protectiveStopLoss <= 0 {
-			return fmt.Errorf("部分平仓后无法确定保护止损，拒绝让剩余仓位失去保护")
+			markPartialCloseProtectionFailure(actionRecord, "部分平仓已执行，但无法确定剩余仓位保护止损")
+			decision.OnPartialCloseScoped(at.id, d.Symbol, side, d.TrancheIndex, d.ClosePercentage, 0)
+			return nil
 		}
 
 		if err := at.trader.SetStopLoss(d.Symbol, positionSide, remainingQuantity, protectiveStopLoss); err != nil {
-			return fmt.Errorf("部分平仓后设置保护止损失败: %w", err)
+			markPartialCloseProtectionFailure(actionRecord, fmt.Sprintf("部分平仓已执行，但设置剩余仓位保护止损失败: %v", err))
+			decision.OnPartialCloseScoped(at.id, d.Symbol, side, d.TrancheIndex, d.ClosePercentage, 0)
+			return nil
 		}
 		log.Printf("  ✓ 已设置保护止损: %.4f (数量: %.4f)", protectiveStopLoss, remainingQuantity)
 
