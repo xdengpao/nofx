@@ -7,4 +7,4 @@
 - [x] Mark successful programmatic open/add executions as executed.
 - [x] Add focused tests for confidence and execution state behavior.
 - [x] Run targeted Go tests.
-- [ ] Deploy to 161 and verify service health.
+- [x] Deploy to 161 and verify service health.
