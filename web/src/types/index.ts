@@ -263,6 +263,8 @@ export interface StrategySymbolsResponse {
 
 export interface ChanlunSignal {
   signal_id: string;
+  structure_key?: string;
+  lifecycle_key?: string;
   symbol: string;
   direction: string;
   signal_type: string;
@@ -284,6 +286,24 @@ export interface ChanlunSignal {
   segment_end_time?: number;
   status?: string;
   source_layer?: string;
+  parent_signal_id?: string;
+  parent_structure_key?: string;
+  reason_code?: string;
+  entry_trigger_id?: string;
+  entry_trigger_type?: string;
+  entry_trigger_timeframe?: string;
+  entry_trigger_close_time?: number;
+  entry_window_state?: string;
+  entry_reference_price?: number;
+  entry_invalidated?: boolean;
+  entry_invalidation_reason?: string;
+  remaining_net_rr?: number;
+  freshness_state?: string;
+  age_candles?: number;
+  preview_phase?: string;
+  preview_source_timeframe?: string;
+  preview_closed_components?: number;
+  preview_confirmed?: boolean;
   diagnostics?: {
     reasons?: string[];
     metrics?: Record<string, unknown>;
@@ -291,6 +311,14 @@ export interface ChanlunSignal {
     bootstrap?: boolean;
   };
 }
+
+export type SignalDisplayCategory =
+  | 'structure_background'
+  | 'preview_watch'
+  | 'entry_trigger'
+  | 'trade_action'
+  | 'invalid_rejected'
+  | 'position_management';
 
 export interface SignalMarker {
   symbol: string;
@@ -305,12 +333,68 @@ export interface SignalMarker {
   source_layer: string;
   status: string;
   signal_id: string;
+  structure_key?: string;
+  lifecycle_key?: string;
+  parent_structure_key?: string;
+  reason_code?: string;
+  display_category?: SignalDisplayCategory;
+  display_priority?: number;
+  hidden_by_default?: boolean;
+  collapsed?: boolean;
+  collapsed_count?: number;
+  first_seen_close_time?: number;
+  last_seen_close_time?: number;
+  last_updated_at?: number;
   action?: string;
   final_action?: string;
   trade_intent?: string;
   position_side?: string;
   price?: number;
   reason?: string;
+  parent_signal_id?: string;
+  entry_trigger_id?: string;
+  entry_trigger_type?: string;
+  entry_trigger_timeframe?: string;
+  entry_trigger_close_time?: number;
+  entry_window_state?: string;
+  entry_reference_price?: number;
+  entry_invalidated?: boolean;
+  entry_invalidation_reason?: string;
+  remaining_net_rr?: number;
+  freshness_state?: string;
+  age_candles?: number;
+  preview_phase?: string;
+  preview_source_timeframe?: string;
+  preview_closed_components?: number;
+  preview_confirmed?: boolean;
+}
+
+export interface SignalMarkerSummary {
+  total_raw: number;
+  total_returned: number;
+  hidden_by_default: number;
+  collapsed_lifecycle: number;
+  suppressed_repeats: number;
+  preview_hidden: number;
+  by_category?: Record<string, number>;
+  by_status?: Record<string, number>;
+  max_latency_hours?: number;
+  median_latency_hours?: number;
+}
+
+export interface SignalReportFilters {
+  layers?: string[];
+  statuses?: string[];
+  from?: number;
+  to?: number;
+  limit?: number;
+}
+
+export type StrategySignalView = 'default' | 'audit';
+
+export interface StrategySignalQuery extends SignalReportFilters {
+  view?: StrategySignalView;
+  include_history?: boolean;
 }
 
 export interface StrategySignalReport {
@@ -325,6 +409,9 @@ export interface StrategySignalReport {
   micro_timeframe?: string;
   signals: ChanlunSignal[];
   signal_markers?: SignalMarker[];
+  view?: StrategySignalView;
+  marker_summary?: SignalMarkerSummary;
+  filters?: SignalReportFilters;
   latest_diagnostics?: Record<string, unknown>;
 }
 

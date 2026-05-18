@@ -2,6 +2,7 @@ import { useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'reac
 import type { MarketKline, SignalMarker } from '../types';
 import {
   compareVisualMarkers,
+  clusterVisualMarkers,
   expandVisualMarkers,
   markerBelongsToKlineAt,
   markerStatusLabel,
@@ -52,13 +53,9 @@ export function StrategyCandlestickChart({
   const containerRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<HoverState | null>(null);
 
-  const mainMarkers = useMemo(
-    () => markers.filter((marker) => marker.source_layer === 'main_signal' && marker.timeframe === timeframe),
-    [markers, timeframe],
-  );
   const visualMarkers = useMemo(
-    () => expandVisualMarkers(mainMarkers, klines ?? []),
-    [mainMarkers, klines],
+    () => clusterVisualMarkers(expandVisualMarkers(markers, klines ?? []), 2),
+    [markers, klines],
   );
 
   const chart = useMemo(() => {
@@ -213,7 +210,7 @@ export function StrategyCandlestickChart({
             </div>
             {hover.markers.length > 0 && (
               <div className="mt-3 space-y-2">
-                {hover.markers.map((visual) => {
+                {expandedHoverMarkers(hover.markers).map((visual) => {
                   const marker = visual.marker;
                   const signalClose = resolveSignalCloseTime(marker);
                   const decisionClose = resolveDecisionCloseTime(marker);
@@ -226,11 +223,18 @@ export function StrategyCandlestickChart({
                     <div className="mt-1 grid grid-cols-[64px_1fr] gap-x-2 font-mono" style={{ color: '#848E9C' }}>
                       <span>结构</span><span>{formatFullTime(signalClose)}</span>
                       <span>决策</span><span>{decisionClose ? formatFullTime(decisionClose) : '缺少确认时间'}</span>
+                      <span>年龄</span><span>{marker.age_candles ? `${marker.age_candles} 根` : '--'}</span>
+                      <span>来源</span><span>{marker.source_layer || '--'}</span>
+                      <span>状态</span><span>{marker.status || '--'}</span>
+                      <span>原因</span><span>{marker.reason_code || marker.entry_invalidation_reason || '--'}</span>
+                      <span>父级</span><span>{marker.parent_structure_key || marker.parent_signal_id || '--'}</span>
+                      <span>触发</span><span>{marker.entry_trigger_id || '--'}</span>
                     </div>
                     {visual.pairOutOfRange && visual.pairCloseTime && (
                       <div className="mt-1" style={{ color: '#F0B90B' }}>配对时间 {formatFullTime(visual.pairCloseTime)} 不在当前图表范围内</div>
                     )}
                     {marker.reason && <div className="mt-1 break-words" style={{ color: '#B7BDC6' }}>{marker.reason}</div>}
+                    <div className="mt-1 font-mono" style={{ color: '#848E9C' }}>{marker.lifecycle_key || marker.signal_id}</div>
                     <div className="mt-1 font-mono" style={{ color: '#848E9C' }}>{marker.signal_id}</div>
                   </div>
                   );
@@ -283,9 +287,9 @@ function MarkerGlyph({
   const label = visual.label;
   const tone = markerTone(marker);
   const fill = tone === 'buy' ? '#0ECB81' : tone === 'sell' ? '#F6465D' : '#848E9C';
-  const textWidth = Math.max(34, label.length * 11 + 12);
+  const textWidth = Math.max(34, label.length * 9 + 16);
   const status = (marker.status || '').toLowerCase();
-  const stroke = status === 'executed' ? '#F0B90B' : fill;
+  const stroke = visual.kind === 'cluster' || status === 'executed' ? '#F0B90B' : fill;
   const intent = resolveTradeIntent(marker);
   const title = [
     `${signalLabel(marker.signal_type)} ${tradeIntentLabel(intent)}`,
@@ -294,6 +298,26 @@ function MarkerGlyph({
     marker.final_action,
     marker.reason,
   ].filter(Boolean).join(' · ');
+  if (visual.kind === 'cluster') {
+    return (
+      <g transform={`translate(${x}, ${y})`} onMouseMove={onMouseMove}>
+        <title>{`${visual.clusterCount || 0} 条信号`}</title>
+        <rect
+          x={-textWidth / 2}
+          y={-11}
+          width={textWidth}
+          height={22}
+          rx={4}
+          fill="#1E2329"
+          stroke={stroke}
+          strokeWidth={1.4}
+        />
+        <text x={0} y={4} textAnchor="middle" fill="#EAECEF" fontSize={10} fontWeight={800}>
+          {label}
+        </text>
+      </g>
+    );
+  }
   return (
     <g transform={`translate(${x}, ${y})`} onMouseMove={onMouseMove}>
       <title>{title}</title>
@@ -337,6 +361,10 @@ function markerStackIndex(markers: VisualSignalMarker[], markerIndex: number) {
     .length;
 }
 
+function expandedHoverMarkers(markers: VisualSignalMarker[]) {
+  return markers.flatMap((marker) => marker.clusterItems ?? [marker]);
+}
+
 function LegendSwatch({ color, label }: { color: string; label: string }) {
   return (
     <span className="inline-flex items-center gap-1">
@@ -363,7 +391,7 @@ function limitSourceLabel(source?: string) {
   }
 }
 
-function visualKindLabel(kind: 'signal' | 'decision' | 'merged') {
+function visualKindLabel(kind: 'signal' | 'decision' | 'merged' | 'cluster') {
   switch (kind) {
     case 'signal':
       return '结构点';
@@ -371,6 +399,8 @@ function visualKindLabel(kind: 'signal' | 'decision' | 'merged') {
       return '决策点';
     case 'merged':
       return '结构/决策';
+    case 'cluster':
+      return '信号簇';
     default:
       return '';
   }

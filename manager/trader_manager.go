@@ -561,14 +561,18 @@ func (tm *TraderManager) GetStrategySymbols(traderID string) ([]chanlun.Strategy
 }
 
 func (tm *TraderManager) GetLatestStrategySignals(traderID, symbol string) (*chanlun.SignalReport, error) {
+	return tm.GetLatestStrategySignalsWithOptions(traderID, symbol, chanlun.SignalReportOptions{})
+}
+
+func (tm *TraderManager) GetLatestStrategySignalsWithOptions(traderID, symbol string, opts chanlun.SignalReportOptions) (*chanlun.SignalReport, error) {
 	t, err := tm.GetTrader(traderID)
 	if err != nil {
 		return nil, err
 	}
-	if report, ok := t.GetLatestStrategySignals(symbol); ok {
+	if report, ok := t.GetLatestStrategySignalsWithOptions(symbol, opts); ok {
 		return report, nil
 	}
-	return &chanlun.SignalReport{
+	report := &chanlun.SignalReport{
 		TraderID:     traderID,
 		Symbol:       market.Normalize(symbol),
 		DecisionMode: t.GetDecisionMode(),
@@ -576,7 +580,8 @@ func (tm *TraderManager) GetLatestStrategySignals(traderID, symbol string) (*cha
 		LatestDiagnostics: map[string]any{
 			"messages": []string{"暂无该标的的程序化策略信号"},
 		},
-	}, nil
+	}
+	return report, nil
 }
 
 func (tm *TraderManager) GetMarketKlines(traderID, symbol, timeframe string, limit int) ([]market.Kline, error) {

@@ -1,6 +1,6 @@
 import type { MarketKline, SignalMarker } from '../types';
 
-export type VisualMarkerKind = 'signal' | 'decision' | 'merged';
+export type VisualMarkerKind = 'signal' | 'decision' | 'merged' | 'cluster';
 export type MarkerPlacement = 'buy' | 'sell';
 
 export type VisualSignalMarker = {
@@ -14,6 +14,8 @@ export type VisualSignalMarker = {
   label: string;
   placement: MarkerPlacement;
   stackKey: string;
+  clusterCount?: number;
+  clusterItems?: VisualSignalMarker[];
 };
 
 export type TradeIntent =
@@ -102,6 +104,22 @@ export function tradeIntentLabel(intent?: string): string {
 export function markerDisplayLabel(marker: SignalMarker): string {
   const label = signalLabel(marker.signal_type);
   const intent = tradeIntentLabel(resolveTradeIntent(marker));
+  switch (marker.display_category) {
+    case 'structure_background':
+      return `${label} 结构`;
+    case 'preview_watch':
+      return `${label} 预览`;
+    case 'entry_trigger':
+      return `${label} 触发`;
+    case 'trade_action':
+      return intent ? `${label} ${intent}${compactMarkerStatus(marker.status)}` : `${label} 动作${compactMarkerStatus(marker.status)}`;
+    case 'invalid_rejected':
+      return `${label} ${compactMarkerStatus(marker.status) || '失效'}`;
+    case 'position_management':
+      return `PM ${intent || label}`;
+    default:
+      break;
+  }
   return intent ? `${label} · ${intent}` : label;
 }
 
@@ -192,6 +210,70 @@ export function expandVisualMarkers(markers: SignalMarker[], klines: Pick<Market
   return result.sort(compareVisualMarkers);
 }
 
+export function clusterVisualMarkers(markers: VisualSignalMarker[], maxLabelsPerSide = 2): VisualSignalMarker[] {
+  const groups = new Map<string, VisualSignalMarker[]>();
+  for (const marker of markers) {
+    const group = groups.get(marker.stackKey) ?? [];
+    group.push(marker);
+    groups.set(marker.stackKey, group);
+  }
+  const out: VisualSignalMarker[] = [];
+  for (const group of groups.values()) {
+    const sorted = [...group].sort(compareVisualMarkers);
+    if (sorted.length <= maxLabelsPerSide) {
+      out.push(...sorted);
+      continue;
+    }
+    const representative = sorted[0];
+    const side = representative.placement === 'sell' ? 'S' : 'B';
+    out.push({
+      ...representative,
+      id: `${representative.stackKey}-cluster-${sorted.length}`,
+      kind: 'cluster',
+      label: `${side} x${sorted.length}`,
+      clusterCount: sorted.length,
+      clusterItems: sorted,
+    });
+  }
+  return compactAdjacentVisualMarkers(out.sort(compareVisualMarkers));
+}
+
+function compactAdjacentVisualMarkers(markers: VisualSignalMarker[]): VisualSignalMarker[] {
+  const out: VisualSignalMarker[] = [];
+  const used = new Set<number>();
+  for (let i = 0; i < markers.length; i++) {
+    if (used.has(i)) continue;
+    const current = markers[i];
+    const nextIndex = markers.findIndex((candidate, index) => (
+      index > i
+      && !used.has(index)
+      && candidate.placement === current.placement
+      && candidate.kind !== 'cluster'
+      && current.kind !== 'cluster'
+      && candidate.marker.signal_id !== current.marker.signal_id
+      && Math.abs(normalizeEpochMs(candidate.anchorCloseTime) - normalizeEpochMs(current.anchorCloseTime)) <= 4 * 60 * 60 * 1000
+      && current.label.length + candidate.label.length >= 10
+    ));
+    if (nextIndex === -1) {
+      out.push(current);
+      continue;
+    }
+    const pair = [current, markers[nextIndex]].sort(compareVisualMarkers);
+    used.add(nextIndex);
+    const representative = pair[0];
+    const side = representative.placement === 'sell' ? 'S' : 'B';
+    out.push({
+      ...representative,
+      id: `${representative.stackKey}-adjacent-cluster-${pair.map((item) => item.id).join('-')}`,
+      kind: 'cluster',
+      label: `${side} x${pair.length}`,
+      clusterCount: pair.length,
+      clusterItems: pair,
+    });
+  }
+  return out.sort(compareVisualMarkers);
+}
+
 export function compareVisualMarkers(a: VisualSignalMarker, b: VisualSignalMarker): number {
   return visualMarkerSortKey(a).localeCompare(visualMarkerSortKey(b));
 }
@@ -224,7 +306,7 @@ function visualMarkerLabel(marker: SignalMarker, kind: VisualMarkerKind): string
   const base = markerDisplayLabel(marker);
   const status = markerStatusLabel(marker.status);
   if (kind === 'decision' || kind === 'merged') {
-    return status && status !== '--' ? `${base} · ${status}` : base;
+    return marker.display_category ? base : status && status !== '--' ? `${base} · ${status}` : base;
   }
   return base;
 }
@@ -239,10 +321,28 @@ function visualMarkerSortKey(visual: VisualSignalMarker): string {
     placementRank,
     actionRank,
     kindRank,
+    String(99 - (marker.display_priority ?? 0)).padStart(3, '0'),
     signalLabel(marker.signal_type),
     resolveTradeIntent(marker),
     marker.signal_id || '',
   ].join('|');
+}
+
+function compactMarkerStatus(status?: string): string {
+  switch ((status || '').toLowerCase()) {
+    case 'executed':
+      return '成';
+    case 'rejected':
+      return '拒';
+    case 'failed':
+      return '败';
+    case 'invalidated':
+      return '失效';
+    case 'ready':
+      return '备';
+    default:
+      return '';
+  }
 }
 
 export function markerStatusLabel(status?: string): string {

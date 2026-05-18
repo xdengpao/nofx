@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   compareVisualMarkers,
+  clusterVisualMarkers,
   expandVisualMarkers,
   markerBelongsToKline,
   markerBelongsToKlineAt,
@@ -138,6 +139,19 @@ describe('strategy marker helpers', () => {
   it('does not infer a trade intent from detected signal direction alone', () => {
     expect(resolveTradeIntent({ direction: 'long' })).toBe('');
     expect(resolveTradeIntent({ action: '', final_action: '', position_side: '', direction: 'short' })).toBe('');
+  });
+
+  it('clusters crowded markers on the same candle and placement', () => {
+    const klines = [{ close_time: 1_779_001_200_000 }];
+    const visuals = expandVisualMarkers([
+      markerFixture({ signal_id: 's1', signal_type: 'sell2', direction: 'short' }),
+      markerFixture({ signal_id: 's2', signal_type: 'sell3', direction: 'short' }),
+      markerFixture({ signal_id: 's3', signal_type: 'sell1', direction: 'short' }),
+    ], klines);
+    const clustered = clusterVisualMarkers(visuals, 2);
+    expect(clustered).toHaveLength(1);
+    expect(clustered[0].kind).toBe('cluster');
+    expect(clustered[0].clusterCount).toBe(3);
   });
 });
 

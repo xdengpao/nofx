@@ -9,7 +9,8 @@ import { BacktestPage } from './components/backtest/BacktestPage';
 import { LanguageProvider, useLanguage } from './contexts/LanguageContext';
 import { backtestApi } from './lib/backtestApi';
 import { t, type Language } from './i18n/translations';
-import { markerDisplayLabel, markerStatusLabel, markerTone, normalizeEpochMs, resolveTradeIntent, signalLabel, tradeIntentLabel } from './utils/strategyMarkers';
+import { buildSignalDisplayModel } from './utils/strategyDisplay';
+import { markerDisplayLabel, markerStatusLabel, markerTone, resolveTradeIntent, tradeIntentLabel } from './utils/strategyMarkers';
 import type {
   SystemStatus,
   AccountInfo,
@@ -20,6 +21,7 @@ import type {
   TraderInfo,
   MarketKlineResponse,
   StrategySignalReport,
+  StrategySignalView,
   StrategySymbolsResponse,
   SignalMarker,
 } from './types';
@@ -423,6 +425,7 @@ function TraderDetailsPage({
   language: Language;
 }) {
   const [strategySymbol, setStrategySymbol] = useState('');
+  const [strategySignalView, setStrategySignalView] = useState<StrategySignalView>('default');
   const traderId = selectedTrader?.trader_id;
   const isProgrammaticTrader = status?.decision_mode === 'programmatic';
   const { data: strategySymbols } = useSWR<StrategySymbolsResponse>(
@@ -439,8 +442,8 @@ function TraderDetailsPage({
   }, [strategySymbol, symbolOptions]);
 
   const { data: strategySignals } = useSWR<StrategySignalReport>(
-    traderId && isProgrammaticTrader && strategySymbol ? `strategy-signals-${traderId}-${strategySymbol}` : null,
-    () => api.getStrategySignals(traderId, strategySymbol),
+    traderId && isProgrammaticTrader && strategySymbol ? `strategy-signals-${traderId}-${strategySymbol}-${strategySignalView}` : null,
+    () => api.getStrategySignals(traderId, strategySymbol, { view: strategySignalView }),
     { refreshInterval: 30000, revalidateOnFocus: false }
   );
   const strategyTradeTimeframe = normalizeStrategyTimeframe(strategySignals?.trade_timeframe);
@@ -677,6 +680,8 @@ function TraderDetailsPage({
         selectedSymbol={strategySymbol}
         onSymbolChange={setStrategySymbol}
         signals={strategySignals}
+        signalView={strategySignalView}
+        onSignalViewChange={setStrategySignalView}
         klines={strategyKlines}
         klinesError={strategyKlinesError}
       />
@@ -695,6 +700,8 @@ function StrategyInspector({
   selectedSymbol,
   onSymbolChange,
   signals,
+  signalView,
+  onSignalViewChange,
   klines,
   klinesError,
 }: {
@@ -703,17 +710,26 @@ function StrategyInspector({
   selectedSymbol: string;
   onSymbolChange: (symbol: string) => void;
   signals?: StrategySignalReport;
+  signalView: StrategySignalView;
+  onSignalViewChange: (view: StrategySignalView) => void;
   klines?: MarketKlineResponse;
   klinesError?: Error;
 }) {
   const tradeTimeframe = normalizeStrategyTimeframe(signals?.trade_timeframe);
-  const latestSignal = signals?.signals?.find((signal) => signal.source_layer !== 'position_management') ?? signals?.signals?.[0];
-  const markers = signals?.signal_markers ?? [];
-  const mainMarkers = markers.filter((marker) => marker.source_layer === 'main_signal' && marker.timeframe === tradeTimeframe);
-  const positionMarkers = markers.filter((marker) => marker.source_layer === 'position_management').slice(-5).reverse();
+  const [layerFilters, setLayerFilters] = useState<string[]>([]);
+  const [statusFilters, setStatusFilters] = useState<string[]>([]);
+  const displayModel = buildSignalDisplayModel(signals, {
+    audit: signalView === 'audit',
+    layers: layerFilters,
+    statuses: statusFilters,
+  });
+  const latestItem = displayModel.latest;
+  const chartMarkers = displayModel.chartMarkers;
+  const positionItems = displayModel.items.filter((item) => item.category === 'position_management').slice(0, 5);
   const isProgrammatic = status?.decision_mode === 'programmatic';
   const hasTimeframeFallback = isProgrammatic && !signals?.trade_timeframe;
   const diagnostic = diagnosticText(signals?.latest_diagnostics);
+  const summary = signals?.marker_summary;
 
   return (
     <div className="binance-card p-6 mb-6 animate-slide-in" style={{ animationDelay: '0.25s' }}>
@@ -724,19 +740,31 @@ function StrategyInspector({
             {status?.decision_mode || 'ai'} {signals?.strategy_name ? `· ${signals.strategy_name} ${signals.strategy_version || ''}` : ''}
           </div>
         </div>
-        <select
-          value={selectedSymbol}
-          onChange={(event) => onSymbolChange(event.target.value)}
-          className="rounded px-3 py-2 text-sm font-medium cursor-pointer"
-          style={{ background: '#1E2329', border: '1px solid #2B3139', color: '#EAECEF' }}
-        >
-          {symbols.length === 0 && <option value="">暂无标的</option>}
-          {symbols.map((item) => (
-            <option key={item.symbol} value={item.symbol}>
-              {item.symbol}{item.has_position ? ' · 持仓' : ''}
-            </option>
-          ))}
-        </select>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={selectedSymbol}
+            onChange={(event) => onSymbolChange(event.target.value)}
+            className="rounded px-3 py-2 text-sm font-medium cursor-pointer"
+            style={{ background: '#1E2329', border: '1px solid #2B3139', color: '#EAECEF' }}
+          >
+            {symbols.length === 0 && <option value="">暂无标的</option>}
+            {symbols.map((item) => (
+              <option key={item.symbol} value={item.symbol}>
+                {item.symbol}{item.has_position ? ' · 持仓' : ''}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={() => onSignalViewChange(signalView === 'audit' ? 'default' : 'audit')}
+            className="rounded px-3 py-2 text-xs font-bold"
+            style={signalView === 'audit'
+              ? { background: '#F0B90B', color: '#0B0E11', border: '1px solid #F0B90B' }
+              : { background: '#1E2329', color: '#EAECEF', border: '1px solid #2B3139' }}
+          >
+            {signalView === 'audit' ? '审计' : '默认'}
+          </button>
+        </div>
       </div>
 
       {!isProgrammatic ? (
@@ -744,13 +772,23 @@ function StrategyInspector({
           当前 trader 使用 AI 决策模式。
         </div>
       ) : (
-        <div className="grid grid-cols-1 2xl:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)] gap-5">
+        <>
+          <SignalFilterBar
+            selected={layerFilters}
+            onChange={setLayerFilters}
+            statusSelected={statusFilters}
+            onStatusChange={setStatusFilters}
+            summary={summary}
+            hiddenCount={displayModel.hiddenCount}
+            collapsedCount={displayModel.collapsedCount}
+          />
+          <div className="grid grid-cols-1 2xl:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)] gap-5">
           <div className="min-w-0 rounded p-4" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
             <StrategyCandlestickChart
               symbol={selectedSymbol}
               timeframe={tradeTimeframe}
               klines={klines?.klines ?? []}
-              markers={mainMarkers}
+              markers={chartMarkers}
               limit={klines?.limit}
               configuredLimit={klines?.configured_limit}
               limitSource={klines?.limit_source}
@@ -761,24 +799,25 @@ function StrategyInspector({
           <div className="space-y-4">
             <section className="rounded p-4" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
               <div className="text-xs mb-3" style={{ color: '#848E9C' }}>最新信号</div>
-              {latestSignal ? (
+              {latestItem ? (
                 <div className="space-y-2 text-sm">
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="font-mono font-bold" style={{ color: '#EAECEF' }}>{latestSignal.symbol}</span>
+                    <span className="font-mono font-bold" style={{ color: '#EAECEF' }}>{latestItem.marker.symbol}</span>
                     <span className="px-2 py-0.5 rounded text-xs font-bold" style={{ background: 'rgba(240, 185, 11, 0.1)', color: '#F0B90B' }}>
-                      {signalLabel(latestSignal.signal_type)}
+                      {latestItem.shortLabel}
                     </span>
-                    <span style={{ color: latestSignal.direction === 'long' ? '#0ECB81' : '#F6465D' }}>{latestSignal.direction}</span>
+                    <span style={{ color: latestItem.marker.direction === 'long' ? '#0ECB81' : latestItem.marker.direction === 'short' ? '#F6465D' : '#848E9C' }}>{latestItem.title}</span>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 font-mono">
-                    <div style={{ color: '#EAECEF' }}>价格 {formatOptionalPrice(latestSignal.price)}</div>
-                    <div style={{ color: '#F6465D' }}>SL {formatOptionalPrice(latestSignal.stop_loss)}</div>
-                    <div style={{ color: '#0ECB81' }}>TP {formatOptionalPrice(latestSignal.take_profit)}</div>
-                    <div style={{ color: '#F0B90B' }}>目标 {formatOptionalPrice(latestSignal.structure_target)}</div>
+                  <div className="text-sm" style={{ color: '#EAECEF' }}>{latestItem.summary}</div>
+                  <div className="grid grid-cols-2 gap-2 font-mono text-xs">
+                    {latestItem.tooltipRows.slice(2, 8).map((row) => (
+                      <div key={`${row.label}-${row.value}`} style={{ color: '#848E9C' }}>
+                        <span>{row.label} </span><span style={{ color: '#EAECEF' }}>{row.value}</span>
+                      </div>
+                    ))}
                   </div>
                   <div className="text-xs" style={{ color: '#848E9C' }}>
-                    {latestSignal.analysis_timeframe || '--'} / {latestSignal.trigger_timeframe || '--'} · 结构 {formatMarkerTime(latestSignal.signal_close_time || latestSignal.trigger_close_time)}
-                    {latestSignal.decision_close_time ? ` · 决策 ${formatMarkerTime(latestSignal.decision_close_time)}` : ''} · {latestSignal.center_id || '--'}
+                    {latestItem.marker.timeframe || '--'} · {latestItem.marker.lifecycle_key || latestItem.marker.signal_id}
                   </div>
                 </div>
               ) : (
@@ -791,8 +830,14 @@ function StrategyInspector({
             <section className="rounded p-4" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
               <div className="text-xs mb-3" style={{ color: '#848E9C' }}>信号诊断</div>
               <div className="text-sm break-words" style={{ color: '#EAECEF' }}>
-                {hasTimeframeFallback ? '未获取主交易级别，使用1h回退；' : ''}{diagnostic || latestSignal?.signal_id || '--'}
+                {hasTimeframeFallback ? '未获取主交易级别，使用1h回退；' : ''}{diagnostic || latestItem?.marker.signal_id || '--'}
               </div>
+              {summary && (
+                <div className="text-xs font-mono mt-3" style={{ color: '#848E9C' }}>
+                  markers {summary.total_returned}/{summary.total_raw} · hidden {summary.hidden_by_default} · collapsed {summary.collapsed_lifecycle}
+                  {summary.median_latency_hours ? ` · median lag ${summary.median_latency_hours.toFixed(1)}h` : ''}
+                </div>
+              )}
               {signals?.config_hash && (
                 <div className="text-xs font-mono mt-3" style={{ color: '#848E9C' }}>config {signals.config_hash}</div>
               )}
@@ -803,15 +848,15 @@ function StrategyInspector({
 
             <section className="rounded p-4" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
               <div className="text-xs mb-3" style={{ color: '#848E9C' }}>持仓管理信号</div>
-              {positionMarkers.length > 0 ? (
+              {positionItems.length > 0 ? (
                 <div className="space-y-2">
-                  {positionMarkers.map((marker) => (
-                    <div key={`${marker.signal_id}-${marker.status}`} className="text-xs" style={{ color: '#848E9C' }}>
+                  {positionItems.map((item) => (
+                    <div key={`${item.marker.signal_id}-${item.marker.status}`} className="text-xs" style={{ color: '#848E9C' }}>
                       <div className="flex flex-wrap items-center gap-2">
-                        <SignalBadge marker={marker} />
-                        <span>{marker.action || '--'}{marker.final_action ? ` -> ${marker.final_action}` : ''}</span>
+                        <SignalBadge marker={item.marker} />
+                        <span>{item.summary}</span>
                       </div>
-                      <div className="mt-1 break-words">{marker.reason || markerStatusLabel(marker.status)}</div>
+                      <div className="mt-1 break-words">{item.marker.reason || markerStatusLabel(item.marker.status)}</div>
                     </div>
                   ))}
                 </div>
@@ -820,8 +865,97 @@ function StrategyInspector({
               )}
             </section>
           </div>
-        </div>
+          </div>
+        </>
       )}
+    </div>
+  );
+}
+
+const signalLayerOptions = [
+  { id: 'structure_background', label: '结构' },
+  { id: 'preview_watch', label: '预览' },
+  { id: 'entry_trigger', label: '触发' },
+  { id: 'trade_action', label: '动作' },
+  { id: 'invalid_rejected', label: '拒绝' },
+  { id: 'position_management', label: 'PM' },
+];
+
+const signalStatusOptions = [
+  { id: 'ready', label: 'ready' },
+  { id: 'executed', label: '执行' },
+  { id: 'rejected', label: '拒绝' },
+  { id: 'invalidated', label: '失效' },
+  { id: 'background', label: '背景' },
+  { id: 'confirmed', label: '确认' },
+];
+
+function SignalFilterBar({
+  selected,
+  onChange,
+  statusSelected,
+  onStatusChange,
+  summary,
+  hiddenCount,
+  collapsedCount,
+}: {
+  selected: string[];
+  onChange: (layers: string[]) => void;
+  statusSelected: string[];
+  onStatusChange: (statuses: string[]) => void;
+  summary?: StrategySignalReport['marker_summary'];
+  hiddenCount: number;
+  collapsedCount: number;
+}) {
+  const toggle = (id: string) => {
+    onChange(selected.includes(id) ? selected.filter((item) => item !== id) : [...selected, id]);
+  };
+  const toggleStatus = (id: string) => {
+    onStatusChange(statusSelected.includes(id) ? statusSelected.filter((item) => item !== id) : [...statusSelected, id]);
+  };
+  return (
+    <div className="mb-4 flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap gap-2">
+          {signalLayerOptions.map((option) => {
+            const active = selected.length === 0 || selected.includes(option.id);
+            return (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => toggle(option.id)}
+                className="rounded px-2.5 py-1 text-xs font-bold"
+                style={active
+                  ? { background: 'rgba(240, 185, 11, 0.16)', color: '#F0B90B', border: '1px solid rgba(240, 185, 11, 0.4)' }
+                  : { background: '#1E2329', color: '#848E9C', border: '1px solid #2B3139' }}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {signalStatusOptions.map((option) => {
+            const active = statusSelected.length === 0 || statusSelected.includes(option.id);
+            return (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => toggleStatus(option.id)}
+                className="rounded px-2 py-0.5 text-[11px] font-bold"
+                style={active
+                  ? { background: 'rgba(132, 142, 156, 0.16)', color: '#EAECEF', border: '1px solid rgba(132, 142, 156, 0.35)' }
+                  : { background: '#1E2329', color: '#848E9C', border: '1px solid #2B3139' }}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div className="text-xs font-mono" style={{ color: '#848E9C' }}>
+        {summary ? `${summary.total_returned}/${summary.total_raw}` : '--'} · hidden {hiddenCount} · collapsed {collapsedCount}
+      </div>
     </div>
   );
 }
@@ -856,13 +990,6 @@ function SignalBadge({ marker }: { marker: SignalMarker }) {
       {marker.source_layer === 'position_management' ? 'PM' : 'M'} {markerDisplayLabel(marker)}
     </span>
   );
-}
-
-function formatMarkerTime(value?: number) {
-  if (!value) {
-    return '--';
-  }
-  return new Date(normalizeEpochMs(value)).toLocaleString();
 }
 
 // Stat Card Component - Binance Style Enhanced

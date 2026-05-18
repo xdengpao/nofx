@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"nofx/logger"
 	"nofx/manager"
+	"nofx/strategy/chanlun"
 	"strconv"
 	"strings"
 
@@ -249,12 +250,64 @@ func (s *Server) handleStrategySignals(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "symbol不能为空"})
 		return
 	}
-	report, err := s.traderManager.GetLatestStrategySignals(traderID, symbol)
+	opts, err := parseSignalReportOptions(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	report, err := s.traderManager.GetLatestStrategySignalsWithOptions(traderID, symbol, opts)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, report)
+}
+
+func parseSignalReportOptions(c *gin.Context) (chanlun.SignalReportOptions, error) {
+	opts := chanlun.SignalReportOptions{
+		View:     strings.TrimSpace(c.Query("view")),
+		Layers:   splitCSVQuery(c.Query("layers")),
+		Statuses: splitCSVQuery(c.Query("statuses")),
+	}
+	if strings.EqualFold(strings.TrimSpace(c.Query("include_history")), "true") {
+		opts.View = "audit"
+	}
+	if value := strings.TrimSpace(c.Query("from")); value != "" {
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return opts, fmt.Errorf("from必须是epoch毫秒")
+		}
+		opts.From = parsed
+	}
+	if value := strings.TrimSpace(c.Query("to")); value != "" {
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return opts, fmt.Errorf("to必须是epoch毫秒")
+		}
+		opts.To = parsed
+	}
+	if value := strings.TrimSpace(c.Query("limit")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 0 {
+			return opts, fmt.Errorf("limit必须是非负整数")
+		}
+		opts.Limit = parsed
+	}
+	return opts, nil
+}
+
+func splitCSVQuery(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if item := strings.TrimSpace(part); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 type marketKlineDTO struct {

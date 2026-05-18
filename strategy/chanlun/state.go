@@ -37,6 +37,7 @@ type ProgrammaticSymbolState struct {
 	ConfirmedSignals        map[string]StoredSignal              `json:"confirmed_signals,omitempty"`
 	ExecutedSignals         map[string]SignalExec                `json:"executed_signals,omitempty"`
 	SuppressedSignals       map[string]SignalSuppression         `json:"suppressed_signals,omitempty"`
+	SignalLifecycles        map[string]SignalLifecycle           `json:"signal_lifecycles,omitempty"`
 	AddCountBySide          map[string]int                       `json:"add_count_by_side,omitempty"`
 	ShortTradeState         *ShortTradeState                     `json:"short_trade_state,omitempty"`
 	PositionStates          map[string]ProgrammaticPositionState `json:"position_states,omitempty"`
@@ -88,9 +89,12 @@ type SignalExec struct {
 
 type SignalSuppression struct {
 	SignalID          string    `json:"signal_id"`
+	StructureKey      string    `json:"structure_key,omitempty"`
 	Action            string    `json:"action"`
 	ReasonCode        string    `json:"reason_code"`
 	SuppressedAt      time.Time `json:"suppressed_at"`
+	LastSeenAt        time.Time `json:"last_seen_at,omitempty"`
+	SeenCount         int       `json:"seen_count,omitempty"`
 	ParentSignalID    string    `json:"parent_signal_id,omitempty"`
 	EntryTriggerID    string    `json:"entry_trigger_id,omitempty"`
 	EntryWindowState  string    `json:"entry_window_state,omitempty"`
@@ -100,6 +104,19 @@ type SignalSuppression struct {
 	CurrentPrice      float64   `json:"current_price,omitempty"`
 	StopLoss          float64   `json:"stop_loss,omitempty"`
 	TakeProfit        float64   `json:"take_profit,omitempty"`
+}
+
+type SignalLifecycle struct {
+	LifecycleKey       string       `json:"lifecycle_key"`
+	StructureKey       string       `json:"structure_key,omitempty"`
+	ParentStructureKey string       `json:"parent_structure_key,omitempty"`
+	Marker             SignalMarker `json:"marker"`
+	FirstSeenAt        time.Time    `json:"first_seen_at,omitempty"`
+	LastSeenAt         time.Time    `json:"last_seen_at,omitempty"`
+	SeenCount          int          `json:"seen_count,omitempty"`
+	SuppressedCount    int          `json:"suppressed_count,omitempty"`
+	CollapsedCount     int          `json:"collapsed_count,omitempty"`
+	ConfigHashes       []string     `json:"config_hashes,omitempty"`
 }
 
 type ShortTradeState struct {
@@ -141,6 +158,7 @@ func (s *StateStore) Load() error {
 		state.Traders = map[string]ProgrammaticTraderState{}
 	}
 	s.data = state
+	s.compactAllSignalMarkersLocked()
 	return nil
 }
 
@@ -224,6 +242,17 @@ func (s *StateStore) HasSuppressedSignal(traderID, symbol, signalID, action, rea
 	return exists
 }
 
+func (s *StateStore) HasSuppressedStructure(traderID, symbol, structureKey, action, reasonCode string) bool {
+	if structureKey == "" || action == "" || reasonCode == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	_, exists := state.SuppressedSignals[structureSuppressionKey(structureKey, action, reasonCode)]
+	return exists
+}
+
 func (s *StateStore) SuppressedSignalForAction(traderID, symbol, signalID, action string) (SignalSuppression, bool) {
 	if signalID == "" || action == "" {
 		return SignalSuppression{}, false
@@ -257,14 +286,60 @@ func (s *StateStore) StoreSignalSuppression(traderID, symbol string, suppression
 		state.SuppressedSignals = map[string]SignalSuppression{}
 	}
 	if suppression.SuppressedAt.IsZero() {
-		suppression.SuppressedAt = time.Now()
+		suppression.SuppressedAt = s.now()
+	}
+	if suppression.LastSeenAt.IsZero() {
+		suppression.LastSeenAt = suppression.SuppressedAt
+	}
+	if suppression.SeenCount <= 0 {
+		suppression.SeenCount = 1
 	}
 	state.SuppressedSignals[signalSuppressionKey(suppression.SignalID, suppression.Action, suppression.ReasonCode)] = suppression
+	if suppression.StructureKey != "" {
+		key := structureSuppressionKey(suppression.StructureKey, suppression.Action, suppression.ReasonCode)
+		if existing, ok := state.SuppressedSignals[key]; ok {
+			suppression.SuppressedAt = existing.SuppressedAt
+			suppression.SeenCount += existing.SeenCount
+		}
+		state.SuppressedSignals[key] = suppression
+	}
+	s.setSymbolLocked(traderID, symbol, state)
+}
+
+func (s *StateStore) StoreStructureSuppression(traderID, symbol string, suppression SignalSuppression) {
+	if suppression.StructureKey == "" || suppression.Action == "" || suppression.ReasonCode == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	if state.SuppressedSignals == nil {
+		state.SuppressedSignals = map[string]SignalSuppression{}
+	}
+	if suppression.SuppressedAt.IsZero() {
+		suppression.SuppressedAt = s.now()
+	}
+	if suppression.LastSeenAt.IsZero() {
+		suppression.LastSeenAt = suppression.SuppressedAt
+	}
+	if suppression.SeenCount <= 0 {
+		suppression.SeenCount = 1
+	}
+	key := structureSuppressionKey(suppression.StructureKey, suppression.Action, suppression.ReasonCode)
+	if existing, ok := state.SuppressedSignals[key]; ok {
+		suppression.SuppressedAt = existing.SuppressedAt
+		suppression.SeenCount += existing.SeenCount
+	}
+	state.SuppressedSignals[key] = suppression
 	s.setSymbolLocked(traderID, symbol, state)
 }
 
 func signalSuppressionKey(signalID, action, reasonCode string) string {
 	return signalID + "|" + strings.ToLower(strings.TrimSpace(action)) + "|" + strings.ToLower(strings.TrimSpace(reasonCode))
+}
+
+func structureSuppressionKey(structureKey, action, reasonCode string) string {
+	return "structure:" + structureKey + "|" + strings.ToLower(strings.TrimSpace(action)) + "|" + strings.ToLower(strings.TrimSpace(reasonCode))
 }
 
 func hasRetryableSignalMarker(markers []SignalMarker, signalID string) bool {
@@ -507,7 +582,9 @@ func (s *StateStore) StoreSignalMarker(traderID, symbol string, marker SignalMar
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	state := s.ensureSymbolLocked(traderID, symbol)
+	marker = canonicalizeSignalMarker(marker)
 	state.RecentSignalMarkers = upsertSignalMarker(state.RecentSignalMarkers, marker)
+	state.SignalLifecycles = upsertSignalLifecycleMap(state.SignalLifecycles, marker, s.now())
 	s.setSymbolLocked(traderID, symbol, state)
 }
 
@@ -526,6 +603,8 @@ func (s *StateStore) UpdateSignalMarkerStatus(traderID, symbol, signalID, status
 		if reason != "" {
 			state.RecentSignalMarkers[i].Reason = reason
 		}
+		state.RecentSignalMarkers[i] = canonicalizeSignalMarker(state.RecentSignalMarkers[i])
+		state.SignalLifecycles = upsertSignalLifecycleMap(state.SignalLifecycles, state.RecentSignalMarkers[i], s.now())
 	}
 	s.setSymbolLocked(traderID, symbol, state)
 }
@@ -541,10 +620,21 @@ func (s *StateStore) RecentSignalMarkers(traderID, symbol string, limit int) []S
 	return markers[len(markers)-limit:]
 }
 
+func (s *StateStore) CompactSignalMarkers(traderID, symbol string) SignalMarkerSummary {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	raw := append([]SignalMarker(nil), state.RecentSignalMarkers...)
+	state.RecentSignalMarkers, state.SignalLifecycles = compactSignalMarkers(raw, s.now())
+	s.setSymbolLocked(traderID, symbol, state)
+	return buildSignalMarkerSummary(raw, state.RecentSignalMarkers)
+}
+
 func upsertSignalMarker(markers []SignalMarker, marker SignalMarker) []SignalMarker {
+	marker = canonicalizeSignalMarker(marker)
 	key := signalMarkerKey(marker)
 	for i := range markers {
-		if signalMarkerKey(markers[i]) == key {
+		if signalMarkerKey(markers[i]) == key || legacySignalMarkerKey(markers[i]) == legacySignalMarkerKey(marker) {
 			markers[i] = mergeSignalMarkerLifecycle(markers[i], marker)
 			return markers
 		}
@@ -557,10 +647,23 @@ func upsertSignalMarker(markers []SignalMarker, marker SignalMarker) []SignalMar
 }
 
 func signalMarkerKey(marker SignalMarker) string {
-	return marker.SignalID + "|" + marker.Timeframe + "|" + strconv.FormatInt(marker.CloseTime, 10)
+	if marker.LifecycleKey != "" {
+		return marker.LifecycleKey
+	}
+	return MarkerLifecycleKey(marker)
+}
+
+func legacySignalMarkerKey(marker SignalMarker) string {
+	closeTime := marker.CloseTime
+	if closeTime == 0 {
+		closeTime = marker.SignalCloseTime
+	}
+	return marker.SignalID + "|" + marker.Timeframe + "|" + strconv.FormatInt(closeTime, 10)
 }
 
 func mergeSignalMarkerLifecycle(existing, incoming SignalMarker) SignalMarker {
+	existing = canonicalizeSignalMarker(existing)
+	incoming = canonicalizeSignalMarker(incoming)
 	if isProcessedSignalMarker(existing) && isDetectedOnlyMarker(incoming) {
 		if existing.SignalCloseTime == 0 {
 			existing.SignalCloseTime = incoming.SignalCloseTime
@@ -586,9 +689,130 @@ func mergeSignalMarkerLifecycle(existing, incoming SignalMarker) SignalMarker {
 		if existing.SourceLayer == "" {
 			existing.SourceLayer = incoming.SourceLayer
 		}
+		existing = mergeSignalMarkerCounters(existing, incoming)
 		return existing
 	}
-	return incoming
+	if isProcessedSignalMarker(existing) && !isProcessedSignalMarker(incoming) {
+		return mergeSignalMarkerCounters(existing, incoming)
+	}
+	merged := incoming
+	if markerTerminalRank(existing.Status) > markerTerminalRank(incoming.Status) {
+		merged = existing
+		merged.DecisionCloseTime = firstPositiveInt64(incoming.DecisionCloseTime, existing.DecisionCloseTime)
+		merged.DisplayCloseTime = firstPositiveInt64(incoming.DisplayCloseTime, existing.DisplayCloseTime)
+		merged.LastSeenCloseTime = firstPositiveInt64(incoming.LastSeenCloseTime, incoming.DecisionCloseTime, incoming.DisplayCloseTime, existing.LastSeenCloseTime)
+		merged.LastUpdatedAt = firstPositiveInt64(incoming.LastUpdatedAt, merged.LastSeenCloseTime, existing.LastUpdatedAt)
+		if incoming.Reason != "" {
+			merged.Reason = incoming.Reason
+		}
+		if incoming.ReasonCode != "" {
+			merged.ReasonCode = incoming.ReasonCode
+		}
+	}
+	if merged.SignalID == incoming.SignalID && merged.Status == incoming.Status {
+		merged = mergeSignalMarkerCounters(merged, existing)
+	} else {
+		merged = mergeSignalMarkerCounters(merged, incoming)
+	}
+	return merged
+}
+
+func mergeSignalMarkerCounters(base, other SignalMarker) SignalMarker {
+	firstSeen := firstPositiveInt64(base.FirstSeenCloseTime, base.SignalCloseTime, base.CloseTime, other.FirstSeenCloseTime)
+	if other.FirstSeenCloseTime > 0 && (firstSeen == 0 || other.FirstSeenCloseTime < firstSeen) {
+		firstSeen = other.FirstSeenCloseTime
+	}
+	base.FirstSeenCloseTime = firstSeen
+	base.LastSeenCloseTime = maxInt64(base.LastSeenCloseTime, other.LastSeenCloseTime, other.DecisionCloseTime, other.DisplayCloseTime, other.CloseTime)
+	base.LastUpdatedAt = maxInt64(base.LastUpdatedAt, other.LastUpdatedAt, base.LastSeenCloseTime)
+	base.Collapsed = true
+	base.CollapsedCount += other.CollapsedCount + 1
+	base.HiddenByDefault = base.HiddenByDefault || other.HiddenByDefault
+	return base
+}
+
+func markerTerminalRank(status string) int {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "executed":
+		return 60
+	case "failed":
+		return 50
+	case "rejected":
+		return 40
+	case "invalidated", "expired", "suppressed":
+		return 30
+	case "ready":
+		return 20
+	case "background", "confirmed", "watchlist", "detected":
+		return 10
+	default:
+		return 0
+	}
+}
+
+func upsertSignalLifecycleMap(lifecycles map[string]SignalLifecycle, marker SignalMarker, now time.Time) map[string]SignalLifecycle {
+	if lifecycles == nil {
+		lifecycles = map[string]SignalLifecycle{}
+	}
+	marker = canonicalizeSignalMarker(marker)
+	lifecycle := lifecycles[marker.LifecycleKey]
+	if lifecycle.LifecycleKey == "" {
+		lifecycle = SignalLifecycle{
+			LifecycleKey:       marker.LifecycleKey,
+			StructureKey:       marker.StructureKey,
+			ParentStructureKey: marker.ParentStructureKey,
+			Marker:             marker,
+			FirstSeenAt:        now,
+			LastSeenAt:         now,
+			SeenCount:          1,
+			CollapsedCount:     marker.CollapsedCount,
+		}
+	} else {
+		lifecycle.Marker = mergeSignalMarkerLifecycle(lifecycle.Marker, marker)
+		lifecycle.LastSeenAt = now
+		lifecycle.SeenCount++
+		lifecycle.CollapsedCount = lifecycle.Marker.CollapsedCount
+		if isSuppressedRepeatMarker(marker) {
+			lifecycle.SuppressedCount++
+		}
+	}
+	lifecycles[marker.LifecycleKey] = lifecycle
+	return lifecycles
+}
+
+func compactSignalMarkers(raw []SignalMarker, now time.Time) ([]SignalMarker, map[string]SignalLifecycle) {
+	var markers []SignalMarker
+	lifecycles := map[string]SignalLifecycle{}
+	for _, marker := range raw {
+		if marker.SignalID == "" {
+			continue
+		}
+		marker = canonicalizeSignalMarker(marker)
+		markers = upsertSignalMarker(markers, marker)
+		lifecycles = upsertSignalLifecycleMap(lifecycles, marker, now)
+	}
+	return markers, lifecycles
+}
+
+func (s *StateStore) compactAllSignalMarkersLocked() {
+	now := s.now()
+	for traderID, traderState := range s.data.Traders {
+		for symbol, symbolState := range traderState.Symbols {
+			symbolState.RecentSignalMarkers, symbolState.SignalLifecycles = compactSignalMarkers(symbolState.RecentSignalMarkers, now)
+			traderState.Symbols[symbol] = symbolState
+		}
+		s.data.Traders[traderID] = traderState
+	}
+}
+
+func maxInt64(values ...int64) int64 {
+	var max int64
+	for _, value := range values {
+		if value > max {
+			max = value
+		}
+	}
+	return max
 }
 
 func isProcessedSignalMarker(marker SignalMarker) bool {
@@ -628,6 +852,9 @@ func (s *StateStore) ensureSymbolLocked(traderID, symbol string) ProgrammaticSym
 	}
 	if state.SuppressedSignals == nil {
 		state.SuppressedSignals = map[string]SignalSuppression{}
+	}
+	if state.SignalLifecycles == nil {
+		state.SignalLifecycles = map[string]SignalLifecycle{}
 	}
 	if state.AddCountBySide == nil {
 		state.AddCountBySide = map[string]int{}

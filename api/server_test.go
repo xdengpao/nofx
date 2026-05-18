@@ -472,6 +472,22 @@ func TestStrategySignalsEmptyReportIncludesTimeframes(t *testing.T) {
 	}
 }
 
+func TestStrategySignalsParsesAuditViewOptions(t *testing.T) {
+	s := newProgrammaticTestServer(t)
+	w := doRequest(s, "GET", "/api/strategy/signals?trader_id=programmatic-trader&symbol=ETHUSDT&view=audit&layers=structure,preview_signal&statuses=invalidated&limit=25")
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/strategy/signals audit: 期望200，实际=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSON(t, w)
+	if body["view"] != "audit" {
+		t.Fatalf("应返回audit视图: %+v", body)
+	}
+	filters, ok := body["filters"].(map[string]interface{})
+	if !ok || filters["limit"].(float64) != 25 {
+		t.Fatalf("应返回过滤参数: %+v", body)
+	}
+}
+
 func TestMarketKlinesRejectsUnsupportedTimeframe(t *testing.T) {
 	s := newTestServerWithTrader(t)
 	w := doRequest(s, "GET", "/api/market/klines?trader_id=test-trader-1&symbol=ETHUSDT&timeframe=5m")

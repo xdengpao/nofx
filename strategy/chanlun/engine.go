@@ -386,6 +386,7 @@ func (e *Engine) evaluatePreviewSignals(ctx *decision.Context, symbol string, da
 	var previewSignals []ChanlunSignal
 	var previewDecisions []decision.Decision
 	var rejections []decision.OpenRejection
+	previewObservationCounts := map[string]int{}
 	for _, signal := range signals {
 		parentID := signal.SignalID
 		triggerType := previewTriggerType(phase, componentTF, componentCount, policy)
@@ -393,6 +394,7 @@ func (e *Engine) evaluatePreviewSignals(ctx *decision.Context, symbol string, da
 		signal.SourceLayer = "preview_signal"
 		signal.Status = "watchlist"
 		signal.ParentSignalID = parentID
+		signal.ParentStructureKey = signal.StructureKey
 		signal.EntryTriggerID = triggerID
 		signal.EntryTriggerType = triggerType
 		signal.EntryTriggerTF = componentTF
@@ -406,8 +408,9 @@ func (e *Engine) evaluatePreviewSignals(ctx *decision.Context, symbol string, da
 		signal.PreviewConfirmed = false
 		signal.DecisionCloseTime = synthetic.CloseTime
 		signal.SignalID = triggerID
+		signal.LifecycleKey = fmt.Sprintf("preview:%s:%s:%d", signal.StructureKey, phase, parentTradeCandleClose(synthetic.CloseTime, tradeTF))
 		previewSignals = append(previewSignals, signal)
-		diagnostics = append(diagnostics, fmt.Sprintf("%s %s 预览层%s识别%s %s，默认仅观察", symbol, tradeTF, phase, signal.Direction, signal.SignalType))
+		previewObservationCounts[phase]++
 		if !policy.AllowPilotOpen || componentCount < policy.PilotAfterClosedComponents {
 			continue
 		}
@@ -435,6 +438,9 @@ func (e *Engine) evaluatePreviewSignals(ctx *decision.Context, symbol string, da
 			continue
 		}
 		previewDecisions = append(previewDecisions, guarded)
+	}
+	for _, phaseKey := range sortedStringKeys(previewObservationCounts) {
+		diagnostics = append(diagnostics, fmt.Sprintf("%s %s 预览层%s观察到%d个结构，默认仅观察并按生命周期折叠", symbol, tradeTF, phaseKey, previewObservationCounts[phaseKey]))
 	}
 	return previewSignals, previewDecisions, diagnostics, rejections
 }
@@ -487,6 +493,7 @@ func (e *Engine) prepareStructureEntry(ctx *decision.Context, signal *ChanlunSig
 	signal.Diagnostics.Metrics["latest_trade_close_time"] = decisionClose
 	if !window.Valid {
 		signal.Status = "invalidated"
+		signal.ReasonCode = window.ReasonCode
 		signal.EntryInvalidated = true
 		if signal.EntryInvalidReason == "" {
 			signal.EntryInvalidReason = window.ReasonCode
@@ -512,6 +519,7 @@ func (e *Engine) prepareStructureEntry(ctx *decision.Context, signal *ChanlunSig
 			reason = fmt.Sprintf("%s %s 作为结构背景保留，direct_structure_open关闭，等待%s fresh entry trigger", signal.Symbol, signal.SignalType, e.Policy.EntryTiming.TriggerTimeframe)
 		}
 		signal.Status = "background"
+		signal.ReasonCode = reasonCode
 		signal.EntryWindowState = reasonCode
 		e.storeStructureMarker(ctx, *signal, "background", reason)
 		e.storeStructureSuppression(ctx, *signal, action, reasonCode, now, window, signalClose, decisionClose)
@@ -524,6 +532,7 @@ func (e *Engine) prepareStructureEntry(ctx *decision.Context, signal *ChanlunSig
 	parentID := signal.SignalID
 	triggerID := StableEntryTriggerID(ctx.TraderID, signal.Symbol, parentID, "new_structure_segment", e.Policy.Timeframes.Trade, triggerClose, e.Policy.ConfigHash)
 	signal.ParentSignalID = parentID
+	signal.ParentStructureKey = signal.StructureKey
 	signal.EntryTriggerID = triggerID
 	signal.EntryTriggerType = "new_structure_segment"
 	signal.EntryTriggerTF = e.Policy.Timeframes.Trade
@@ -532,6 +541,7 @@ func (e *Engine) prepareStructureEntry(ctx *decision.Context, signal *ChanlunSig
 	signal.TriggerConfidence = signal.Confidence
 	signal.SourceLayer = "entry_trigger"
 	signal.Status = "ready"
+	signal.LifecycleKey = "entry_trigger:" + triggerID
 	signal.EntryWindowState = "entry_trigger_ready"
 	if signal.Diagnostics.Metrics == nil {
 		signal.Diagnostics.Metrics = map[string]any{}
@@ -571,6 +581,7 @@ func (e *Engine) tryPullbackRetestEntryTrigger(ctx *decision.Context, signal *Ch
 	parentID := signal.SignalID
 	triggerID := StableEntryTriggerID(ctx.TraderID, signal.Symbol, parentID, "pullback_retest_resume", triggerTF, triggerClose, e.Policy.ConfigHash)
 	signal.ParentSignalID = parentID
+	signal.ParentStructureKey = signal.StructureKey
 	signal.EntryTriggerID = triggerID
 	signal.EntryTriggerType = "pullback_retest_resume"
 	signal.EntryTriggerTF = triggerTF
@@ -581,6 +592,7 @@ func (e *Engine) tryPullbackRetestEntryTrigger(ctx *decision.Context, signal *Ch
 	signal.TriggerConfidence = signal.Confidence
 	signal.SourceLayer = "entry_trigger"
 	signal.Status = "ready"
+	signal.LifecycleKey = "entry_trigger:" + triggerID
 	signal.EntryWindowState = "entry_trigger_ready"
 	signal.RemainingNetRR = window.RemainingNetRR
 	if signal.Diagnostics.Metrics == nil {
@@ -811,9 +823,12 @@ func (e *Engine) storeStructureSuppression(ctx *decision.Context, signal Chanlun
 	}
 	e.StateStore.StoreSignalSuppression(ctx.TraderID, market.Normalize(signal.Symbol), SignalSuppression{
 		SignalID:          signal.SignalID,
+		StructureKey:      signal.StructureKey,
 		Action:            action,
 		ReasonCode:        reasonCode,
 		SuppressedAt:      now,
+		LastSeenAt:        now,
+		SeenCount:         1,
 		ParentSignalID:    signal.ParentSignalID,
 		EntryTriggerID:    signal.EntryTriggerID,
 		EntryWindowState:  signal.EntryWindowState,
@@ -1227,18 +1242,20 @@ func (e *Engine) rejectProgrammaticSignal(ctx *decision.Context, d decision.Deci
 		d.Explanation.ReasonCode = reasonCode
 	}
 	diagnostics := map[string]any{
-		"reason_code":         reasonCode,
-		"freshness_state":     metadataString(d.StrategyMetadata, "freshness_state"),
-		"age_candles":         metadataInt(d.StrategyMetadata, "age_candles"),
-		"current_price":       currentPriceForGuard(data, e.Policy.Timeframes.Trade),
-		"stop_loss":           d.StopLoss,
-		"take_profit":         d.TakeProfit,
-		"signal_close_time":   d.StrategyMetadata["signal_close_time"],
-		"trigger_close_time":  d.StrategyMetadata["trigger_close_time"],
-		"entry_trigger_id":    d.StrategyMetadata["entry_trigger_id"],
-		"parent_signal_id":    d.StrategyMetadata["parent_signal_id"],
-		"entry_window_state":  d.StrategyMetadata["entry_window_state"],
-		"decision_close_time": d.StrategyMetadata["decision_close_time"],
+		"reason_code":          reasonCode,
+		"structure_key":        d.StrategyMetadata["structure_key"],
+		"parent_structure_key": d.StrategyMetadata["parent_structure_key"],
+		"freshness_state":      metadataString(d.StrategyMetadata, "freshness_state"),
+		"age_candles":          metadataInt(d.StrategyMetadata, "age_candles"),
+		"current_price":        currentPriceForGuard(data, e.Policy.Timeframes.Trade),
+		"stop_loss":            d.StopLoss,
+		"take_profit":          d.TakeProfit,
+		"signal_close_time":    d.StrategyMetadata["signal_close_time"],
+		"trigger_close_time":   d.StrategyMetadata["trigger_close_time"],
+		"entry_trigger_id":     d.StrategyMetadata["entry_trigger_id"],
+		"parent_signal_id":     d.StrategyMetadata["parent_signal_id"],
+		"entry_window_state":   d.StrategyMetadata["entry_window_state"],
+		"decision_close_time":  d.StrategyMetadata["decision_close_time"],
 	}
 	for key, value := range extra {
 		diagnostics[key] = value
@@ -1246,6 +1263,10 @@ func (e *Engine) rejectProgrammaticSignal(ctx *decision.Context, d decision.Deci
 	}
 	if e.StateStore.HasSuppressedSignal(ctx.TraderID, d.Symbol, d.SignalID, d.Action, reasonCode) {
 		reason = fmt.Sprintf("%s %s 已因%s抑制，跳过重复开仓: signal_id=%s", d.Symbol, d.Action, reasonCode, d.SignalID)
+	}
+	if structureKey := metadataString(d.StrategyMetadata, "structure_key"); structureKey != "" &&
+		e.StateStore.HasSuppressedStructure(ctx.TraderID, d.Symbol, structureKey, d.Action, reasonCode) {
+		reason = fmt.Sprintf("%s %s 同一结构已因%s抑制，跳过重复开仓: structure_key=%s", d.Symbol, d.Action, reasonCode, structureKey)
 	}
 	rejection := decision.NewOpenRejectionFromDecision(d, reason)
 	rejection.GateState = "blocked"
@@ -1259,9 +1280,12 @@ func (e *Engine) rejectProgrammaticSignal(ctx *decision.Context, d decision.Deci
 	}
 	e.StateStore.StoreSignalSuppression(ctx.TraderID, market.Normalize(d.Symbol), SignalSuppression{
 		SignalID:          d.SignalID,
+		StructureKey:      metadataString(d.StrategyMetadata, "structure_key"),
 		Action:            d.Action,
 		ReasonCode:        reasonCode,
 		SuppressedAt:      now,
+		LastSeenAt:        now,
+		SeenCount:         1,
 		ParentSignalID:    metadataString(d.StrategyMetadata, "parent_signal_id"),
 		EntryTriggerID:    metadataString(d.StrategyMetadata, "entry_trigger_id"),
 		EntryWindowState:  metadataString(d.StrategyMetadata, "entry_window_state"),
@@ -1508,6 +1532,12 @@ func (e *Engine) applyDecisionMetadata(fullDecision *decision.FullDecision, diag
 }
 
 func (e *Engine) LatestSignals(traderID, symbol string) (*SignalReport, bool) {
+	return e.LatestSignalsWithOptions(traderID, symbol, SignalReportOptions{})
+}
+
+func (e *Engine) LatestSignalsWithOptions(traderID, symbol string, opts SignalReportOptions) (*SignalReport, bool) {
+	symbol = market.Normalize(symbol)
+	e.StateStore.CompactSignalMarkers(traderID, symbol)
 	e.mu.RLock()
 	report, ok := e.latestSignals[traderID+"|"+symbol]
 	e.mu.RUnlock()
@@ -1517,12 +1547,18 @@ func (e *Engine) LatestSignals(traderID, symbol string) (*SignalReport, bool) {
 	copied := *report
 	copied.Signals = append([]ChanlunSignal{}, report.Signals...)
 	copied.SignalMarkers = mergeSignalMarkers(e.StateStore.RecentSignalMarkers(traderID, symbol, maxRecentSignalMarkers), report.SignalMarkers)
+	applySignalReportOptions(&copied, opts)
 	return &copied, true
 }
 
 func (e *Engine) EmptySignalReport(traderID, symbol string) *SignalReport {
+	return e.EmptySignalReportWithOptions(traderID, symbol, SignalReportOptions{})
+}
+
+func (e *Engine) EmptySignalReportWithOptions(traderID, symbol string, opts SignalReportOptions) *SignalReport {
 	symbol = market.Normalize(symbol)
-	return &SignalReport{
+	e.StateStore.CompactSignalMarkers(traderID, symbol)
+	report := &SignalReport{
 		TraderID:           traderID,
 		Symbol:             symbol,
 		DecisionMode:       "programmatic",
@@ -1538,6 +1574,8 @@ func (e *Engine) EmptySignalReport(traderID, symbol string) *SignalReport {
 			"messages": []string{"暂无该标的的程序化策略信号"},
 		},
 	}
+	applySignalReportOptions(report, opts)
+	return report
 }
 
 type ProgrammaticExecutionResult struct {
@@ -1848,8 +1886,12 @@ func (e *Engine) signalToMainDecision(ctx *decision.Context, signal ChanlunSigna
 			"segment_start_time":        signal.SegmentStartTime,
 			"segment_end_time":          signal.SegmentEndTime,
 			"trade_intent":              action,
+			"structure_key":             signal.StructureKey,
+			"lifecycle_key":             signal.LifecycleKey,
 			"source_signal_id":          signal.SignalID,
 			"parent_signal_id":          signal.ParentSignalID,
+			"parent_structure_key":      signal.ParentStructureKey,
+			"reason_code":               signal.ReasonCode,
 			"entry_trigger_id":          signal.EntryTriggerID,
 			"entry_trigger_type":        signal.EntryTriggerType,
 			"entry_trigger_timeframe":   signal.EntryTriggerTF,
@@ -1888,9 +1930,13 @@ func (e *Engine) signalToMainDecision(ctx *decision.Context, signal ChanlunSigna
 			"segment_start_time":        signal.SegmentStartTime,
 			"segment_end_time":          signal.SegmentEndTime,
 			"trade_intent":              action,
+			"structure_key":             signal.StructureKey,
+			"lifecycle_key":             signal.LifecycleKey,
 			"level":                     signal.Level,
 			"source_signal_id":          signal.SignalID,
 			"parent_signal_id":          signal.ParentSignalID,
+			"parent_structure_key":      signal.ParentStructureKey,
+			"reason_code":               signal.ReasonCode,
 			"entry_trigger_id":          signal.EntryTriggerID,
 			"entry_trigger_type":        signal.EntryTriggerType,
 			"entry_trigger_timeframe":   signal.EntryTriggerTF,
@@ -2006,6 +2052,7 @@ func (e *Engine) setLatestSignals(traderID, symbol string, signals []ChanlunSign
 		e.StateStore.StoreSignalMarker(traderID, symbol, marker)
 	}
 	markers = mergeSignalMarkers(e.StateStore.RecentSignalMarkers(traderID, symbol, maxRecentSignalMarkers), markers)
+	markerSummary := buildSignalMarkerSummary(markers, markers)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.latestSignals[traderID+"|"+symbol] = &SignalReport{
@@ -2021,7 +2068,8 @@ func (e *Engine) setLatestSignals(traderID, symbol string, signals []ChanlunSign
 		Signals:            append([]ChanlunSignal{}, signals...),
 		SignalMarkers:      markers,
 		LatestDiagnostics: map[string]any{
-			"messages": diagnostics,
+			"messages":         diagnostics,
+			"marker_lifecycle": markerSummary,
 		},
 	}
 }
@@ -2062,11 +2110,21 @@ func signalToMarker(signal ChanlunSignal, sourceLayer, status, action, reason st
 	if (sourceLayer == "preview_signal" || sourceLayer == "entry_trigger") && decisionClose > 0 {
 		displayClose = decisionClose
 	}
+	freshnessState := signal.EntryWindowState
+	if freshnessState == "" {
+		switch status {
+		case "background":
+			freshnessState = "background"
+		case "invalidated":
+			freshnessState = "invalidated"
+		}
+	}
+	ageCandles := signalAgeCandles(structureClose, decisionClose, timeframe)
 	signalID := signal.SignalID
 	if sourceLayer == "entry_trigger" && signal.EntryTriggerID != "" {
 		signalID = signal.EntryTriggerID
 	}
-	return SignalMarker{
+	marker := SignalMarker{
 		Symbol:             signal.Symbol,
 		Timeframe:          timeframe,
 		CloseTime:          closeTime,
@@ -2079,6 +2137,10 @@ func signalToMarker(signal ChanlunSignal, sourceLayer, status, action, reason st
 		SourceLayer:        sourceLayer,
 		Status:             status,
 		SignalID:           signalID,
+		StructureKey:       signal.StructureKey,
+		LifecycleKey:       signal.LifecycleKey,
+		ParentStructureKey: signal.ParentStructureKey,
+		ReasonCode:         firstNonEmptyString(signal.ReasonCode, signal.EntryInvalidReason, signal.EntryWindowState),
 		Action:             action,
 		TradeIntent:        deriveTradeIntent(action, "", "", signal.Direction),
 		Price:              signal.Price,
@@ -2093,11 +2155,14 @@ func signalToMarker(signal ChanlunSignal, sourceLayer, status, action, reason st
 		EntryInvalidated:   signal.EntryInvalidated,
 		EntryInvalidReason: signal.EntryInvalidReason,
 		RemainingNetRR:     signal.RemainingNetRR,
+		FreshnessState:     freshnessState,
+		AgeCandles:         ageCandles,
 		PreviewPhase:       signal.PreviewPhase,
 		PreviewSourceTF:    signal.PreviewSourceTF,
 		PreviewComponents:  signal.PreviewComponents,
 		PreviewConfirmed:   signal.PreviewConfirmed,
 	}
+	return canonicalizeSignalMarker(marker)
 }
 
 func (e *Engine) decisionToMarker(d decision.Decision, status string) (SignalMarker, bool) {
@@ -2135,7 +2200,11 @@ func (e *Engine) decisionToMarker(d decision.Decision, status string) (SignalMar
 	previewSourceTF := firstNonEmptyString(metadataString(d.StrategyMetadata, "preview_source_tf"), metadataString(d.StrategyMetadata, "preview_source_timeframe"))
 	previewComponents := metadataInt(d.StrategyMetadata, "preview_components")
 	previewConfirmed := metadataBool(d.StrategyMetadata, "preview_confirmed")
+	structureKey := metadataString(d.StrategyMetadata, "structure_key")
+	lifecycleKey := metadataString(d.StrategyMetadata, "lifecycle_key")
 	parentSignalID := metadataString(d.StrategyMetadata, "parent_signal_id")
+	parentStructureKey := metadataString(d.StrategyMetadata, "parent_structure_key")
+	reasonCode := firstNonEmptyString(metadataString(d.StrategyMetadata, "reason_code"), metadataString(d.StrategyMetadata, "guard_reason_code"))
 	entryTriggerID := metadataString(d.StrategyMetadata, "entry_trigger_id")
 	entryTriggerType := metadataString(d.StrategyMetadata, "entry_trigger_type")
 	entryTriggerTF := metadataString(d.StrategyMetadata, "entry_trigger_timeframe")
@@ -2168,7 +2237,7 @@ func (e *Engine) decisionToMarker(d decision.Decision, status string) (SignalMar
 	if d.Action == "update_stop_loss" {
 		price = d.NewStopLoss
 	}
-	return SignalMarker{
+	marker := SignalMarker{
 		Symbol:             market.Normalize(d.Symbol),
 		Timeframe:          timeframe,
 		CloseTime:          closeTime,
@@ -2181,6 +2250,10 @@ func (e *Engine) decisionToMarker(d decision.Decision, status string) (SignalMar
 		SourceLayer:        layer,
 		Status:             status,
 		SignalID:           d.SignalID,
+		StructureKey:       structureKey,
+		LifecycleKey:       lifecycleKey,
+		ParentStructureKey: parentStructureKey,
+		ReasonCode:         reasonCode,
 		Action:             d.Action,
 		TradeIntent:        tradeIntent,
 		PositionSide:       positionSide,
@@ -2202,7 +2275,8 @@ func (e *Engine) decisionToMarker(d decision.Decision, status string) (SignalMar
 		PreviewSourceTF:    previewSourceTF,
 		PreviewComponents:  previewComponents,
 		PreviewConfirmed:   previewConfirmed,
-	}, true
+	}
+	return canonicalizeSignalMarker(marker), true
 }
 
 func derivePositionSide(d decision.Decision, finalAction string) string {
@@ -2313,18 +2387,12 @@ func directionForAction(action string) string {
 }
 
 func mergeSignalMarkers(first, second []SignalMarker) []SignalMarker {
-	seen := map[string]bool{}
-	out := make([]SignalMarker, 0, len(first)+len(second))
+	var out []SignalMarker
 	for _, marker := range append(append([]SignalMarker(nil), first...), second...) {
 		if marker.SignalID == "" {
 			continue
 		}
-		key := signalMarkerKey(marker)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, marker)
+		out = upsertSignalMarker(out, marker)
 	}
 	if len(out) > maxRecentSignalMarkers {
 		out = out[len(out)-maxRecentSignalMarkers:]
@@ -2458,6 +2526,15 @@ func splitLayerDiagnostics(values []string) ([]string, []string) {
 		mainMessages = append(mainMessages, value)
 	}
 	return mainMessages, positionMessages
+}
+
+func sortedStringKeys(values map[string]int) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func nextCloseTime(now time.Time, timeframe string) time.Time {

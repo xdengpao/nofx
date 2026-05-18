@@ -76,6 +76,8 @@ type SignalDiagnostics struct {
 
 type ChanlunSignal struct {
 	SignalID           string            `json:"signal_id"`
+	StructureKey       string            `json:"structure_key,omitempty"`
+	LifecycleKey       string            `json:"lifecycle_key,omitempty"`
 	Symbol             string            `json:"symbol"`
 	Direction          string            `json:"direction"`
 	SignalType         string            `json:"signal_type"`
@@ -99,6 +101,8 @@ type ChanlunSignal struct {
 	Status             string            `json:"status,omitempty"`
 	SourceLayer        string            `json:"source_layer,omitempty"`
 	ParentSignalID     string            `json:"parent_signal_id,omitempty"`
+	ParentStructureKey string            `json:"parent_structure_key,omitempty"`
+	ReasonCode         string            `json:"reason_code,omitempty"`
 	EntryTriggerID     string            `json:"entry_trigger_id,omitempty"`
 	EntryTriggerType   string            `json:"entry_trigger_type,omitempty"`
 	EntryTriggerTF     string            `json:"entry_trigger_timeframe,omitempty"`
@@ -116,18 +120,51 @@ type ChanlunSignal struct {
 }
 
 type SignalReport struct {
-	TraderID           string          `json:"trader_id"`
-	Symbol             string          `json:"symbol"`
-	DecisionMode       string          `json:"decision_mode"`
-	StrategyName       string          `json:"strategy_name"`
-	StrategyVersion    string          `json:"strategy_version"`
-	ConfigHash         string          `json:"config_hash"`
-	TradeTimeframe     string          `json:"trade_timeframe,omitempty"`
-	ComponentTimeframe string          `json:"component_timeframe,omitempty"`
-	MicroTimeframe     string          `json:"micro_timeframe,omitempty"`
-	Signals            []ChanlunSignal `json:"signals"`
-	SignalMarkers      []SignalMarker  `json:"signal_markers,omitempty"`
-	LatestDiagnostics  map[string]any  `json:"latest_diagnostics,omitempty"`
+	TraderID           string              `json:"trader_id"`
+	Symbol             string              `json:"symbol"`
+	DecisionMode       string              `json:"decision_mode"`
+	StrategyName       string              `json:"strategy_name"`
+	StrategyVersion    string              `json:"strategy_version"`
+	ConfigHash         string              `json:"config_hash"`
+	TradeTimeframe     string              `json:"trade_timeframe,omitempty"`
+	ComponentTimeframe string              `json:"component_timeframe,omitempty"`
+	MicroTimeframe     string              `json:"micro_timeframe,omitempty"`
+	Signals            []ChanlunSignal     `json:"signals"`
+	SignalMarkers      []SignalMarker      `json:"signal_markers,omitempty"`
+	View               string              `json:"view,omitempty"`
+	MarkerSummary      SignalMarkerSummary `json:"marker_summary,omitempty"`
+	Filters            SignalReportFilters `json:"filters,omitempty"`
+	LatestDiagnostics  map[string]any      `json:"latest_diagnostics,omitempty"`
+}
+
+type SignalMarkerSummary struct {
+	TotalRaw           int            `json:"total_raw"`
+	TotalReturned      int            `json:"total_returned"`
+	HiddenByDefault    int            `json:"hidden_by_default"`
+	CollapsedLifecycle int            `json:"collapsed_lifecycle"`
+	SuppressedRepeats  int            `json:"suppressed_repeats"`
+	PreviewHidden      int            `json:"preview_hidden"`
+	ByCategory         map[string]int `json:"by_category,omitempty"`
+	ByStatus           map[string]int `json:"by_status,omitempty"`
+	MaxLatencyHours    float64        `json:"max_latency_hours,omitempty"`
+	MedianLatencyHours float64        `json:"median_latency_hours,omitempty"`
+}
+
+type SignalReportFilters struct {
+	Layers   []string `json:"layers,omitempty"`
+	Statuses []string `json:"statuses,omitempty"`
+	From     int64    `json:"from,omitempty"`
+	To       int64    `json:"to,omitempty"`
+	Limit    int      `json:"limit,omitempty"`
+}
+
+type SignalReportOptions struct {
+	View     string
+	Layers   []string
+	Statuses []string
+	From     int64
+	To       int64
+	Limit    int
 }
 
 type SignalMarker struct {
@@ -143,6 +180,18 @@ type SignalMarker struct {
 	SourceLayer        string  `json:"source_layer"`
 	Status             string  `json:"status"`
 	SignalID           string  `json:"signal_id"`
+	StructureKey       string  `json:"structure_key,omitempty"`
+	LifecycleKey       string  `json:"lifecycle_key,omitempty"`
+	ParentStructureKey string  `json:"parent_structure_key,omitempty"`
+	ReasonCode         string  `json:"reason_code,omitempty"`
+	DisplayCategory    string  `json:"display_category,omitempty"`
+	DisplayPriority    int     `json:"display_priority,omitempty"`
+	HiddenByDefault    bool    `json:"hidden_by_default,omitempty"`
+	Collapsed          bool    `json:"collapsed,omitempty"`
+	CollapsedCount     int     `json:"collapsed_count,omitempty"`
+	FirstSeenCloseTime int64   `json:"first_seen_close_time,omitempty"`
+	LastSeenCloseTime  int64   `json:"last_seen_close_time,omitempty"`
+	LastUpdatedAt      int64   `json:"last_updated_at,omitempty"`
 	Action             string  `json:"action,omitempty"`
 	FinalAction        string  `json:"final_action,omitempty"`
 	TradeIntent        string  `json:"trade_intent,omitempty"`

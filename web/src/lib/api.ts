@@ -8,6 +8,7 @@ import type {
   CompetitionData,
   MarketKlineResponse,
   StrategySignalReport,
+  StrategySignalQuery,
   StrategySymbolsResponse,
 } from '../types';
 
@@ -123,10 +124,17 @@ export const api = {
     return res.json();
   },
 
-  async getStrategySignals(traderId: string | undefined, symbol: string): Promise<StrategySignalReport> {
+  async getStrategySignals(traderId: string | undefined, symbol: string, options?: StrategySignalQuery): Promise<StrategySignalReport> {
     const params = new URLSearchParams();
     if (traderId) params.set('trader_id', traderId);
     params.set('symbol', symbol);
+    if (options?.view) params.set('view', options.view);
+    if (options?.include_history) params.set('include_history', 'true');
+    if (options?.layers?.length) params.set('layers', options.layers.join(','));
+    if (options?.statuses?.length) params.set('statuses', options.statuses.join(','));
+    if (options?.from) params.set('from', String(options.from));
+    if (options?.to) params.set('to', String(options.to));
+    if (options?.limit !== undefined) params.set('limit', String(options.limit));
     const res = await fetch(`${API_BASE}/strategy/signals?${params.toString()}`);
     if (!res.ok) throw new Error('获取策略信号失败');
     return res.json();

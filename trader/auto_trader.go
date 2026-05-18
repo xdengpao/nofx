@@ -2683,14 +2683,19 @@ func (at *AutoTrader) GetStrategySymbols() []chanlun.StrategySymbol {
 
 // GetLatestStrategySignals 返回程序化策略最近一次分析出的 symbol 信号报告。
 func (at *AutoTrader) GetLatestStrategySignals(symbol string) (*chanlun.SignalReport, bool) {
+	return at.GetLatestStrategySignalsWithOptions(symbol, chanlun.SignalReportOptions{})
+}
+
+// GetLatestStrategySignalsWithOptions 返回带过滤/视图参数的程序化策略信号报告。
+func (at *AutoTrader) GetLatestStrategySignalsWithOptions(symbol string, opts chanlun.SignalReportOptions) (*chanlun.SignalReport, bool) {
 	if at.programmaticEngine == nil {
 		return nil, false
 	}
 	normalized := market.Normalize(symbol)
-	if report, ok := at.programmaticEngine.LatestSignals(at.id, normalized); ok {
+	if report, ok := at.programmaticEngine.LatestSignalsWithOptions(at.id, normalized, opts); ok {
 		return report, true
 	}
-	return at.programmaticEngine.EmptySignalReport(at.id, normalized), true
+	return at.programmaticEngine.EmptySignalReportWithOptions(at.id, normalized, opts), true
 }
 
 // GetMarketKlines 返回闭合 K 线，供策略检查区使用。

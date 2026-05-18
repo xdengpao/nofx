@@ -122,6 +122,14 @@ func StableSignalID(traderID, symbol, direction, signalType, analysisTF, trigger
 	return hex.EncodeToString(sum[:])
 }
 
+func StableStructureKey(traderID, symbol, direction, signalType, analysisTF, triggerTF, centerID string, segment Segment) string {
+	value := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%d|%d",
+		traderID, market.Normalize(symbol), direction, signalType, analysisTF, triggerTF, centerID,
+		segment.StartTime, segment.EndTime)
+	sum := sha1.Sum([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
 func StableEntryTriggerID(traderID, symbol, parentSignalID, triggerType, triggerTF string, triggerCloseTime int64, configHash string) string {
 	value := fmt.Sprintf("%s|%s|%s|%s|%s|%d|%s",
 		traderID, symbol, parentSignalID, triggerType, triggerTF, triggerCloseTime, configHash)
@@ -153,6 +161,7 @@ func buildSignal(input SignalInput, signalType, direction string, segment Segmen
 	}
 	signal := ChanlunSignal{
 		SignalID:         StableSignalID(input.TraderID, input.Symbol, direction, signalType, input.AnalysisTF, input.TriggerTF, centerID, segment, input.ConfigHash),
+		StructureKey:     StableStructureKey(input.TraderID, input.Symbol, direction, signalType, input.AnalysisTF, input.TriggerTF, centerID, segment),
 		Symbol:           input.Symbol,
 		Direction:        direction,
 		SignalType:       signalType,
@@ -175,6 +184,7 @@ func buildSignal(input SignalInput, signalType, direction string, segment Segmen
 		Status:           "detected",
 		SourceLayer:      "structure",
 	}
+	signal.LifecycleKey = "structure:" + signal.StructureKey
 	return signal
 }
 
