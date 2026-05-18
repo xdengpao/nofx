@@ -207,6 +207,9 @@ func TestStateStoreSignalSuppressionSeparateFromExecuted(t *testing.T) {
 	if !store.HasSuppressedSignal("t1", "SOLUSDT", "sig-target-crossed", "open_short", "target_already_crossed") {
 		t.Fatal("应能按signal/action/reason查询suppression")
 	}
+	if got, ok := store.SuppressedSignalForAction("t1", "SOLUSDT", "sig-target-crossed", "open_short"); !ok || got.ReasonCode != "target_already_crossed" {
+		t.Fatalf("应能按signal/action查询suppression: ok=%v got=%+v", ok, got)
+	}
 	if store.HasExecutedSignal("t1", "SOLUSDT", "sig-target-crossed") {
 		t.Fatal("suppressed信号不应被视为executed")
 	}

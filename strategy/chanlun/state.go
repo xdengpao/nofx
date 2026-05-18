@@ -220,6 +220,28 @@ func (s *StateStore) HasSuppressedSignal(traderID, symbol, signalID, action, rea
 	return exists
 }
 
+func (s *StateStore) SuppressedSignalForAction(traderID, symbol, signalID, action string) (SignalSuppression, bool) {
+	if signalID == "" || action == "" {
+		return SignalSuppression{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	prefix := signalID + "|" + strings.ToLower(strings.TrimSpace(action)) + "|"
+	var latest SignalSuppression
+	found := false
+	for key, suppression := range state.SuppressedSignals {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		if !found || suppression.SuppressedAt.After(latest.SuppressedAt) {
+			latest = suppression
+			found = true
+		}
+	}
+	return latest, found
+}
+
 func (s *StateStore) StoreSignalSuppression(traderID, symbol string, suppression SignalSuppression) {
 	if suppression.SignalID == "" || suppression.Action == "" || suppression.ReasonCode == "" {
 		return

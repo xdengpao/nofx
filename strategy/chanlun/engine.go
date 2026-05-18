@@ -267,6 +267,10 @@ func (e *Engine) evaluateMainSignals(ctx *decision.Context, universe []StrategyS
 				diagnostics = append(diagnostics, fmt.Sprintf("%s %s 已处理过signal_id=%s", signal.Symbol, signal.SignalType, signal.SignalID))
 				continue
 			}
+			if msg, suppressed := e.suppressedSignalDiagnostic(ctx, d); suppressed {
+				diagnostics = append(diagnostics, msg)
+				continue
+			}
 			guarded, rejection, guardDiagnostics := e.applyProgrammaticSignalGuard(ctx, signal, d, data, now)
 			diagnostics = append(diagnostics, guardDiagnostics...)
 			if rejection != nil {
@@ -344,6 +348,10 @@ func (e *Engine) evaluatePreviewSignals(ctx *decision.Context, symbol string, da
 			diagnostics = append(diagnostics, fmt.Sprintf("%s %s preview signal_id=%s已处理", signal.Symbol, signal.SignalType, signal.SignalID))
 			continue
 		}
+		if msg, suppressed := e.suppressedSignalDiagnostic(ctx, d); suppressed {
+			diagnostics = append(diagnostics, msg)
+			continue
+		}
 		e.applyPreviewPilotSizing(ctx, data, &d)
 		guarded, rejection, guardDiagnostics := e.applyProgrammaticSignalGuard(ctx, signal, d, data, now)
 		diagnostics = append(diagnostics, guardDiagnostics...)
@@ -354,6 +362,21 @@ func (e *Engine) evaluatePreviewSignals(ctx *decision.Context, symbol string, da
 		previewDecisions = append(previewDecisions, guarded)
 	}
 	return previewSignals, previewDecisions, diagnostics, rejections
+}
+
+func (e *Engine) suppressedSignalDiagnostic(ctx *decision.Context, d decision.Decision) (string, bool) {
+	if ctx == nil || d.SignalID == "" || d.Action == "" {
+		return "", false
+	}
+	suppression, ok := e.StateStore.SuppressedSignalForAction(ctx.TraderID, market.Normalize(d.Symbol), d.SignalID, d.Action)
+	if !ok {
+		return "", false
+	}
+	reasonCode := suppression.ReasonCode
+	if reasonCode == "" {
+		reasonCode = "suppressed"
+	}
+	return fmt.Sprintf("%s %s signal_id=%s 已因%s抑制，跳过重复开仓", d.Symbol, d.Action, d.SignalID, reasonCode), true
 }
 
 func (e *Engine) detectSignalsFromKlines(traderID, symbol, tradeTF, triggerTF string, tradeKlines, centerKlines []market.Kline, data *market.Data, now time.Time, configHash string) []ChanlunSignal {
