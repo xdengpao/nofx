@@ -4,6 +4,8 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"math"
+	"nofx/market"
 	"time"
 )
 
@@ -22,6 +24,8 @@ type SignalInput struct {
 	PriceTolerancePct float64
 	RequireBZeroAxis  bool
 	MAKiss            KissResult
+	MarketData        *market.Data
+	ADXTimeframe      string
 }
 
 func DetectSignals(input SignalInput) []ChanlunSignal {
@@ -136,6 +140,10 @@ func buildSignal(input SignalInput, signalType, direction string, segment Segmen
 			"ma_kiss":     input.MAKiss.KissType,
 		},
 	}
+	confidence, confidenceMetrics := calculateSignalConfidence(input, signalType, direction, div)
+	for key, value := range confidenceMetrics {
+		diagnostics.Metrics[key] = value
+	}
 	signal := ChanlunSignal{
 		SignalID:         StableSignalID(input.TraderID, input.Symbol, direction, signalType, input.AnalysisTF, input.TriggerTF, centerID, segment, input.ConfigHash),
 		Symbol:           input.Symbol,
@@ -150,7 +158,7 @@ func buildSignal(input SignalInput, signalType, direction string, segment Segmen
 		TakeProfit:       target,
 		StructureTarget:  target,
 		CenterID:         centerID,
-		Confidence:       75,
+		Confidence:       confidence,
 		ConfirmedAt:      input.Now,
 		Diagnostics:      diagnostics,
 		TriggerCloseTime: segment.EndTime,
@@ -161,6 +169,196 @@ func buildSignal(input SignalInput, signalType, direction string, segment Segmen
 		SourceLayer:      "main_signal",
 	}
 	return signal
+}
+
+func calculateSignalConfidence(input SignalInput, signalType, direction string, div DivergenceResult) (int, map[string]any) {
+	score := baseSignalConfidence(signalType)
+	metrics := map[string]any{
+		"confidence_base":        score,
+		"confidence_signal_type": signalType,
+	}
+	adjust := func(key string, delta int) {
+		score += delta
+		metrics[key] = delta
+	}
+
+	if div.Diverged {
+		adjust("confidence_divergence", 3)
+	} else if signalType == SignalBuy1 || signalType == SignalSell1 {
+		adjust("confidence_missing_divergence", -2)
+	}
+	if input.MAKiss.KissType != "" {
+		adjust("confidence_ma_kiss", 1)
+	}
+	switch {
+	case direction == SideLong && input.MAKiss.Position == "female":
+		adjust("confidence_ma_position", 2)
+	case direction == SideShort && input.MAKiss.Position == "male":
+		adjust("confidence_ma_position", 2)
+	case input.MAKiss.Position != "":
+		adjust("confidence_ma_position", -1)
+	}
+
+	data := input.MarketData
+	if data == nil {
+		adjust("confidence_missing_market_data", -4)
+		return clampConfidence(score), metrics
+	}
+
+	state, stateConfidence := market.GetMarketState(data)
+	metrics["confidence_market_state"] = state
+	metrics["confidence_market_state_score"] = stateConfidence
+	applyMarketStateConfidence(direction, state, adjust)
+
+	timeframe := input.ADXTimeframe
+	if timeframe == "" {
+		timeframe = "1h"
+	}
+	snapshot := market.GetDirectionalSnapshot(data, timeframe)
+	metrics["confidence_adx_timeframe"] = snapshot.Timeframe
+	metrics["confidence_adx"] = snapshot.ADX
+	metrics["confidence_di_plus"] = snapshot.DIPlus
+	metrics["confidence_di_minus"] = snapshot.DIMinus
+	if snapshot.ADX <= 0 || snapshot.DIPlus <= 0 || snapshot.DIMinus <= 0 {
+		adjust("confidence_missing_adx_di", -4)
+	} else {
+		aligned := signalDirectionAligned(direction, snapshot.DIPlus, snapshot.DIMinus)
+		metrics["confidence_di_aligned"] = aligned
+		if aligned {
+			adjust("confidence_adx_strength", adxConfidenceDelta(snapshot.ADX))
+			adjust("confidence_di_spread", diSpreadConfidenceDelta(snapshot.DIPlus, snapshot.DIMinus))
+		} else {
+			adjust("confidence_di_counter_direction", -10)
+		}
+	}
+
+	applyMomentumConfidence(direction, data.PriceChange1h, data.PriceChange4h, metrics, adjust)
+	return clampConfidence(score), metrics
+}
+
+func baseSignalConfidence(signalType string) int {
+	switch signalType {
+	case SignalBuy3, SignalSell3:
+		return 80
+	case SignalBuy2, SignalSell2:
+		return 78
+	case SignalBuy1, SignalSell1:
+		return 76
+	default:
+		return 74
+	}
+}
+
+func applyMarketStateConfidence(direction, state string, adjust func(string, int)) {
+	switch state {
+	case "STRONG_UPTREND":
+		if direction == SideLong {
+			adjust("confidence_market_alignment", 5)
+		} else {
+			adjust("confidence_market_counter", -8)
+		}
+	case "WEAK_UPTREND":
+		if direction == SideLong {
+			adjust("confidence_market_alignment", 2)
+		} else {
+			adjust("confidence_market_counter", -5)
+		}
+	case "STRONG_DOWNTREND":
+		if direction == SideShort {
+			adjust("confidence_market_alignment", 5)
+		} else {
+			adjust("confidence_market_counter", -8)
+		}
+	case "WEAK_DOWNTREND":
+		if direction == SideShort {
+			adjust("confidence_market_alignment", 2)
+		} else {
+			adjust("confidence_market_counter", -5)
+		}
+	case "SQUEEZE":
+		adjust("confidence_market_range", -2)
+	case "RANGING":
+		adjust("confidence_market_range", -3)
+	}
+}
+
+func signalDirectionAligned(direction string, diPlus, diMinus float64) bool {
+	switch direction {
+	case SideLong:
+		return diPlus > diMinus
+	case SideShort:
+		return diMinus > diPlus
+	default:
+		return true
+	}
+}
+
+func adxConfidenceDelta(adx float64) int {
+	switch {
+	case adx >= 40:
+		return 8
+	case adx >= 30:
+		return 6
+	case adx >= 25:
+		return 5
+	case adx >= 20:
+		return 2
+	default:
+		return -6
+	}
+}
+
+func diSpreadConfidenceDelta(diPlus, diMinus float64) int {
+	sum := math.Abs(diPlus) + math.Abs(diMinus)
+	if sum <= 0 {
+		return -2
+	}
+	spreadPct := math.Abs(diPlus-diMinus) / sum * 100
+	switch {
+	case spreadPct >= 30:
+		return 4
+	case spreadPct >= 15:
+		return 3
+	case spreadPct >= 5:
+		return 1
+	default:
+		return -1
+	}
+}
+
+func applyMomentumConfidence(direction string, priceChange1h, priceChange4h float64, metrics map[string]any, adjust func(string, int)) {
+	metrics["confidence_price_change_1h"] = priceChange1h
+	metrics["confidence_price_change_4h"] = priceChange4h
+	switch direction {
+	case SideLong:
+		switch {
+		case priceChange1h > 0 && priceChange4h >= 0:
+			adjust("confidence_price_momentum", 2)
+		case priceChange1h < 0 && priceChange4h < 0:
+			adjust("confidence_price_momentum", -3)
+		case priceChange1h < 0:
+			adjust("confidence_price_momentum", -1)
+		}
+	case SideShort:
+		switch {
+		case priceChange1h < 0 && priceChange4h <= 0:
+			adjust("confidence_price_momentum", 2)
+		case priceChange1h > 0 && priceChange4h > 0:
+			adjust("confidence_price_momentum", -3)
+		case priceChange1h > 0:
+			adjust("confidence_price_momentum", -1)
+		}
+	}
+}
+
+func clampConfidence(score int) int {
+	if score < 60 {
+		return 60
+	}
+	if score > 95 {
+		return 95
+	}
+	return score
 }
 
 func lastCenterID(centers []Center) string {

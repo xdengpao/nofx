@@ -184,6 +184,17 @@ func (s *StateStore) MarkExecuted(traderID, symbol, signalID, action string) boo
 	return true
 }
 
+func (s *StateStore) HasExecutedSignal(traderID, symbol, signalID string) bool {
+	if signalID == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	_, exists := state.ExecutedSignals[signalID]
+	return exists
+}
+
 func (s *StateStore) SetLastAnalyzedClosedKline(traderID, symbol, timeframe string, closeTime int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

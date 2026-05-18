@@ -162,7 +162,7 @@ func (e *Engine) evaluateMainSignals(ctx *decision.Context, universe []StrategyS
 			if d.Action == "" {
 				continue
 			}
-			if !e.StateStore.MarkExecuted(ctx.TraderID, signal.Symbol, signal.SignalID, d.Action) {
+			if e.StateStore.HasExecutedSignal(ctx.TraderID, signal.Symbol, signal.SignalID) {
 				diagnostics = append(diagnostics, fmt.Sprintf("%s %s 已处理过signal_id=%s", signal.Symbol, signal.SignalType, signal.SignalID))
 				continue
 			}
@@ -358,6 +358,9 @@ func (e *Engine) OnExecutionResult(result ProgrammaticExecutionResult) {
 		_ = e.StateStore.Save()
 		return
 	}
+	if decision.IsOpenLikeAction(finalAction) {
+		e.StateStore.MarkExecuted(result.TraderID, symbol, d.SignalID, finalAction)
+	}
 	rule := metadataString(d.StrategyMetadata, "rule")
 	side := metadataString(d.StrategyMetadata, "side")
 	if side == "" {
@@ -477,6 +480,8 @@ func (e *Engine) analyzeMainSignal(traderID, symbol string, data *market.Data, n
 		PriceTolerancePct: e.Policy.Divergence.PriceTolerancePct,
 		RequireBZeroAxis:  e.Policy.Divergence.RequireBZeroAxis,
 		MAKiss:            maKiss,
+		MarketData:        data,
+		ADXTimeframe:      "1h",
 	})
 	var timeDiagnostics []string
 	for i := range signals {

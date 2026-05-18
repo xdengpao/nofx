@@ -77,6 +77,49 @@ func TestExecutionResultMarkerKeepsOriginalAndFinalAction(t *testing.T) {
 	}
 }
 
+func TestExecutionResultMarksExecutedOnlyAfterSuccessfulOpenLike(t *testing.T) {
+	engine, err := NewEngine(testProgrammaticPolicy(filepath.Join(t.TempDir(), "state.json")))
+	if err != nil {
+		t.Fatalf("创建engine失败: %v", err)
+	}
+	openDecision := decision.Decision{
+		Symbol:          "BTCUSDT",
+		Action:          "open_short",
+		StrategyMode:    "programmatic",
+		Reasoning:       "趋势同向开空",
+		SignalID:        "sig-open-short",
+		SignalType:      SignalSell2,
+		SignalTimeframe: "1h",
+		StrategyMetadata: map[string]any{
+			"layer":             "main_signal",
+			"rule":              SignalSell2,
+			"signal_type":       SignalSell2,
+			"trade_intent":      "open_short",
+			"signal_close_time": int64(100),
+		},
+	}
+
+	engine.OnExecutionResult(ProgrammaticExecutionResult{
+		TraderID: "t1",
+		Decision: openDecision,
+		Success:  false,
+		Error:    "交易所拒单",
+	})
+	if engine.StateStore.HasExecutedSignal("t1", "BTCUSDT", "sig-open-short") {
+		t.Fatalf("失败执行不应写入executed_signals")
+	}
+
+	engine.OnExecutionResult(ProgrammaticExecutionResult{
+		TraderID:    "t1",
+		Decision:    openDecision,
+		Success:     true,
+		FinalAction: "open_short",
+	})
+	if !engine.StateStore.HasExecutedSignal("t1", "BTCUSDT", "sig-open-short") {
+		t.Fatalf("成功open应写入executed_signals")
+	}
+}
+
 func TestRejectedStrategyDecisionMarkerRetainsActionAndTradeIntent(t *testing.T) {
 	engine, err := NewEngine(testProgrammaticPolicy(filepath.Join(t.TempDir(), "state.json")))
 	if err != nil {
