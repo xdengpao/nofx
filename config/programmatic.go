@@ -39,6 +39,7 @@ type ProgrammaticStrategyConfig struct {
 	TakeProfit         ProgrammaticTPConfig                 `json:"take_profit,omitempty"`
 	SignalFreshness    ProgrammaticSignalFreshnessConfig    `json:"signal_freshness,omitempty"`
 	PreviewSignals     ProgrammaticPreviewSignalsConfig     `json:"preview_signals,omitempty"`
+	EntryTiming        ProgrammaticEntryTimingConfig        `json:"entry_timing,omitempty"`
 	State              ProgrammaticStateConfig              `json:"state,omitempty"`
 }
 
@@ -173,6 +174,32 @@ type ProgrammaticPreviewSignalsConfig struct {
 	RequireConfirmedUpgrade    *bool   `json:"require_confirmed_upgrade,omitempty"`
 }
 
+type ProgrammaticEntryTimingConfig struct {
+	Enabled                        *bool                        `json:"enabled,omitempty"`
+	DirectStructureOpen            bool                         `json:"direct_structure_open,omitempty"`
+	DirectOpenMaxAgeCandles        int                          `json:"direct_open_max_age_candles,omitempty"`
+	RequireFreshTrigger            *bool                        `json:"require_fresh_trigger,omitempty"`
+	TriggerTimeframe               string                       `json:"trigger_timeframe,omitempty"`
+	AllowedTriggerTypes            []string                     `json:"allowed_trigger_types,omitempty"`
+	EntryZone                      ProgrammaticEntryZoneConfig  `json:"entry_zone,omitempty"`
+	MaxTriggerAgeCandles           int                          `json:"max_trigger_age_candles,omitempty"`
+	MinTriggerConfidence           int                          `json:"min_trigger_confidence,omitempty"`
+	Pilot                          ProgrammaticEntryPilotConfig `json:"pilot,omitempty"`
+	ContinuationAfterTargetCrossed string                       `json:"continuation_after_target_crossed,omitempty"`
+}
+
+type ProgrammaticEntryZoneConfig struct {
+	Mode              string  `json:"mode,omitempty"`
+	MaxChaseRatio     float64 `json:"max_chase_ratio,omitempty"`
+	MinRemainingNetRR float64 `json:"min_remaining_net_rr,omitempty"`
+}
+
+type ProgrammaticEntryPilotConfig struct {
+	Enabled       bool    `json:"enabled,omitempty"`
+	RiskFraction  float64 `json:"risk_fraction,omitempty"`
+	MinConfidence int     `json:"min_confidence,omitempty"`
+}
+
 type ProgrammaticStateConfig struct {
 	Path      string `json:"path,omitempty"`
 	Bootstrap bool   `json:"bootstrap,omitempty"`
@@ -198,6 +225,7 @@ type ProgrammaticStrategyProfile struct {
 	TakeProfit         ProgrammaticTPProfile
 	SignalFreshness    ProgrammaticSignalFreshnessProfile
 	PreviewSignals     ProgrammaticPreviewSignalsProfile
+	EntryTiming        ProgrammaticEntryTimingProfile
 	State              ProgrammaticStateProfile
 }
 
@@ -329,6 +357,32 @@ type ProgrammaticPreviewSignalsProfile struct {
 	RequireConfirmedUpgrade    bool
 }
 
+type ProgrammaticEntryTimingProfile struct {
+	Enabled                        bool
+	DirectStructureOpen            bool
+	DirectOpenMaxAgeCandles        int
+	RequireFreshTrigger            bool
+	TriggerTimeframe               string
+	AllowedTriggerTypes            []string
+	EntryZone                      ProgrammaticEntryZoneProfile
+	MaxTriggerAgeCandles           int
+	MinTriggerConfidence           int
+	Pilot                          ProgrammaticEntryPilotProfile
+	ContinuationAfterTargetCrossed string
+}
+
+type ProgrammaticEntryZoneProfile struct {
+	Mode              string
+	MaxChaseRatio     float64
+	MinRemainingNetRR float64
+}
+
+type ProgrammaticEntryPilotProfile struct {
+	Enabled       bool
+	RiskFraction  float64
+	MinConfidence int
+}
+
 type ProgrammaticStateProfile struct {
 	Path      string
 	Bootstrap bool
@@ -442,6 +496,10 @@ func normalizeProgrammaticStrategyConfig(cfg ProgrammaticStrategyConfig) (Progra
 	if err != nil {
 		return ProgrammaticStrategyProfile{}, err
 	}
+	entryTiming, err := normalizeProgrammaticEntryTiming(cfg.EntryTiming, timeframes, tp.MinNetRR)
+	if err != nil {
+		return ProgrammaticStrategyProfile{}, err
+	}
 	signals, err := normalizeEnabledSignals(cfg.EnabledSignals)
 	if err != nil {
 		return ProgrammaticStrategyProfile{}, err
@@ -481,6 +539,7 @@ func normalizeProgrammaticStrategyConfig(cfg ProgrammaticStrategyConfig) (Progra
 		TakeProfit:         tp,
 		SignalFreshness:    freshness,
 		PreviewSignals:     preview,
+		EntryTiming:        entryTiming,
 		State: ProgrammaticStateProfile{
 			Path:      statePath,
 			Bootstrap: cfg.State.Bootstrap,
@@ -1099,6 +1158,149 @@ func normalizeProgrammaticPreviewSignals(cfg ProgrammaticPreviewSignalsConfig, t
 		PilotMinConfidence:         pilotConfidence,
 		RequireConfirmedUpgrade:    requireUpgrade,
 	}, nil
+}
+
+func normalizeProgrammaticEntryTiming(cfg ProgrammaticEntryTimingConfig, timeframes ProgrammaticTimeframesProfile, fallbackMinRR float64) (ProgrammaticEntryTimingProfile, error) {
+	enabled := true
+	if cfg.Enabled != nil {
+		enabled = *cfg.Enabled
+	}
+	requireFreshTrigger := true
+	if cfg.RequireFreshTrigger != nil {
+		requireFreshTrigger = *cfg.RequireFreshTrigger
+	}
+	triggerTF := defaultString(cfg.TriggerTimeframe, timeframes.Sub)
+	if triggerTF == "" {
+		triggerTF = defaultSubTimeframeForTrade(timeframes.Trade)
+	}
+	if !isSupportedProgrammaticTimeframe(triggerTF) {
+		return ProgrammaticEntryTimingProfile{}, fmt.Errorf("entry_timing.trigger_timeframe必须是 3m、15m、1h 或 4h: %q", triggerTF)
+	}
+	directAge := cfg.DirectOpenMaxAgeCandles
+	if directAge < 0 || directAge > 16 {
+		return ProgrammaticEntryTimingProfile{}, fmt.Errorf("entry_timing.direct_open_max_age_candles必须在0-16之间: %d", directAge)
+	}
+	allowed, err := normalizeEntryTriggerTypes(cfg.AllowedTriggerTypes)
+	if err != nil {
+		return ProgrammaticEntryTimingProfile{}, err
+	}
+	entryZone, err := normalizeProgrammaticEntryZone(cfg.EntryZone, fallbackMinRR)
+	if err != nil {
+		return ProgrammaticEntryTimingProfile{}, err
+	}
+	maxTriggerAge := cfg.MaxTriggerAgeCandles
+	if maxTriggerAge <= 0 {
+		maxTriggerAge = 1
+	}
+	if maxTriggerAge < 1 || maxTriggerAge > 16 {
+		return ProgrammaticEntryTimingProfile{}, fmt.Errorf("entry_timing.max_trigger_age_candles必须在1-16之间: %d", maxTriggerAge)
+	}
+	minConfidence := cfg.MinTriggerConfidence
+	if minConfidence < 0 || minConfidence > 100 {
+		return ProgrammaticEntryTimingProfile{}, fmt.Errorf("entry_timing.min_trigger_confidence必须在0-100之间: %d", minConfidence)
+	}
+	pilot, err := normalizeProgrammaticEntryPilot(cfg.Pilot)
+	if err != nil {
+		return ProgrammaticEntryTimingProfile{}, err
+	}
+	continuation := strings.TrimSpace(strings.ToLower(cfg.ContinuationAfterTargetCrossed))
+	if continuation == "" {
+		continuation = "disabled"
+	}
+	switch continuation {
+	case "disabled", "report_only", "separate_module":
+	default:
+		return ProgrammaticEntryTimingProfile{}, fmt.Errorf("entry_timing.continuation_after_target_crossed必须是 disabled、report_only 或 separate_module: %q", continuation)
+	}
+	return ProgrammaticEntryTimingProfile{
+		Enabled:                        enabled,
+		DirectStructureOpen:            cfg.DirectStructureOpen,
+		DirectOpenMaxAgeCandles:        directAge,
+		RequireFreshTrigger:            requireFreshTrigger,
+		TriggerTimeframe:               triggerTF,
+		AllowedTriggerTypes:            allowed,
+		EntryZone:                      entryZone,
+		MaxTriggerAgeCandles:           maxTriggerAge,
+		MinTriggerConfidence:           minConfidence,
+		Pilot:                          pilot,
+		ContinuationAfterTargetCrossed: continuation,
+	}, nil
+}
+
+func normalizeEntryTriggerTypes(values []string) ([]string, error) {
+	allowed := map[string]bool{
+		"new_structure_segment":   true,
+		"preview_2x15m_watchlist": true,
+		"preview_3x15m_pilot":     true,
+		"pullback_retest_resume":  true,
+		"breakout_continuation":   true,
+		"confirmed_1h_upgrade":    true,
+	}
+	if len(values) == 0 {
+		return []string{"preview_2x15m_watchlist", "preview_3x15m_pilot", "pullback_retest_resume"}, nil
+	}
+	seen := map[string]bool{}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		kind := strings.TrimSpace(strings.ToLower(value))
+		if !allowed[kind] {
+			return nil, fmt.Errorf("entry_timing.allowed_trigger_types包含不支持的类型: %q", value)
+		}
+		if !seen[kind] {
+			seen[kind] = true
+			result = append(result, kind)
+		}
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func normalizeProgrammaticEntryZone(cfg ProgrammaticEntryZoneConfig, fallbackMinRR float64) (ProgrammaticEntryZoneProfile, error) {
+	mode := strings.TrimSpace(strings.ToLower(cfg.Mode))
+	if mode == "" {
+		mode = "structure_range"
+	}
+	switch mode {
+	case "structure_range", "atr":
+	default:
+		return ProgrammaticEntryZoneProfile{}, fmt.Errorf("entry_timing.entry_zone.mode必须是 structure_range 或 atr: %q", mode)
+	}
+	maxChase := cfg.MaxChaseRatio
+	if maxChase <= 0 {
+		maxChase = 0.35
+	}
+	if maxChase <= 0 || maxChase > 1 {
+		return ProgrammaticEntryZoneProfile{}, fmt.Errorf("entry_timing.entry_zone.max_chase_ratio必须在0-1之间: %.4f", maxChase)
+	}
+	minRR := cfg.MinRemainingNetRR
+	if minRR <= 0 {
+		minRR = fallbackMinRR
+	}
+	if minRR <= 0 {
+		minRR = defaultStrategyMinNetRR
+	}
+	if minRR < 1 {
+		return ProgrammaticEntryZoneProfile{}, fmt.Errorf("entry_timing.entry_zone.min_remaining_net_rr不能低于1: %.4f", minRR)
+	}
+	return ProgrammaticEntryZoneProfile{Mode: mode, MaxChaseRatio: maxChase, MinRemainingNetRR: minRR}, nil
+}
+
+func normalizeProgrammaticEntryPilot(cfg ProgrammaticEntryPilotConfig) (ProgrammaticEntryPilotProfile, error) {
+	risk := cfg.RiskFraction
+	if risk <= 0 {
+		risk = 0.3
+	}
+	if risk <= 0 || risk > 1 {
+		return ProgrammaticEntryPilotProfile{}, fmt.Errorf("entry_timing.pilot.risk_fraction必须在0-1之间: %.4f", risk)
+	}
+	confidence := cfg.MinConfidence
+	if confidence <= 0 {
+		confidence = 90
+	}
+	if confidence < 1 || confidence > 100 {
+		return ProgrammaticEntryPilotProfile{}, fmt.Errorf("entry_timing.pilot.min_confidence必须在1-100之间: %d", confidence)
+	}
+	return ProgrammaticEntryPilotProfile{Enabled: cfg.Enabled, RiskFraction: risk, MinConfidence: confidence}, nil
 }
 
 func normalizeEnabledSignals(values []string) ([]string, error) {

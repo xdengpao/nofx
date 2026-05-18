@@ -337,6 +337,12 @@ func TestNormalizeProgrammaticStrategies_ProgrammaticDefaults(t *testing.T) {
 		profile.PreviewSignals.PilotMinConfidence != 90 || !profile.PreviewSignals.RequireConfirmedUpgrade {
 		t.Fatalf("preview signals默认策略错误: %+v", profile.PreviewSignals)
 	}
+	if !profile.EntryTiming.Enabled || profile.EntryTiming.DirectStructureOpen || !profile.EntryTiming.RequireFreshTrigger ||
+		profile.EntryTiming.DirectOpenMaxAgeCandles != 0 || profile.EntryTiming.TriggerTimeframe != "15m" ||
+		profile.EntryTiming.EntryZone.MinRemainingNetRR != profile.TakeProfit.MinNetRR ||
+		profile.EntryTiming.ContinuationAfterTargetCrossed != "disabled" {
+		t.Fatalf("entry timing默认策略错误: %+v", profile.EntryTiming)
+	}
 	if profile.MovingAverage.ShortPeriod != 20 || profile.MovingAverage.LongPeriod != 50 {
 		t.Fatalf("默认均线周期错误: %+v", profile.MovingAverage)
 	}
@@ -375,6 +381,24 @@ func TestNormalizeProgrammaticStrategies_SignalFreshnessPreviewOverridesAndHash(
 		PilotRiskFraction:          0.25,
 		PilotMinConfidence:         92,
 	}
+	requireFresh := false
+	cfg.Traders[0].ProgrammaticStrategy.EntryTiming = ProgrammaticEntryTimingConfig{
+		DirectStructureOpen:     true,
+		DirectOpenMaxAgeCandles: 1,
+		RequireFreshTrigger:     &requireFresh,
+		TriggerTimeframe:        "15m",
+		AllowedTriggerTypes:     []string{"pullback_retest_resume", "preview_3x15m_pilot"},
+		EntryZone: ProgrammaticEntryZoneConfig{
+			MaxChaseRatio:     0.25,
+			MinRemainingNetRR: 3.2,
+		},
+		Pilot: ProgrammaticEntryPilotConfig{
+			Enabled:       true,
+			RiskFraction:  0.2,
+			MinConfidence: 93,
+		},
+		ContinuationAfterTargetCrossed: "report_only",
+	}
 
 	profiles, err := cfg.NormalizeProgrammaticStrategies()
 	if err != nil {
@@ -389,14 +413,21 @@ func TestNormalizeProgrammaticStrategies_SignalFreshnessPreviewOverridesAndHash(
 		profile.PreviewSignals.PilotRiskFraction != 0.25 || profile.PreviewSignals.PilotMinConfidence != 92 {
 		t.Fatalf("preview override未生效: %+v", profile.PreviewSignals)
 	}
+	if !profile.EntryTiming.DirectStructureOpen || profile.EntryTiming.DirectOpenMaxAgeCandles != 1 ||
+		profile.EntryTiming.RequireFreshTrigger || profile.EntryTiming.EntryZone.MaxChaseRatio != 0.25 ||
+		profile.EntryTiming.EntryZone.MinRemainingNetRR != 3.2 || !profile.EntryTiming.Pilot.Enabled ||
+		profile.EntryTiming.Pilot.RiskFraction != 0.2 || profile.EntryTiming.Pilot.MinConfidence != 93 ||
+		profile.EntryTiming.ContinuationAfterTargetCrossed != "report_only" {
+		t.Fatalf("entry timing override未生效: %+v", profile.EntryTiming)
+	}
 	firstHash := profile.ConfigHash
-	cfg.Traders[0].ProgrammaticStrategy.PreviewSignals.PilotMinConfidence = 95
+	cfg.Traders[0].ProgrammaticStrategy.EntryTiming.EntryZone.MaxChaseRatio = 0.3
 	profiles, err = cfg.NormalizeProgrammaticStrategies()
 	if err != nil {
-		t.Fatalf("修改preview配置后归一化不应失败: %v", err)
+		t.Fatalf("修改entry timing配置后归一化不应失败: %v", err)
 	}
 	if profiles["trader1"].ConfigHash == firstHash {
-		t.Fatal("signal freshness/preview配置变化后config_hash应变化")
+		t.Fatal("signal freshness/preview/entry timing配置变化后config_hash应变化")
 	}
 }
 
@@ -521,6 +552,15 @@ func TestNormalizeProgrammaticStrategies_InvalidValues(t *testing.T) {
 		{name: "bad preview pilot order", mutate: func(t *TraderConfig) {
 			t.ProgrammaticStrategy.PreviewSignals.WatchAfterClosedComponents = 3
 			t.ProgrammaticStrategy.PreviewSignals.PilotAfterClosedComponents = 2
+		}},
+		{name: "bad entry trigger type", mutate: func(t *TraderConfig) {
+			t.ProgrammaticStrategy.EntryTiming.AllowedTriggerTypes = []string{"guess"}
+		}},
+		{name: "bad entry chase ratio", mutate: func(t *TraderConfig) {
+			t.ProgrammaticStrategy.EntryTiming.EntryZone.MaxChaseRatio = 2
+		}},
+		{name: "bad continuation mode", mutate: func(t *TraderConfig) {
+			t.ProgrammaticStrategy.EntryTiming.ContinuationAfterTargetCrossed = "rewrite"
 		}},
 	}
 	for _, tt := range tests {

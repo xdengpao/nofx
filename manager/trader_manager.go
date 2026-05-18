@@ -334,6 +334,27 @@ func decisionProgrammaticStrategyPolicy(profile config.ProgrammaticStrategyProfi
 			PilotMinConfidence:         profile.PreviewSignals.PilotMinConfidence,
 			RequireConfirmedUpgrade:    profile.PreviewSignals.RequireConfirmedUpgrade,
 		},
+		EntryTiming: decision.ProgrammaticEntryTimingPolicy{
+			Enabled:                 profile.EntryTiming.Enabled,
+			DirectStructureOpen:     profile.EntryTiming.DirectStructureOpen,
+			DirectOpenMaxAgeCandles: profile.EntryTiming.DirectOpenMaxAgeCandles,
+			RequireFreshTrigger:     profile.EntryTiming.RequireFreshTrigger,
+			TriggerTimeframe:        profile.EntryTiming.TriggerTimeframe,
+			AllowedTriggerTypes:     append([]string(nil), profile.EntryTiming.AllowedTriggerTypes...),
+			EntryZone: decision.ProgrammaticEntryZonePolicy{
+				Mode:              profile.EntryTiming.EntryZone.Mode,
+				MaxChaseRatio:     profile.EntryTiming.EntryZone.MaxChaseRatio,
+				MinRemainingNetRR: profile.EntryTiming.EntryZone.MinRemainingNetRR,
+			},
+			MaxTriggerAgeCandles: profile.EntryTiming.MaxTriggerAgeCandles,
+			MinTriggerConfidence: profile.EntryTiming.MinTriggerConfidence,
+			Pilot: decision.ProgrammaticEntryPilotPolicy{
+				Enabled:       profile.EntryTiming.Pilot.Enabled,
+				RiskFraction:  profile.EntryTiming.Pilot.RiskFraction,
+				MinConfidence: profile.EntryTiming.Pilot.MinConfidence,
+			},
+			ContinuationAfterTargetCrossed: profile.EntryTiming.ContinuationAfterTargetCrossed,
+		},
 		State: decision.ProgrammaticStatePolicy{
 			Path:      profile.State.Path,
 			Bootstrap: profile.State.Bootstrap,

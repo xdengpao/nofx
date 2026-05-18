@@ -45,6 +45,7 @@ func NewEngine(policy decision.ProgrammaticStrategyPolicy) (*Engine, error) {
 	}
 	policy.SignalFreshness = normalizeRuntimeSignalFreshness(policy.SignalFreshness, policy.TakeProfit.MinNetRR)
 	policy.PreviewSignals = normalizeRuntimePreviewSignals(policy.PreviewSignals, policy.Timeframes)
+	policy.EntryTiming = normalizeRuntimeEntryTiming(policy.EntryTiming, policy.Timeframes, policy.TakeProfit.MinNetRR)
 	engine := &Engine{
 		Policy:         policy,
 		StateStore:     NewStateStore(policy.State.Path),
@@ -135,6 +136,53 @@ func normalizeRuntimePreviewSignals(policy decision.ProgrammaticPreviewSignalsPo
 	if uninitialized {
 		policy.Enabled = true
 		policy.RequireConfirmedUpgrade = true
+	}
+	return policy
+}
+
+func normalizeRuntimeEntryTiming(policy decision.ProgrammaticEntryTimingPolicy, timeframes decision.ProgrammaticTimeframesPolicy, fallbackMinRR float64) decision.ProgrammaticEntryTimingPolicy {
+	uninitialized := !policy.Enabled && !policy.DirectStructureOpen && policy.DirectOpenMaxAgeCandles == 0 &&
+		!policy.RequireFreshTrigger && policy.TriggerTimeframe == "" && len(policy.AllowedTriggerTypes) == 0 &&
+		policy.EntryZone.Mode == "" && policy.EntryZone.MaxChaseRatio == 0 && policy.EntryZone.MinRemainingNetRR == 0 &&
+		policy.MaxTriggerAgeCandles == 0 && policy.MinTriggerConfidence == 0 &&
+		!policy.Pilot.Enabled && policy.Pilot.RiskFraction == 0 && policy.Pilot.MinConfidence == 0 &&
+		policy.ContinuationAfterTargetCrossed == ""
+	if uninitialized {
+		policy.Enabled = true
+		policy.RequireFreshTrigger = true
+	}
+	if policy.TriggerTimeframe == "" {
+		policy.TriggerTimeframe = timeframes.Sub
+	}
+	if policy.TriggerTimeframe == "" {
+		policy.TriggerTimeframe = ComponentTimeframe(timeframes.Trade)
+	}
+	if len(policy.AllowedTriggerTypes) == 0 {
+		policy.AllowedTriggerTypes = []string{"preview_2x15m_watchlist", "preview_3x15m_pilot", "pullback_retest_resume"}
+	}
+	if policy.EntryZone.Mode == "" {
+		policy.EntryZone.Mode = "structure_range"
+	}
+	if policy.EntryZone.MaxChaseRatio <= 0 {
+		policy.EntryZone.MaxChaseRatio = 0.35
+	}
+	if policy.EntryZone.MinRemainingNetRR <= 0 {
+		policy.EntryZone.MinRemainingNetRR = fallbackMinRR
+	}
+	if policy.EntryZone.MinRemainingNetRR <= 0 {
+		policy.EntryZone.MinRemainingNetRR = 2.5
+	}
+	if policy.MaxTriggerAgeCandles <= 0 {
+		policy.MaxTriggerAgeCandles = 1
+	}
+	if policy.Pilot.RiskFraction <= 0 {
+		policy.Pilot.RiskFraction = 0.3
+	}
+	if policy.Pilot.MinConfidence <= 0 {
+		policy.Pilot.MinConfidence = 90
+	}
+	if policy.ContinuationAfterTargetCrossed == "" {
+		policy.ContinuationAfterTargetCrossed = "disabled"
 	}
 	return policy
 }
@@ -257,14 +305,22 @@ func (e *Engine) evaluateMainSignals(ctx *decision.Context, universe []StrategyS
 		}
 		e.setLatestSignals(ctx.TraderID, symbol.Symbol, append(append([]ChanlunSignal(nil), signals...), previewSignals...), append(append([]string(nil), diag...), previewDiagnostics...))
 		for _, signal := range signals {
+			if signal.SourceLayer == "" || signal.SourceLayer == "main_signal" {
+				signal.SourceLayer = "structure"
+			}
 			e.StateStore.StoreConfirmedSignal(ctx.TraderID, signal.Symbol, signal, false)
 			e.reconcilePreviewMarkers(ctx.TraderID, signal.Symbol, signal)
+			openable, timingDiagnostics := e.prepareStructureEntry(ctx, &signal, data, now)
+			diagnostics = append(diagnostics, timingDiagnostics...)
+			if !openable {
+				continue
+			}
 			d := e.signalToMainDecision(ctx, signal)
 			if d.Action == "" {
 				continue
 			}
-			if e.StateStore.HasExecutedSignal(ctx.TraderID, signal.Symbol, signal.SignalID) {
-				diagnostics = append(diagnostics, fmt.Sprintf("%s %s 已处理过signal_id=%s", signal.Symbol, signal.SignalType, signal.SignalID))
+			if e.StateStore.HasExecutedSignal(ctx.TraderID, signal.Symbol, d.SignalID) {
+				diagnostics = append(diagnostics, fmt.Sprintf("%s %s 已处理过signal_id=%s", signal.Symbol, signal.SignalType, d.SignalID))
 				continue
 			}
 			if msg, suppressed := e.suppressedSignalDiagnostic(ctx, d); suppressed {
@@ -323,14 +379,25 @@ func (e *Engine) evaluatePreviewSignals(ctx *decision.Context, symbol string, da
 	var previewDecisions []decision.Decision
 	var rejections []decision.OpenRejection
 	for _, signal := range signals {
+		parentID := signal.SignalID
+		triggerType := previewTriggerType(phase, componentTF, componentCount, policy)
+		triggerID := StableEntryTriggerID(ctx.TraderID, symbol, parentID, triggerType, componentTF, synthetic.CloseTime, e.Policy.ConfigHash)
 		signal.SourceLayer = "preview_signal"
 		signal.Status = "watchlist"
+		signal.ParentSignalID = parentID
+		signal.EntryTriggerID = triggerID
+		signal.EntryTriggerType = triggerType
+		signal.EntryTriggerTF = componentTF
+		signal.EntryTriggerClose = synthetic.CloseTime
+		signal.EntryWindowState = "watchlist"
+		signal.EntryReference = currentPriceForGuard(data, tradeTF)
+		signal.TriggerConfidence = signal.Confidence
 		signal.PreviewPhase = phase
 		signal.PreviewSourceTF = componentTF
 		signal.PreviewComponents = componentCount
 		signal.PreviewConfirmed = false
 		signal.DecisionCloseTime = synthetic.CloseTime
-		signal.SignalID = previewSignalID(signal.SignalID, phase, componentTF, synthetic.CloseTime)
+		signal.SignalID = triggerID
 		previewSignals = append(previewSignals, signal)
 		diagnostics = append(diagnostics, fmt.Sprintf("%s %s 预览层%s识别%s %s，默认仅观察", symbol, tradeTF, phase, signal.Direction, signal.SignalType))
 		if !policy.AllowPilotOpen || componentCount < policy.PilotAfterClosedComponents {
@@ -344,8 +411,8 @@ func (e *Engine) evaluatePreviewSignals(ctx *decision.Context, symbol string, da
 		if d.Action == "" {
 			continue
 		}
-		if e.StateStore.HasExecutedSignal(ctx.TraderID, signal.Symbol, signal.SignalID) {
-			diagnostics = append(diagnostics, fmt.Sprintf("%s %s preview signal_id=%s已处理", signal.Symbol, signal.SignalType, signal.SignalID))
+		if e.StateStore.HasExecutedSignal(ctx.TraderID, signal.Symbol, d.SignalID) {
+			diagnostics = append(diagnostics, fmt.Sprintf("%s %s preview signal_id=%s已处理", signal.Symbol, signal.SignalType, d.SignalID))
 			continue
 		}
 		if msg, suppressed := e.suppressedSignalDiagnostic(ctx, d); suppressed {
@@ -362,6 +429,426 @@ func (e *Engine) evaluatePreviewSignals(ctx *decision.Context, symbol string, da
 		previewDecisions = append(previewDecisions, guarded)
 	}
 	return previewSignals, previewDecisions, diagnostics, rejections
+}
+
+type entryWindowEvaluation struct {
+	State          string
+	ReasonCode     string
+	Reason         string
+	CurrentPrice   float64
+	RemainingNetRR float64
+	Valid          bool
+	Invalidated    bool
+}
+
+func (e *Engine) prepareStructureEntry(ctx *decision.Context, signal *ChanlunSignal, data *market.Data, now time.Time) (bool, []string) {
+	if signal == nil {
+		return false, nil
+	}
+	if signal.SourceLayer != "" && signal.SourceLayer != "main_signal" && signal.SourceLayer != "structure" {
+		return true, nil
+	}
+	if signal.SourceLayer == "" || signal.SourceLayer == "main_signal" {
+		signal.SourceLayer = "structure"
+	}
+	if !e.Policy.EntryTiming.Enabled {
+		return true, nil
+	}
+	action := e.candidateActionForSignal(ctx, *signal)
+	if action == "" {
+		return true, nil
+	}
+	signalClose := firstPositiveInt64(signal.SignalCloseTime, signal.TriggerCloseTime, signal.SegmentEndTime)
+	decisionClose := signal.DecisionCloseTime
+	if decisionClose == 0 {
+		decisionClose = latestKlineClose(data, e.Policy.Timeframes.Trade)
+	}
+	if decisionClose > 0 && signalClose > 0 && decisionClose < signalClose {
+		decisionClose = signalClose
+	}
+	ageCandles := signalAgeCandles(signalClose, decisionClose, e.Policy.Timeframes.Trade)
+	window := e.evaluateStructureEntryWindow(ctx, *signal, data)
+	e.applyEntryWindowMetadata(signal, window)
+	if signal.Diagnostics.Metrics == nil {
+		signal.Diagnostics.Metrics = map[string]any{}
+	}
+	signal.Diagnostics.Metrics["source_layer"] = "structure"
+	signal.Diagnostics.Metrics["entry_age_candles"] = ageCandles
+	signal.Diagnostics.Metrics["entry_direct_open"] = e.Policy.EntryTiming.DirectStructureOpen
+	signal.Diagnostics.Metrics["entry_require_fresh_trigger"] = e.Policy.EntryTiming.RequireFreshTrigger
+	signal.Diagnostics.Metrics["latest_trade_close_time"] = decisionClose
+	if !window.Valid {
+		signal.Status = "invalidated"
+		signal.EntryInvalidated = true
+		if signal.EntryInvalidReason == "" {
+			signal.EntryInvalidReason = window.ReasonCode
+		}
+		e.storeStructureMarker(ctx, *signal, "invalidated", window.Reason)
+		e.storeStructureSuppression(ctx, *signal, action, window.ReasonCode, now, window, signalClose, decisionClose)
+		return false, []string{fmt.Sprintf("%s %s 结构信号不进入开仓: %s", signal.Symbol, signal.SignalType, window.Reason)}
+	}
+	maxAge := e.Policy.EntryTiming.DirectOpenMaxAgeCandles
+	freshEnough := ageCandles <= maxAge
+	directAllowed := e.Policy.EntryTiming.DirectStructureOpen && freshEnough
+	if e.Policy.EntryTiming.RequireFreshTrigger && !freshEnough {
+		directAllowed = false
+	}
+	if !directAllowed {
+		if triggered, triggerDiagnostics := e.tryPullbackRetestEntryTrigger(ctx, signal, data, window); triggered {
+			return true, triggerDiagnostics
+		}
+		reasonCode := "waiting_for_fresh_entry_trigger"
+		reason := fmt.Sprintf("%s %s 作为结构背景保留，等待%s fresh entry trigger，结构年龄%d根%s", signal.Symbol, signal.SignalType, e.Policy.EntryTiming.TriggerTimeframe, ageCandles, e.Policy.Timeframes.Trade)
+		if !e.Policy.EntryTiming.DirectStructureOpen {
+			reasonCode = "structure_background_only"
+			reason = fmt.Sprintf("%s %s 作为结构背景保留，direct_structure_open关闭，等待%s fresh entry trigger", signal.Symbol, signal.SignalType, e.Policy.EntryTiming.TriggerTimeframe)
+		}
+		signal.Status = "background"
+		signal.EntryWindowState = reasonCode
+		e.storeStructureMarker(ctx, *signal, "background", reason)
+		e.storeStructureSuppression(ctx, *signal, action, reasonCode, now, window, signalClose, decisionClose)
+		return false, []string{reason}
+	}
+	triggerClose := signalClose
+	if triggerClose == 0 {
+		triggerClose = decisionClose
+	}
+	parentID := signal.SignalID
+	triggerID := StableEntryTriggerID(ctx.TraderID, signal.Symbol, parentID, "new_structure_segment", e.Policy.Timeframes.Trade, triggerClose, e.Policy.ConfigHash)
+	signal.ParentSignalID = parentID
+	signal.EntryTriggerID = triggerID
+	signal.EntryTriggerType = "new_structure_segment"
+	signal.EntryTriggerTF = e.Policy.Timeframes.Trade
+	signal.EntryTriggerClose = triggerClose
+	signal.EntryReference = window.CurrentPrice
+	signal.TriggerConfidence = signal.Confidence
+	signal.SourceLayer = "entry_trigger"
+	signal.Status = "ready"
+	signal.EntryWindowState = "entry_trigger_ready"
+	if signal.Diagnostics.Metrics == nil {
+		signal.Diagnostics.Metrics = map[string]any{}
+	}
+	signal.Diagnostics.Metrics["parent_signal_id"] = parentID
+	signal.Diagnostics.Metrics["entry_trigger_id"] = triggerID
+	signal.Diagnostics.Metrics["entry_trigger_type"] = signal.EntryTriggerType
+	signal.Diagnostics.Metrics["entry_trigger_close_time"] = triggerClose
+	e.storeEntryTriggerMarker(ctx, *signal, fmt.Sprintf("%s %s new_structure_segment ready", signal.Symbol, signal.SignalType))
+	return true, []string{fmt.Sprintf("%s %s fresh entry trigger ready: %s", signal.Symbol, signal.SignalType, triggerID)}
+}
+
+func (e *Engine) tryPullbackRetestEntryTrigger(ctx *decision.Context, signal *ChanlunSignal, data *market.Data, window entryWindowEvaluation) (bool, []string) {
+	if ctx == nil || signal == nil || data == nil || !window.Valid {
+		return false, nil
+	}
+	if !entryTriggerTypeAllowed(e.Policy.EntryTiming, "pullback_retest_resume") {
+		return false, nil
+	}
+	if minConfidence := e.Policy.EntryTiming.MinTriggerConfidence; minConfidence > 0 && signal.Confidence < minConfidence {
+		return false, []string{fmt.Sprintf("%s %s pullback_retest_resume等待: 置信度%d低于%d", signal.Symbol, signal.SignalType, signal.Confidence, minConfidence)}
+	}
+	tradeTF := firstNonEmptyString(e.Policy.Timeframes.Trade, "1h")
+	triggerTF := firstNonEmptyString(e.Policy.EntryTiming.TriggerTimeframe, e.Policy.Timeframes.Sub, ComponentTimeframe(tradeTF))
+	components, phase, componentCount, componentDiagnostics := previewClosedComponents(data, tradeTF, triggerTF, 2)
+	if len(components) == 0 {
+		return false, componentDiagnostics
+	}
+	pattern, ok := detectPullbackRetestResume(*signal, components, e.Policy.EntryTiming.EntryZone.MaxChaseRatio)
+	if !ok {
+		return false, []string{fmt.Sprintf("%s %s 等待%s pullback_retest_resume，当前%s闭合组件%d根", signal.Symbol, signal.SignalType, triggerTF, triggerTF, componentCount)}
+	}
+	triggerClose := components[len(components)-1].CloseTime
+	if triggerClose <= 0 {
+		return false, nil
+	}
+	parentID := signal.SignalID
+	triggerID := StableEntryTriggerID(ctx.TraderID, signal.Symbol, parentID, "pullback_retest_resume", triggerTF, triggerClose, e.Policy.ConfigHash)
+	signal.ParentSignalID = parentID
+	signal.EntryTriggerID = triggerID
+	signal.EntryTriggerType = "pullback_retest_resume"
+	signal.EntryTriggerTF = triggerTF
+	signal.EntryTriggerClose = triggerClose
+	signal.EntryReference = window.CurrentPrice
+	signal.TriggerCloseTime = triggerClose
+	signal.DecisionCloseTime = triggerClose
+	signal.TriggerConfidence = signal.Confidence
+	signal.SourceLayer = "entry_trigger"
+	signal.Status = "ready"
+	signal.EntryWindowState = "entry_trigger_ready"
+	signal.RemainingNetRR = window.RemainingNetRR
+	if signal.Diagnostics.Metrics == nil {
+		signal.Diagnostics.Metrics = map[string]any{}
+	}
+	signal.Diagnostics.Metrics["parent_signal_id"] = parentID
+	signal.Diagnostics.Metrics["entry_trigger_id"] = triggerID
+	signal.Diagnostics.Metrics["entry_trigger_type"] = signal.EntryTriggerType
+	signal.Diagnostics.Metrics["entry_trigger_timeframe"] = triggerTF
+	signal.Diagnostics.Metrics["entry_trigger_close_time"] = triggerClose
+	signal.Diagnostics.Metrics["entry_trigger_phase"] = phase
+	signal.Diagnostics.Metrics["entry_trigger_components"] = componentCount
+	for key, value := range pattern {
+		signal.Diagnostics.Metrics[key] = value
+	}
+	e.storeEntryTriggerMarker(ctx, *signal, fmt.Sprintf("%s %s pullback_retest_resume ready", signal.Symbol, signal.SignalType))
+	return true, []string{fmt.Sprintf("%s %s pullback_retest_resume fresh entry trigger ready: %s", signal.Symbol, signal.SignalType, triggerID)}
+}
+
+func entryTriggerTypeAllowed(policy decision.ProgrammaticEntryTimingPolicy, triggerType string) bool {
+	if triggerType == "" {
+		return false
+	}
+	if len(policy.AllowedTriggerTypes) == 0 {
+		return triggerType == "pullback_retest_resume"
+	}
+	for _, allowed := range policy.AllowedTriggerTypes {
+		if strings.EqualFold(strings.TrimSpace(allowed), triggerType) {
+			return true
+		}
+	}
+	return false
+}
+
+func detectPullbackRetestResume(signal ChanlunSignal, components []market.Kline, maxChaseRatio float64) (map[string]any, bool) {
+	if len(components) < 2 {
+		return nil, false
+	}
+	if maxChaseRatio <= 0 {
+		maxChaseRatio = 0.35
+	}
+	prev := components[len(components)-2]
+	last := components[len(components)-1]
+	width := signal.TakeProfit - signal.StopLoss
+	if width < 0 {
+		width = -width
+	}
+	if width <= 0 || signal.Price <= 0 {
+		return nil, false
+	}
+	switch signal.Direction {
+	case SideLong:
+		zoneUpper := signal.Price + width*maxChaseRatio
+		retested := prev.Low <= zoneUpper && prev.Close <= prev.Open
+		resumed := last.Close > last.Open && last.Close > prev.Close
+		if !retested || !resumed {
+			return nil, false
+		}
+		return map[string]any{
+			"pullback_retest_level": prev.Low,
+			"pullback_resume_close": last.Close,
+			"entry_zone_upper":      zoneUpper,
+		}, true
+	case SideShort:
+		zoneLower := signal.Price - width*maxChaseRatio
+		retested := prev.High >= zoneLower && prev.Close >= prev.Open
+		resumed := last.Close < last.Open && last.Close < prev.Close
+		if !retested || !resumed {
+			return nil, false
+		}
+		return map[string]any{
+			"pullback_retest_level": prev.High,
+			"pullback_resume_close": last.Close,
+			"entry_zone_lower":      zoneLower,
+		}, true
+	default:
+		return nil, false
+	}
+}
+
+func (e *Engine) candidateActionForSignal(ctx *decision.Context, signal ChanlunSignal) string {
+	if ctx == nil {
+		return ""
+	}
+	positionSide := positionSideForSymbol(ctx.Positions, signal.Symbol)
+	switch {
+	case positionSide == "" && signal.Direction == SideLong && e.Policy.AllowLong:
+		return "open_long"
+	case positionSide == "" && signal.Direction == SideShort && e.Policy.AllowShort:
+		return "open_short"
+	case positionSide == SideLong && signal.Direction == SideLong:
+		return "add_long"
+	case positionSide == SideShort && signal.Direction == SideShort:
+		return "add_short"
+	default:
+		return ""
+	}
+}
+
+func (e *Engine) evaluateStructureEntryWindow(ctx *decision.Context, signal ChanlunSignal, data *market.Data) entryWindowEvaluation {
+	currentPrice := currentPriceForGuard(data, e.Policy.Timeframes.Trade)
+	result := entryWindowEvaluation{
+		State:        "entry_window_valid",
+		ReasonCode:   "entry_trigger_ready",
+		CurrentPrice: currentPrice,
+		Valid:        true,
+	}
+	if currentPrice <= 0 {
+		result.State = "entry_window_unknown"
+		result.ReasonCode = "entry_window_unknown"
+		result.Reason = "缺少当前价，无法验证入场窗口"
+		result.Valid = false
+		return result
+	}
+	switch signal.Direction {
+	case SideLong:
+		if signal.TakeProfit > 0 && currentPrice >= signal.TakeProfit {
+			result.State = "target_already_crossed"
+			result.ReasonCode = "target_already_crossed"
+			result.Reason = fmt.Sprintf("做多结构已越过止盈目标，当前价%.6f >= 止盈%.6f", currentPrice, signal.TakeProfit)
+			result.Valid = false
+			result.Invalidated = true
+			return result
+		}
+	case SideShort:
+		if signal.TakeProfit > 0 && currentPrice <= signal.TakeProfit {
+			result.State = "target_already_crossed"
+			result.ReasonCode = "target_already_crossed"
+			result.Reason = fmt.Sprintf("做空结构已越过止盈目标，当前价%.6f <= 止盈%.6f", currentPrice, signal.TakeProfit)
+			result.Valid = false
+			result.Invalidated = true
+			return result
+		}
+	default:
+		result.State = "entry_window_invalid"
+		result.ReasonCode = "invalid_direction"
+		result.Reason = "缺少有效方向"
+		result.Valid = false
+		return result
+	}
+	if invalidProgrammaticOpenStructure(signal.Direction, currentPrice, signal.StopLoss, signal.TakeProfit) {
+		relation := "止损 < 当前价 < 止盈"
+		if signal.Direction == SideShort {
+			relation = "止损 > 当前价 > 止盈"
+		}
+		result.State = "entry_window_invalid"
+		result.ReasonCode = "invalid_stop_take_profit_structure"
+		result.Reason = fmt.Sprintf("%s止损/止盈结构不合法，要求%s，当前价%.6f 止损%.6f 止盈%.6f", chineseSide(signal.Direction), relation, currentPrice, signal.StopLoss, signal.TakeProfit)
+		result.Valid = false
+		result.Invalidated = true
+		return result
+	}
+	if chaseRatio, ok := entryChaseRatio(signal.Direction, signal.Price, currentPrice, signal.StopLoss, signal.TakeProfit); ok {
+		if signal.Diagnostics.Metrics == nil {
+			signal.Diagnostics.Metrics = map[string]any{}
+		}
+		maxChase := e.Policy.EntryTiming.EntryZone.MaxChaseRatio
+		if maxChase <= 0 {
+			maxChase = 0.35
+		}
+		if chaseRatio > maxChase {
+			result.State = "entry_window_missed"
+			result.ReasonCode = "entry_chase_ratio_too_high"
+			result.Reason = fmt.Sprintf("入场追价比例%.2f超过阈值%.2f", chaseRatio, maxChase)
+			result.Valid = false
+			return result
+		}
+	}
+	if rr, ok := remainingNetRRForDecision(signal.Direction, currentPrice, signal.StopLoss, signal.TakeProfit, tradingCostPct(ctx)); ok {
+		result.RemainingNetRR = rr
+		minRR := e.Policy.EntryTiming.EntryZone.MinRemainingNetRR
+		if minRR <= 0 {
+			minRR = e.Policy.SignalFreshness.MinRemainingNetRR
+		}
+		if minRR <= 0 {
+			minRR = 2.5
+		}
+		if rr < minRR {
+			result.State = "entry_window_missed"
+			result.ReasonCode = "remaining_net_rr_too_low"
+			result.Reason = fmt.Sprintf("剩余净RR %.2f低于阈值%.2f，当前价%.6f 止损%.6f 止盈%.6f", rr, minRR, currentPrice, signal.StopLoss, signal.TakeProfit)
+			result.Valid = false
+			return result
+		}
+	}
+	return result
+}
+
+func (e *Engine) applyEntryWindowMetadata(signal *ChanlunSignal, window entryWindowEvaluation) {
+	if signal == nil {
+		return
+	}
+	signal.EntryWindowState = window.State
+	signal.EntryReference = window.CurrentPrice
+	signal.EntryInvalidated = !window.Valid && window.Invalidated
+	signal.EntryInvalidReason = window.ReasonCode
+	signal.RemainingNetRR = window.RemainingNetRR
+	if signal.Diagnostics.Metrics == nil {
+		signal.Diagnostics.Metrics = map[string]any{}
+	}
+	signal.Diagnostics.Metrics["entry_window_state"] = window.State
+	signal.Diagnostics.Metrics["entry_window_reason"] = window.ReasonCode
+	signal.Diagnostics.Metrics["current_price"] = window.CurrentPrice
+	if window.RemainingNetRR > 0 {
+		signal.Diagnostics.Metrics["remaining_net_rr"] = window.RemainingNetRR
+	}
+}
+
+func (e *Engine) storeStructureMarker(ctx *decision.Context, signal ChanlunSignal, status, reason string) {
+	if ctx == nil || signal.SignalID == "" || signal.Symbol == "" {
+		return
+	}
+	marker := signalToMarker(signal, "structure", status, "", reason)
+	e.StateStore.StoreSignalMarker(ctx.TraderID, market.Normalize(signal.Symbol), marker)
+}
+
+func (e *Engine) storeEntryTriggerMarker(ctx *decision.Context, signal ChanlunSignal, reason string) {
+	if ctx == nil || signal.EntryTriggerID == "" || signal.Symbol == "" {
+		return
+	}
+	marker := signalToMarker(signal, "entry_trigger", "ready", "", reason)
+	e.StateStore.StoreSignalMarker(ctx.TraderID, market.Normalize(signal.Symbol), marker)
+}
+
+func (e *Engine) storeStructureSuppression(ctx *decision.Context, signal ChanlunSignal, action, reasonCode string, now time.Time, window entryWindowEvaluation, signalClose, decisionClose int64) {
+	if ctx == nil || signal.SignalID == "" || action == "" || reasonCode == "" {
+		return
+	}
+	e.StateStore.StoreSignalSuppression(ctx.TraderID, market.Normalize(signal.Symbol), SignalSuppression{
+		SignalID:          signal.SignalID,
+		Action:            action,
+		ReasonCode:        reasonCode,
+		SuppressedAt:      now,
+		ParentSignalID:    signal.ParentSignalID,
+		EntryTriggerID:    signal.EntryTriggerID,
+		EntryWindowState:  signal.EntryWindowState,
+		SignalCloseTime:   signalClose,
+		DecisionCloseTime: decisionClose,
+		FreshnessState:    "background",
+		CurrentPrice:      window.CurrentPrice,
+		StopLoss:          signal.StopLoss,
+		TakeProfit:        signal.TakeProfit,
+	})
+}
+
+func entryChaseRatio(direction string, signalPrice, currentPrice, stopLoss, takeProfit float64) (float64, bool) {
+	width := takeProfit - stopLoss
+	if width < 0 {
+		width = -width
+	}
+	if width <= 0 || signalPrice <= 0 || currentPrice <= 0 {
+		return 0, false
+	}
+	switch direction {
+	case SideLong:
+		if currentPrice <= signalPrice {
+			return 0, true
+		}
+		return (currentPrice - signalPrice) / width, true
+	case SideShort:
+		if currentPrice >= signalPrice {
+			return 0, true
+		}
+		return (signalPrice - currentPrice) / width, true
+	default:
+		return 0, false
+	}
+}
+
+func firstPositiveInt64(values ...int64) int64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func (e *Engine) suppressedSignalDiagnostic(ctx *decision.Context, d decision.Decision) (string, bool) {
@@ -500,6 +987,13 @@ func previewSignalID(baseID, phase, sourceTF string, decisionClose int64) string
 	return fmt.Sprintf("%s|%s|%s|%d", baseID, phase, sourceTF, decisionClose)
 }
 
+func previewTriggerType(phase, sourceTF string, componentCount int, policy decision.ProgrammaticPreviewSignalsPolicy) string {
+	if componentCount >= policy.PilotAfterClosedComponents {
+		return fmt.Sprintf("preview_%dx%s_pilot", componentCount, sourceTF)
+	}
+	return fmt.Sprintf("%s_watchlist", phase)
+}
+
 func extendFloatSeries(values []float64, target int) []float64 {
 	if target <= 0 {
 		return nil
@@ -607,6 +1101,10 @@ func (e *Engine) applyProgrammaticSignalGuard(ctx *decision.Context, signal Chan
 	if signalClose == 0 {
 		signalClose = signal.SegmentEndTime
 	}
+	freshnessClose := signalClose
+	if signal.EntryTriggerClose > 0 {
+		freshnessClose = signal.EntryTriggerClose
+	}
 	decisionClose := signal.DecisionCloseTime
 	if decisionClose == 0 {
 		decisionClose, _ = metadataInt64(d.StrategyMetadata, "decision_close_time")
@@ -617,7 +1115,10 @@ func (e *Engine) applyProgrammaticSignalGuard(ctx *decision.Context, signal Chan
 	if decisionClose > 0 && signalClose > 0 && decisionClose < signalClose {
 		decisionClose = signalClose
 	}
-	ageCandles := signalAgeCandles(signalClose, decisionClose, e.Policy.Timeframes.Trade)
+	if decisionClose > 0 && freshnessClose > 0 && decisionClose < freshnessClose {
+		decisionClose = freshnessClose
+	}
+	ageCandles := signalAgeCandles(freshnessClose, decisionClose, e.Policy.Timeframes.Trade)
 	softAge, maxLifetime := e.signalFreshnessLimits(signal.SignalType)
 	freshnessState := "fresh"
 	if ageCandles > maxLifetime {
@@ -632,6 +1133,10 @@ func (e *Engine) applyProgrammaticSignalGuard(ctx *decision.Context, signal Chan
 	d.StrategyMetadata["max_lifetime_candles"] = maxLifetime
 	d.StrategyMetadata["current_price"] = currentPrice
 	d.StrategyMetadata["signal_close_time"] = signalClose
+	d.StrategyMetadata["trigger_close_time"] = freshnessClose
+	if signal.EntryTriggerClose > 0 {
+		d.StrategyMetadata["entry_trigger_close_time"] = signal.EntryTriggerClose
+	}
 	d.StrategyMetadata["decision_close_time"] = decisionClose
 	d.StrategyMetadata["min_remaining_net_rr"] = e.Policy.SignalFreshness.MinRemainingNetRR
 	guardDirection := signal.Direction
@@ -721,6 +1226,10 @@ func (e *Engine) rejectProgrammaticSignal(ctx *decision.Context, d decision.Deci
 		"stop_loss":           d.StopLoss,
 		"take_profit":         d.TakeProfit,
 		"signal_close_time":   d.StrategyMetadata["signal_close_time"],
+		"trigger_close_time":  d.StrategyMetadata["trigger_close_time"],
+		"entry_trigger_id":    d.StrategyMetadata["entry_trigger_id"],
+		"parent_signal_id":    d.StrategyMetadata["parent_signal_id"],
+		"entry_window_state":  d.StrategyMetadata["entry_window_state"],
 		"decision_close_time": d.StrategyMetadata["decision_close_time"],
 	}
 	for key, value := range extra {
@@ -745,6 +1254,9 @@ func (e *Engine) rejectProgrammaticSignal(ctx *decision.Context, d decision.Deci
 		Action:            d.Action,
 		ReasonCode:        reasonCode,
 		SuppressedAt:      now,
+		ParentSignalID:    metadataString(d.StrategyMetadata, "parent_signal_id"),
+		EntryTriggerID:    metadataString(d.StrategyMetadata, "entry_trigger_id"),
+		EntryWindowState:  metadataString(d.StrategyMetadata, "entry_window_state"),
 		SignalCloseTime:   metadataInt64Value(d.StrategyMetadata, "signal_close_time"),
 		DecisionCloseTime: metadataInt64Value(d.StrategyMetadata, "decision_close_time"),
 		FreshnessState:    metadataString(d.StrategyMetadata, "freshness_state"),
@@ -968,6 +1480,7 @@ func (e *Engine) applyDecisionMetadata(fullDecision *decision.FullDecision, diag
 		"take_profit":         e.Policy.TakeProfit,
 		"signal_freshness":    e.Policy.SignalFreshness,
 		"preview_signals":     e.Policy.PreviewSignals,
+		"entry_timing":        e.Policy.EntryTiming,
 	}
 	if len(diagnostics) > 0 {
 		mainMessages, positionMessages := splitLayerDiagnostics(diagnostics)
@@ -1275,9 +1788,13 @@ func (e *Engine) signalToMainDecision(ctx *decision.Context, signal ChanlunSigna
 	if signalClose == 0 {
 		signalClose = signal.SegmentEndTime
 	}
+	triggerClose := firstPositiveInt64(signal.EntryTriggerClose, signal.TriggerCloseTime, signalClose)
 	decisionClose := signal.DecisionCloseTime
 	if decisionClose > 0 && signalClose > 0 && decisionClose < signalClose {
 		decisionClose = signalClose
+	}
+	if decisionClose > 0 && triggerClose > 0 && decisionClose < triggerClose {
+		decisionClose = triggerClose
 	}
 	layer := signal.SourceLayer
 	if layer == "" {
@@ -1286,6 +1803,12 @@ func (e *Engine) signalToMainDecision(ctx *decision.Context, signal ChanlunSigna
 	reasonPrefix := "程序化缠论"
 	if layer == "preview_signal" {
 		reasonPrefix = "程序化缠论预览"
+	} else if layer == "entry_trigger" {
+		reasonPrefix = "程序化缠论入场触发"
+	}
+	decisionSignalID := signal.SignalID
+	if signal.EntryTriggerID != "" && decision.IsOpenLikeAction(action) {
+		decisionSignalID = signal.EntryTriggerID
 	}
 	d := decision.Decision{
 		Symbol:          signal.Symbol,
@@ -1300,27 +1823,39 @@ func (e *Engine) signalToMainDecision(ctx *decision.Context, signal ChanlunSigna
 		StrategyName:    e.Policy.StrategyName,
 		StrategyVersion: e.Policy.StrategyVersion,
 		ConfigHash:      e.Policy.ConfigHash,
-		SignalID:        signal.SignalID,
+		SignalID:        decisionSignalID,
 		SignalType:      signal.SignalType,
 		SignalTimeframe: signal.AnalysisTF,
 		StructureTarget: signal.StructureTarget,
 		StrategyMetadata: map[string]any{
-			"layer":               layer,
-			"rule":                signal.SignalType,
-			"signal_type":         signal.SignalType,
-			"center_id":           signal.CenterID,
-			"trigger_timeframe":   signal.TriggerTF,
-			"level":               signal.Level,
-			"signal_close_time":   signalClose,
-			"decision_close_time": decisionClose,
-			"trigger_close_time":  signalClose,
-			"segment_start_time":  signal.SegmentStartTime,
-			"segment_end_time":    signal.SegmentEndTime,
-			"trade_intent":        action,
-			"preview_phase":       signal.PreviewPhase,
-			"preview_source_tf":   signal.PreviewSourceTF,
-			"preview_components":  signal.PreviewComponents,
-			"preview_confirmed":   signal.PreviewConfirmed,
+			"layer":                     layer,
+			"rule":                      signal.SignalType,
+			"signal_type":               signal.SignalType,
+			"center_id":                 signal.CenterID,
+			"trigger_timeframe":         signal.TriggerTF,
+			"level":                     signal.Level,
+			"signal_close_time":         signalClose,
+			"decision_close_time":       decisionClose,
+			"trigger_close_time":        triggerClose,
+			"segment_start_time":        signal.SegmentStartTime,
+			"segment_end_time":          signal.SegmentEndTime,
+			"trade_intent":              action,
+			"source_signal_id":          signal.SignalID,
+			"parent_signal_id":          signal.ParentSignalID,
+			"entry_trigger_id":          signal.EntryTriggerID,
+			"entry_trigger_type":        signal.EntryTriggerType,
+			"entry_trigger_timeframe":   signal.EntryTriggerTF,
+			"entry_trigger_close_time":  signal.EntryTriggerClose,
+			"entry_window_state":        signal.EntryWindowState,
+			"entry_reference_price":     signal.EntryReference,
+			"entry_invalidated":         signal.EntryInvalidated,
+			"entry_invalidation_reason": signal.EntryInvalidReason,
+			"remaining_net_rr":          signal.RemainingNetRR,
+			"trigger_confidence":        signal.TriggerConfidence,
+			"preview_phase":             signal.PreviewPhase,
+			"preview_source_tf":         signal.PreviewSourceTF,
+			"preview_components":        signal.PreviewComponents,
+			"preview_confirmed":         signal.PreviewConfirmed,
 		},
 		StrategyDiagnosis: map[string]any{
 			"diagnostics": signal.Diagnostics,
@@ -1333,23 +1868,35 @@ func (e *Engine) signalToMainDecision(ctx *decision.Context, signal ChanlunSigna
 		ReasonCode:     "chanlun_signal_detected",
 		Timeframe:      signal.AnalysisTF,
 		SignalType:     signal.SignalType,
-		SignalID:       signal.SignalID,
+		SignalID:       decisionSignalID,
 		TriggerPrice:   signal.Price,
 		ReferencePrice: signal.StructureTarget,
 		Details: map[string]any{
-			"center_id":           signal.CenterID,
-			"trigger_timeframe":   signal.TriggerTF,
-			"signal_close_time":   signalClose,
-			"decision_close_time": decisionClose,
-			"trigger_close_time":  signalClose,
-			"segment_start_time":  signal.SegmentStartTime,
-			"segment_end_time":    signal.SegmentEndTime,
-			"trade_intent":        action,
-			"level":               signal.Level,
-			"preview_phase":       signal.PreviewPhase,
-			"preview_source_tf":   signal.PreviewSourceTF,
-			"preview_components":  signal.PreviewComponents,
-			"preview_confirmed":   signal.PreviewConfirmed,
+			"center_id":                 signal.CenterID,
+			"trigger_timeframe":         signal.TriggerTF,
+			"signal_close_time":         signalClose,
+			"decision_close_time":       decisionClose,
+			"trigger_close_time":        triggerClose,
+			"segment_start_time":        signal.SegmentStartTime,
+			"segment_end_time":          signal.SegmentEndTime,
+			"trade_intent":              action,
+			"level":                     signal.Level,
+			"source_signal_id":          signal.SignalID,
+			"parent_signal_id":          signal.ParentSignalID,
+			"entry_trigger_id":          signal.EntryTriggerID,
+			"entry_trigger_type":        signal.EntryTriggerType,
+			"entry_trigger_timeframe":   signal.EntryTriggerTF,
+			"entry_trigger_close_time":  signal.EntryTriggerClose,
+			"entry_window_state":        signal.EntryWindowState,
+			"entry_reference_price":     signal.EntryReference,
+			"entry_invalidated":         signal.EntryInvalidated,
+			"entry_invalidation_reason": signal.EntryInvalidReason,
+			"remaining_net_rr":          signal.RemainingNetRR,
+			"trigger_confidence":        signal.TriggerConfidence,
+			"preview_phase":             signal.PreviewPhase,
+			"preview_source_tf":         signal.PreviewSourceTF,
+			"preview_components":        signal.PreviewComponents,
+			"preview_confirmed":         signal.PreviewConfirmed,
 		},
 	}
 	if action == "partial_close" {
@@ -1488,39 +2035,60 @@ func signalToMarker(signal ChanlunSignal, sourceLayer, status, action, reason st
 	if sourceLayer == "position_management" && signal.TriggerTF != "" {
 		timeframe = signal.TriggerTF
 	}
-	closeTime := signal.SignalCloseTime
-	if closeTime == 0 {
-		closeTime = signal.TriggerCloseTime
+	if sourceLayer == "entry_trigger" && signal.EntryTriggerTF != "" {
+		timeframe = signal.EntryTriggerTF
 	}
-	if closeTime == 0 {
-		closeTime = signal.SegmentEndTime
+	structureClose := signal.SignalCloseTime
+	if structureClose == 0 {
+		structureClose = signal.TriggerCloseTime
+	}
+	if structureClose == 0 {
+		structureClose = signal.SegmentEndTime
+	}
+	closeTime := structureClose
+	if sourceLayer == "entry_trigger" && signal.EntryTriggerClose > 0 {
+		closeTime = signal.EntryTriggerClose
 	}
 	decisionClose := signal.DecisionCloseTime
 	displayClose := closeTime
-	if sourceLayer == "preview_signal" && decisionClose > 0 {
+	if (sourceLayer == "preview_signal" || sourceLayer == "entry_trigger") && decisionClose > 0 {
 		displayClose = decisionClose
 	}
+	signalID := signal.SignalID
+	if sourceLayer == "entry_trigger" && signal.EntryTriggerID != "" {
+		signalID = signal.EntryTriggerID
+	}
 	return SignalMarker{
-		Symbol:            signal.Symbol,
-		Timeframe:         timeframe,
-		CloseTime:         closeTime,
-		SignalCloseTime:   closeTime,
-		DecisionCloseTime: decisionClose,
-		DisplayCloseTime:  displayClose,
-		SignalType:        signal.SignalType,
-		Direction:         signal.Direction,
-		Level:             signal.Level,
-		SourceLayer:       sourceLayer,
-		Status:            status,
-		SignalID:          signal.SignalID,
-		Action:            action,
-		TradeIntent:       deriveTradeIntent(action, "", "", signal.Direction),
-		Price:             signal.Price,
-		Reason:            reason,
-		PreviewPhase:      signal.PreviewPhase,
-		PreviewSourceTF:   signal.PreviewSourceTF,
-		PreviewComponents: signal.PreviewComponents,
-		PreviewConfirmed:  signal.PreviewConfirmed,
+		Symbol:             signal.Symbol,
+		Timeframe:          timeframe,
+		CloseTime:          closeTime,
+		SignalCloseTime:    structureClose,
+		DecisionCloseTime:  decisionClose,
+		DisplayCloseTime:   displayClose,
+		SignalType:         signal.SignalType,
+		Direction:          signal.Direction,
+		Level:              signal.Level,
+		SourceLayer:        sourceLayer,
+		Status:             status,
+		SignalID:           signalID,
+		Action:             action,
+		TradeIntent:        deriveTradeIntent(action, "", "", signal.Direction),
+		Price:              signal.Price,
+		Reason:             reason,
+		ParentSignalID:     signal.ParentSignalID,
+		EntryTriggerID:     signal.EntryTriggerID,
+		EntryTriggerType:   signal.EntryTriggerType,
+		EntryTriggerTF:     signal.EntryTriggerTF,
+		EntryTriggerClose:  signal.EntryTriggerClose,
+		EntryWindowState:   signal.EntryWindowState,
+		EntryReference:     signal.EntryReference,
+		EntryInvalidated:   signal.EntryInvalidated,
+		EntryInvalidReason: signal.EntryInvalidReason,
+		RemainingNetRR:     signal.RemainingNetRR,
+		PreviewPhase:       signal.PreviewPhase,
+		PreviewSourceTF:    signal.PreviewSourceTF,
+		PreviewComponents:  signal.PreviewComponents,
+		PreviewConfirmed:   signal.PreviewConfirmed,
 	}
 }
 
@@ -1559,6 +2127,16 @@ func (e *Engine) decisionToMarker(d decision.Decision, status string) (SignalMar
 	previewSourceTF := firstNonEmptyString(metadataString(d.StrategyMetadata, "preview_source_tf"), metadataString(d.StrategyMetadata, "preview_source_timeframe"))
 	previewComponents := metadataInt(d.StrategyMetadata, "preview_components")
 	previewConfirmed := metadataBool(d.StrategyMetadata, "preview_confirmed")
+	parentSignalID := metadataString(d.StrategyMetadata, "parent_signal_id")
+	entryTriggerID := metadataString(d.StrategyMetadata, "entry_trigger_id")
+	entryTriggerType := metadataString(d.StrategyMetadata, "entry_trigger_type")
+	entryTriggerTF := metadataString(d.StrategyMetadata, "entry_trigger_timeframe")
+	entryTriggerClose, _ := metadataInt64(d.StrategyMetadata, "entry_trigger_close_time")
+	entryWindowState := metadataString(d.StrategyMetadata, "entry_window_state")
+	entryReference := metadataFloat64(d.StrategyMetadata, "entry_reference_price")
+	entryInvalidated := metadataBool(d.StrategyMetadata, "entry_invalidated")
+	entryInvalidReason := metadataString(d.StrategyMetadata, "entry_invalidation_reason")
+	remainingNetRR := metadataFloat64(d.StrategyMetadata, "remaining_net_rr")
 	closeTime := signalClose
 	displayClose := signalClose
 	if metadataDisplayClose > 0 {
@@ -1583,29 +2161,39 @@ func (e *Engine) decisionToMarker(d decision.Decision, status string) (SignalMar
 		price = d.NewStopLoss
 	}
 	return SignalMarker{
-		Symbol:            market.Normalize(d.Symbol),
-		Timeframe:         timeframe,
-		CloseTime:         closeTime,
-		SignalCloseTime:   signalClose,
-		DecisionCloseTime: decisionClose,
-		DisplayCloseTime:  displayClose,
-		SignalType:        signalType,
-		Direction:         direction,
-		Level:             timeframe,
-		SourceLayer:       layer,
-		Status:            status,
-		SignalID:          d.SignalID,
-		Action:            d.Action,
-		TradeIntent:       tradeIntent,
-		PositionSide:      positionSide,
-		Price:             price,
-		Reason:            d.Reasoning,
-		FreshnessState:    freshnessState,
-		AgeCandles:        ageCandles,
-		PreviewPhase:      previewPhase,
-		PreviewSourceTF:   previewSourceTF,
-		PreviewComponents: previewComponents,
-		PreviewConfirmed:  previewConfirmed,
+		Symbol:             market.Normalize(d.Symbol),
+		Timeframe:          timeframe,
+		CloseTime:          closeTime,
+		SignalCloseTime:    signalClose,
+		DecisionCloseTime:  decisionClose,
+		DisplayCloseTime:   displayClose,
+		SignalType:         signalType,
+		Direction:          direction,
+		Level:              timeframe,
+		SourceLayer:        layer,
+		Status:             status,
+		SignalID:           d.SignalID,
+		Action:             d.Action,
+		TradeIntent:        tradeIntent,
+		PositionSide:       positionSide,
+		Price:              price,
+		Reason:             d.Reasoning,
+		ParentSignalID:     parentSignalID,
+		EntryTriggerID:     entryTriggerID,
+		EntryTriggerType:   entryTriggerType,
+		EntryTriggerTF:     entryTriggerTF,
+		EntryTriggerClose:  entryTriggerClose,
+		EntryWindowState:   entryWindowState,
+		EntryReference:     entryReference,
+		EntryInvalidated:   entryInvalidated,
+		EntryInvalidReason: entryInvalidReason,
+		RemainingNetRR:     remainingNetRR,
+		FreshnessState:     freshnessState,
+		AgeCandles:         ageCandles,
+		PreviewPhase:       previewPhase,
+		PreviewSourceTF:    previewSourceTF,
+		PreviewComponents:  previewComponents,
+		PreviewConfirmed:   previewConfirmed,
 	}, true
 }
 

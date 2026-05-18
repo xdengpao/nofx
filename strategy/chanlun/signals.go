@@ -122,6 +122,13 @@ func StableSignalID(traderID, symbol, direction, signalType, analysisTF, trigger
 	return hex.EncodeToString(sum[:])
 }
 
+func StableEntryTriggerID(traderID, symbol, parentSignalID, triggerType, triggerTF string, triggerCloseTime int64, configHash string) string {
+	value := fmt.Sprintf("%s|%s|%s|%s|%s|%d|%s",
+		traderID, symbol, parentSignalID, triggerType, triggerTF, triggerCloseTime, configHash)
+	sum := sha1.Sum([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
 func buildSignal(input SignalInput, signalType, direction string, segment Segment, centerID string, div DivergenceResult) ChanlunSignal {
 	price := segment.End
 	stop := segment.Low
@@ -166,7 +173,7 @@ func buildSignal(input SignalInput, signalType, direction string, segment Segmen
 		SegmentStartTime: segment.StartTime,
 		SegmentEndTime:   segment.EndTime,
 		Status:           "detected",
-		SourceLayer:      "main_signal",
+		SourceLayer:      "structure",
 	}
 	return signal
 }

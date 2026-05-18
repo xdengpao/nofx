@@ -90,6 +90,9 @@ type SignalSuppression struct {
 	Action            string    `json:"action"`
 	ReasonCode        string    `json:"reason_code"`
 	SuppressedAt      time.Time `json:"suppressed_at"`
+	ParentSignalID    string    `json:"parent_signal_id,omitempty"`
+	EntryTriggerID    string    `json:"entry_trigger_id,omitempty"`
+	EntryWindowState  string    `json:"entry_window_state,omitempty"`
 	SignalCloseTime   int64     `json:"signal_close_time,omitempty"`
 	DecisionCloseTime int64     `json:"decision_close_time,omitempty"`
 	FreshnessState    string    `json:"freshness_state,omitempty"`

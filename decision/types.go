@@ -440,6 +440,7 @@ type ProgrammaticStrategyPolicy struct {
 	TakeProfit         ProgrammaticTPPolicy
 	SignalFreshness    ProgrammaticSignalFreshnessPolicy
 	PreviewSignals     ProgrammaticPreviewSignalsPolicy
+	EntryTiming        ProgrammaticEntryTimingPolicy
 	State              ProgrammaticStatePolicy
 }
 
@@ -576,6 +577,32 @@ type ProgrammaticPreviewSignalsPolicy struct {
 	PilotRiskFraction          float64
 	PilotMinConfidence         int
 	RequireConfirmedUpgrade    bool
+}
+
+type ProgrammaticEntryTimingPolicy struct {
+	Enabled                        bool
+	DirectStructureOpen            bool
+	DirectOpenMaxAgeCandles        int
+	RequireFreshTrigger            bool
+	TriggerTimeframe               string
+	AllowedTriggerTypes            []string
+	EntryZone                      ProgrammaticEntryZonePolicy
+	MaxTriggerAgeCandles           int
+	MinTriggerConfidence           int
+	Pilot                          ProgrammaticEntryPilotPolicy
+	ContinuationAfterTargetCrossed string
+}
+
+type ProgrammaticEntryZonePolicy struct {
+	Mode              string
+	MaxChaseRatio     float64
+	MinRemainingNetRR float64
+}
+
+type ProgrammaticEntryPilotPolicy struct {
+	Enabled       bool
+	RiskFraction  float64
+	MinConfidence int
 }
 
 type ProgrammaticStatePolicy struct {
