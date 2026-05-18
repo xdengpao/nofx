@@ -213,6 +213,9 @@ type CyclePreparationOptions struct {
 	ClosedKlinesOnly        bool
 	IncludeMicroADX         bool
 	AllowRiskReducingOnHalt bool
+	MarketDataProvider      func(symbol string, opts CyclePreparationOptions) (*market.Data, error)
+	DisableOITopFetch       bool
+	Clock                   func() time.Time
 }
 
 type CyclePreparation struct {
@@ -226,6 +229,7 @@ type CyclePreparation struct {
 
 func PrepareCycleContext(ctx *Context, opts CyclePreparationOptions) (*CyclePreparation, error) {
 	initializeDefaults(ctx)
+	now := cycleNow(opts)
 
 	preparation := &CyclePreparation{}
 	if result := checkCircuitBreakerState(ctx); result != nil {
@@ -253,7 +257,7 @@ func PrepareCycleContext(ctx *Context, opts CyclePreparationOptions) (*CyclePrep
 				Action:    "wait",
 				Reasoning: cb.TriggerReason,
 			}},
-			Timestamp: time.Now(),
+			Timestamp: now,
 		}
 		if !opts.AllowRiskReducingOnHalt {
 			return &CyclePreparation{
@@ -291,7 +295,7 @@ func PrepareCycleContext(ctx *Context, opts CyclePreparationOptions) (*CyclePrep
 		halt := &FullDecision{
 			CoTTrace:  buildFinalCoTTrace(reason, positionDecisions, strategyDecisions, allDecisions),
 			Decisions: allDecisions,
-			Timestamp: time.Now(),
+			Timestamp: now,
 		}
 		if !opts.AllowRiskReducingOnHalt {
 			return &CyclePreparation{
@@ -309,6 +313,13 @@ func PrepareCycleContext(ctx *Context, opts CyclePreparationOptions) (*CyclePrep
 	}
 
 	return preparation, nil
+}
+
+func cycleNow(opts CyclePreparationOptions) time.Time {
+	if opts.Clock != nil {
+		return opts.Clock()
+	}
+	return time.Now()
 }
 
 func waitDecisionPtr(reason string) *Decision {
@@ -2268,16 +2279,18 @@ func fetchMarketDataForContextWithOptions(ctx *Context, opts CyclePreparationOpt
 		ctx.MarketDataMap[symbol] = data
 	}
 
-	oiPositions, err := pool.GetOITopPositions()
-	if err == nil {
-		for _, pos := range oiPositions {
-			ctx.OITopDataMap[pos.Symbol] = &OITopData{
-				Rank:              pos.Rank,
-				OIDeltaPercent:    pos.OIDeltaPercent,
-				OIDeltaValue:      pos.OIDeltaValue,
-				PriceDeltaPercent: pos.PriceDeltaPercent,
-				NetLong:           pos.NetLong,
-				NetShort:          pos.NetShort,
+	if !opts.DisableOITopFetch {
+		oiPositions, err := pool.GetOITopPositions()
+		if err == nil {
+			for _, pos := range oiPositions {
+				ctx.OITopDataMap[pos.Symbol] = &OITopData{
+					Rank:              pos.Rank,
+					OIDeltaPercent:    pos.OIDeltaPercent,
+					OIDeltaValue:      pos.OIDeltaValue,
+					PriceDeltaPercent: pos.PriceDeltaPercent,
+					NetLong:           pos.NetLong,
+					NetShort:          pos.NetShort,
+				}
 			}
 		}
 	}
@@ -2286,6 +2299,9 @@ func fetchMarketDataForContextWithOptions(ctx *Context, opts CyclePreparationOpt
 }
 
 func getMarketDataForPreparation(symbol string, opts CyclePreparationOptions) (*market.Data, error) {
+	if opts.MarketDataProvider != nil {
+		return opts.MarketDataProvider(symbol, opts)
+	}
 	if opts.ClosedKlinesOnly || opts.IncludeMicroADX || len(opts.MarketHistoryDepth) > 0 {
 		return market.GetWithHistory(symbol, market.HistoryOptions{
 			Depth: market.HistoryDepth{

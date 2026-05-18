@@ -928,6 +928,23 @@ func ResetStatistics() {
 	}
 }
 
+// InitializeBacktestRuntime 初始化仅供本地回测使用的隔离运行态。
+func InitializeBacktestRuntime(dataDir string) error {
+	if dataDir == "" {
+		return fmt.Errorf("回测运行态目录不能为空")
+	}
+	if err := InitPlanManager(dataDir); err != nil {
+		return err
+	}
+	ResetStatistics()
+	closedTradesLock.Lock()
+	closedTrades = nil
+	closedTradesLock.Unlock()
+	SetCircuitBreakerState(nil)
+	ResetDrawdownBaseline()
+	return nil
+}
+
 // ============================================================================
 // 平仓回调
 // ============================================================================

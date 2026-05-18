@@ -88,6 +88,9 @@ func (s *Server) setupRoutes() {
 		api.GET("/strategy/symbols", s.handleStrategySymbols)
 		api.GET("/strategy/signals", s.handleStrategySignals)
 		api.GET("/market/klines", s.handleMarketKlines)
+		if backtestAPIEnabled() {
+			s.registerBacktestRoutes(api.Group("/backtest"))
+		}
 	}
 }
 

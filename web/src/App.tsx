@@ -5,7 +5,9 @@ import { EquityChart } from './components/EquityChart';
 import { CompetitionPage } from './components/CompetitionPage';
 import AILearning from './components/AILearning';
 import { StrategyCandlestickChart } from './components/StrategyCandlestickChart';
+import { BacktestPage } from './components/backtest/BacktestPage';
 import { LanguageProvider, useLanguage } from './contexts/LanguageContext';
+import { backtestApi } from './lib/backtestApi';
 import { t, type Language } from './i18n/translations';
 import { markerDisplayLabel, markerStatusLabel, markerTone, normalizeEpochMs, resolveTradeIntent, signalLabel, tradeIntentLabel } from './utils/strategyMarkers';
 import type {
@@ -22,7 +24,7 @@ import type {
   SignalMarker,
 } from './types';
 
-type Page = 'competition' | 'trader';
+type Page = 'competition' | 'trader' | 'backtest';
 
 function App() {
   const { language, setLanguage } = useLanguage();
@@ -30,6 +32,7 @@ function App() {
   // 从URL hash读取初始页面状态（支持刷新保持页面）
   const getInitialPage = (): Page => {
     const hash = window.location.hash.slice(1); // 去掉 #
+    if (hash === 'backtest') return 'backtest';
     return hash === 'trader' || hash === 'details' ? 'trader' : 'competition';
   };
 
@@ -43,6 +46,8 @@ function App() {
       const hash = window.location.hash.slice(1);
       if (hash === 'trader' || hash === 'details') {
         setCurrentPage('trader');
+      } else if (hash === 'backtest') {
+        setCurrentPage('backtest');
       } else if (hash === 'competition' || hash === '') {
         setCurrentPage('competition');
       }
@@ -55,8 +60,20 @@ function App() {
   // 切换页面时更新URL hash
   const navigateToPage = (page: Page) => {
     setCurrentPage(page);
-    window.location.hash = page === 'competition' ? '' : 'trader';
+    window.location.hash = page === 'competition' ? '' : page;
   };
+
+  const { data: backtestHealth } = useSWR('backtest-health', backtestApi.health, {
+    shouldRetryOnError: false,
+    revalidateOnFocus: false,
+  });
+  const backtestEnabled = Boolean(backtestHealth?.enabled && backtestHealth.dry_run && !backtestHealth.live_trading);
+
+  useEffect(() => {
+    if (currentPage === 'backtest' && backtestHealth && !backtestEnabled) {
+      navigateToPage('competition');
+    }
+  }, [currentPage, backtestEnabled, backtestHealth]);
 
   // 获取trader列表
   const { data: traders } = useSWR<TraderInfo[]>('traders', api.getTraders, {
@@ -234,6 +251,18 @@ function App() {
                 >
                   {t('details', language)}
                 </button>
+                {backtestEnabled && (
+                  <button
+                    onClick={() => navigateToPage('backtest')}
+                    className="px-2 sm:px-4 py-1.5 sm:py-2 rounded text-xs sm:text-sm font-semibold transition-all"
+                    style={currentPage === 'backtest'
+                      ? { background: '#F0B90B', color: '#000' }
+                      : { background: 'transparent', color: '#848E9C' }
+                    }
+                  >
+                    Backtest
+                  </button>
+                )}
               </div>
 
               {/* Trader Selector (only show on trader page) */}
@@ -277,8 +306,10 @@ function App() {
 
       {/* Main Content */}
       <main className="max-w-[1920px] mx-auto px-6 py-6">
-        {currentPage === 'competition' ? (
+        {currentPage === 'competition' || (currentPage === 'backtest' && !backtestEnabled) ? (
           <CompetitionPage />
+        ) : currentPage === 'backtest' && backtestEnabled ? (
+          <BacktestPage />
         ) : (
           <TraderDetailsPage
             selectedTrader={selectedTrader}

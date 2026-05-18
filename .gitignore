@@ -39,6 +39,13 @@ data/trade_plans.json
 data/dynamic_candidate_pool.json
 nofx_test
 
+# 本地回测数据与报告
+backtest_data/
+backtest_runs/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
 # Node.js
 web/node_modules/
 node_modules/

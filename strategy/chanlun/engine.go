@@ -12,9 +12,11 @@ import (
 )
 
 type Engine struct {
-	Policy     decision.ProgrammaticStrategyPolicy
-	StateStore *StateStore
-	Clock      func() time.Time
+	Policy             decision.ProgrammaticStrategyPolicy
+	StateStore         *StateStore
+	Clock              func() time.Time
+	MarketDataProvider func(symbol string, opts decision.CyclePreparationOptions) (*market.Data, error)
+	DisableOITopFetch  bool
 
 	mu             sync.RWMutex
 	latestSignals  map[string]*SignalReport
@@ -199,6 +201,9 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		return nil, fmt.Errorf("缺少交易上下文")
 	}
 	now := e.now()
+	if e.StateStore != nil {
+		e.StateStore.Clock = e.now
+	}
 	universe := ResolveProgrammaticSymbols(ctx.CandidateCoins, ctx.Positions, e.Policy)
 	marketSymbols := make([]string, 0, len(universe))
 	for _, item := range universe {
@@ -217,6 +222,9 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		ClosedKlinesOnly:        true,
 		IncludeMicroADX:         e.Policy.ADX.MicroADXFilter,
 		AllowRiskReducingOnHalt: true,
+		MarketDataProvider:      e.MarketDataProvider,
+		DisableOITopFetch:       e.DisableOITopFetch,
+		Clock:                   e.now,
 	})
 	if err != nil {
 		return nil, err

@@ -1,0 +1,151 @@
+package backtest
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"nofx/config"
+	"nofx/decision"
+	"nofx/historydb"
+	"nofx/market"
+)
+
+func TestHistoricalMarketDataProviderFiltersFutureKlines(t *testing.T) {
+	store := openBacktestStore(t)
+	defer store.Close()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	writeAllTimeframes(t, store, "BTCUSDT", start, 90)
+	asOf := start.Add(48 * time.Hour)
+	provider := &HistoricalMarketDataProvider{Store: store, Source: DefaultSource, Clock: func() time.Time { return asOf }}
+	data, err := provider.GetMarketData("BTCUSDT", decision.CyclePreparationOptions{
+		MarketHistoryDepth: map[string]int{"3m": 50, "15m": 30, "1h": 20, "4h": 10},
+	})
+	if err != nil {
+		t.Fatalf("provider构建失败: %v", err)
+	}
+	for tf, klines := range data.Klines {
+		if len(klines) == 0 {
+			t.Fatalf("%s 无K线", tf)
+		}
+		if klines[len(klines)-1].CloseTime > asOf.UnixMilli() {
+			t.Fatalf("%s 返回未来K线", tf)
+		}
+	}
+	if data.OIValueUSD != 0 || data.FundingRate != 0 {
+		t.Fatalf("回测provider不得填充实时OI/funding")
+	}
+}
+
+func TestPaperBrokerOpenPartialCloseAndFullClose(t *testing.T) {
+	broker := NewPaperBroker(1000, CostConfig{TakerFeeBPS: 5, SlippageBPS: 1}, ExecutionConfig{})
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	open := decision.Decision{Symbol: "BTCUSDT", Action: "open_long", Leverage: 5, PositionSizeUSD: 100, StopLoss: 95, TakeProfit: 120, Reasoning: "test open"}
+	broker.SubmitDecision(open, now)
+	broker.ProcessBar("BTCUSDT", market.Kline{Open: 100, High: 101, Low: 99, Close: 100, CloseTime: now.UnixMilli()}, now)
+	if len(broker.Positions) != 1 {
+		t.Fatalf("应开仓")
+	}
+	partial := decision.Decision{Symbol: "BTCUSDT", Action: "partial_close", ClosePercentage: 50, Reasoning: "test partial"}
+	broker.SubmitDecision(partial, now)
+	broker.ProcessBar("BTCUSDT", market.Kline{Open: 110, High: 111, Low: 109, Close: 110, CloseTime: now.Add(3 * time.Minute).UnixMilli()}, now.Add(3*time.Minute))
+	if len(broker.Positions) != 1 || broker.Positions["BTCUSDT"].Quantity <= 0 {
+		t.Fatalf("减仓后应保留剩余持仓")
+	}
+	closeAll := decision.Decision{Symbol: "BTCUSDT", Action: "close_long", Reasoning: "test close"}
+	broker.SubmitDecision(closeAll, now)
+	broker.ProcessBar("BTCUSDT", market.Kline{Open: 112, High: 113, Low: 111, Close: 112, CloseTime: now.Add(6 * time.Minute).UnixMilli()}, now.Add(6*time.Minute))
+	if len(broker.Positions) != 0 {
+		t.Fatalf("应全平")
+	}
+	if broker.Account.RealizedPnL <= 0 {
+		t.Fatalf("应产生正向已实现盈亏")
+	}
+}
+
+func TestRunnerGeneratesReportFiles(t *testing.T) {
+	store := openBacktestStore(t)
+	defer store.Close()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	writeAllTimeframes(t, store, "BTCUSDT", start, 240)
+	cfg := &BacktestConfig{
+		BacktestFrom:  start.Add(8 * time.Hour).Format(time.RFC3339),
+		BacktestTo:    start.Add(10 * time.Hour).Format(time.RFC3339),
+		OutputDir:     filepath.Join(t.TempDir(), "runs"),
+		HistoryDB:     store.Path(),
+		Symbols:       []string{"BTCUSDT"},
+		InitialEquity: 1000,
+		Data:          DataConfig{AllowAutoFetch: true},
+		Strategy:      StrategyConfig{ProgrammaticStrategy: minimalStrategyConfigForBacktest()},
+	}
+	runner, err := NewRunner(cfg, store)
+	if err != nil {
+		t.Fatalf("runner初始化失败: %v", err)
+	}
+	result, err := runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("runner执行失败: %v", err)
+	}
+	for _, file := range []string{"report.json", "trades.csv", "equity.csv", "signals.csv", "rejections.csv"} {
+		if result.OutputDir == "" {
+			t.Fatal("缺少输出目录")
+		}
+		if _, err := os.Stat(filepath.Join(result.OutputDir, file)); err != nil {
+			t.Fatalf("缺少输出文件%s: %v", file, err)
+		}
+	}
+	if result.Report.FundingMode != "disabled" || result.Report.LiquidationMode != "not_modelled" {
+		t.Fatalf("报告应记录v1假设")
+	}
+}
+
+func openBacktestStore(t *testing.T) *historydb.Store {
+	t.Helper()
+	store, err := historydb.Open(filepath.Join(t.TempDir(), "history.sqlite"))
+	if err != nil {
+		t.Fatalf("打开历史库失败: %v", err)
+	}
+	return store
+}
+
+func writeAllTimeframes(t *testing.T, store *historydb.Store, symbol string, start time.Time, count int) {
+	t.Helper()
+	for _, item := range []struct {
+		tf   string
+		step time.Duration
+	}{
+		{"3m", 3 * time.Minute},
+		{"15m", 15 * time.Minute},
+		{"1h", time.Hour},
+		{"4h", 4 * time.Hour},
+	} {
+		if _, _, err := store.UpsertKlines(context.Background(), DefaultSource, symbol, item.tf, backtestKlines(start, count, item.step)); err != nil {
+			t.Fatalf("写入%s失败: %v", item.tf, err)
+		}
+	}
+}
+
+func backtestKlines(start time.Time, n int, step time.Duration) []market.Kline {
+	out := make([]market.Kline, 0, n)
+	price := 100.0
+	for i := 0; i < n; i++ {
+		open := start.Add(time.Duration(i) * step)
+		out = append(out, market.Kline{
+			OpenTime:  open.UnixMilli(),
+			CloseTime: open.Add(step).Add(-time.Millisecond).UnixMilli(),
+			Open:      price,
+			High:      price + 2,
+			Low:       price - 2,
+			Close:     price + 0.5,
+			Volume:    1000,
+		})
+		price += 0.1
+	}
+	return out
+}
+
+func minimalStrategyConfigForBacktest() config.ProgrammaticStrategyConfig {
+	return config.ProgrammaticStrategyConfig{}
+}

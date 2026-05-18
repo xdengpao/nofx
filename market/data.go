@@ -163,6 +163,21 @@ type DirectionalIndicatorSnapshot struct {
 	LegacyDXLike float64
 }
 
+type KlineBundle struct {
+	M3  []Kline
+	M15 []Kline
+	H1  []Kline
+	H4  []Kline
+}
+
+type BuildDataOptions struct {
+	SeriesLimit     int
+	IncludeMicroADX bool
+	EnrichmentMode  string // live, disabled, historical
+	OI              *OIData
+	FundingRate     *float64
+}
+
 // 缓存结构（避免重复请求）
 var (
 	dataCache     = make(map[string]*cacheEntry)
@@ -356,8 +371,28 @@ func isSupportedTimeframe(timeframe string) bool {
 }
 
 func buildDataFromKlines(symbol string, klines3m, klines15m, klines1h, klines4h []Kline, seriesLimit int, includeMicroADX bool) (*Data, error) {
+	return BuildDataFromKlines(symbol, KlineBundle{
+		M3:  klines3m,
+		M15: klines15m,
+		H1:  klines1h,
+		H4:  klines4h,
+	}, BuildDataOptions{
+		SeriesLimit:     seriesLimit,
+		IncludeMicroADX: includeMicroADX,
+		EnrichmentMode:  "live",
+	})
+}
+
+func BuildDataFromKlines(symbol string, bundle KlineBundle, opts BuildDataOptions) (*Data, error) {
+	klines3m := bundle.M3
+	klines15m := bundle.M15
+	klines1h := bundle.H1
+	klines4h := bundle.H4
 	if len(klines3m) == 0 || len(klines15m) == 0 || len(klines1h) == 0 || len(klines4h) == 0 {
 		return nil, fmt.Errorf("K线数据不足")
+	}
+	if opts.EnrichmentMode == "" {
+		opts.EnrichmentMode = "live"
 	}
 
 	currentPrice := klines3m[len(klines3m)-1].Close
@@ -384,13 +419,24 @@ func buildDataFromKlines(symbol string, klines3m, klines15m, klines1h, klines4h 
 		}
 	}
 
-	oiData, err := getOpenInterestDataEnhanced(symbol)
-	if err != nil {
+	oiData := opts.OI
+	fundingRate := 0.0
+	if opts.FundingRate != nil {
+		fundingRate = *opts.FundingRate
+	}
+	if opts.EnrichmentMode == "live" {
+		var err error
+		oiData, err = getOpenInterestDataEnhanced(symbol)
+		if err != nil {
+			oiData = &OIData{Latest: 0, Average: 0}
+		}
+		fundingRate, _ = getFundingRate(symbol)
+	}
+	if oiData == nil {
 		oiData = &OIData{Latest: 0, Average: 0}
 	}
-	fundingRate, _ := getFundingRate(symbol)
 
-	return &Data{
+	data := &Data{
 		Symbol:            symbol,
 		CurrentPrice:      currentPrice,
 		PriceChange1h:     priceChange1h,
@@ -407,11 +453,18 @@ func buildDataFromKlines(symbol string, klines3m, klines15m, klines1h, klines4h 
 		OpenInterest:      oiData,
 		OIValueUSD:        oiData.Latest * currentPrice,
 		FundingRate:       fundingRate,
-		IntradaySeries:    calculateIntradaySeriesEnhancedWithLimit(klines3m, seriesLimit, includeMicroADX, 14),
-		MidTermSeries15m:  calculateMidTermSeries15mEnhancedWithLimit(klines15m, seriesLimit),
-		MidTermSeries1h:   calculateMidTermSeries1hEnhancedWithLimit(klines1h, seriesLimit),
-		LongerTermContext: calculateLongerTermDataEnhancedWithLimit(klines4h, seriesLimit),
-	}, nil
+		IntradaySeries:    calculateIntradaySeriesEnhancedWithLimit(klines3m, opts.SeriesLimit, opts.IncludeMicroADX, 14),
+		MidTermSeries15m:  calculateMidTermSeries15mEnhancedWithLimit(klines15m, opts.SeriesLimit),
+		MidTermSeries1h:   calculateMidTermSeries1hEnhancedWithLimit(klines1h, opts.SeriesLimit),
+		LongerTermContext: calculateLongerTermDataEnhancedWithLimit(klines4h, opts.SeriesLimit),
+		Klines: map[string][]Kline{
+			"3m":  append([]Kline(nil), klines3m...),
+			"15m": append([]Kline(nil), klines15m...),
+			"1h":  append([]Kline(nil), klines1h...),
+			"4h":  append([]Kline(nil), klines4h...),
+		},
+	}
+	return data, nil
 }
 
 // getKlines 从Binance获取K线数据

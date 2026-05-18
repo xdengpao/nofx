@@ -13,9 +13,10 @@ import (
 )
 
 type StateStore struct {
-	path string
-	mu   sync.Mutex
-	data ProgrammaticStateFile
+	path  string
+	Clock func() time.Time
+	mu    sync.Mutex
+	data  ProgrammaticStateFile
 }
 
 const maxRecentSignalMarkers = 200
@@ -112,7 +113,7 @@ func NewStateStore(path string) *StateStore {
 	if path == "" {
 		path = "data/programmatic_strategy_state.json"
 	}
-	store := &StateStore{path: path}
+	store := &StateStore{path: path, Clock: time.Now}
 	store.data = emptyStateFile()
 	if err := store.Load(); err != nil {
 		log.Printf("⚠️ 读取程序化策略状态失败，将使用空状态: %v", err)
@@ -146,7 +147,7 @@ func (s *StateStore) Load() error {
 func (s *StateStore) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data.UpdatedAt = time.Now()
+	s.data.UpdatedAt = s.now()
 	if err := os.MkdirAll(filepath.Dir(s.path), 0755); err != nil {
 		return err
 	}
@@ -174,7 +175,7 @@ func (s *StateStore) StoreConfirmedSignal(traderID, symbol string, signal Chanlu
 	if state.ConfirmedSignals == nil {
 		state.ConfirmedSignals = map[string]StoredSignal{}
 	}
-	state.ConfirmedSignals[signal.SignalID] = StoredSignal{Signal: signal, StoredAt: time.Now(), Bootstrap: bootstrap}
+	state.ConfirmedSignals[signal.SignalID] = StoredSignal{Signal: signal, StoredAt: s.now(), Bootstrap: bootstrap}
 	s.setSymbolLocked(traderID, symbol, state)
 }
 
@@ -188,14 +189,14 @@ func (s *StateStore) MarkExecuted(traderID, symbol, signalID, action string) boo
 	if _, exists := state.ExecutedSignals[signalID]; exists && !hasRetryableSignalMarker(state.RecentSignalMarkers, signalID) {
 		return false
 	}
-	state.ExecutedSignals[signalID] = SignalExec{SignalID: signalID, Action: action, ExecutedAt: time.Now()}
+	state.ExecutedSignals[signalID] = SignalExec{SignalID: signalID, Action: action, ExecutedAt: s.now()}
 	switch action {
 	case "add_long":
 		state.AddCountBySide[SideLong]++
 	case "add_short":
 		state.AddCountBySide[SideShort]++
 	case "partial_close":
-		state.ShortTradeState = &ShortTradeState{ReducedSignalID: signalID, CanReAdd: true, UpdatedAt: time.Now()}
+		state.ShortTradeState = &ShortTradeState{ReducedSignalID: signalID, CanReAdd: true, UpdatedAt: s.now()}
 	}
 	s.setSymbolLocked(traderID, symbol, state)
 	return true
@@ -316,7 +317,7 @@ func (s *StateStore) UpdatePositionState(traderID, symbol, side string, updateFn
 	if updateFn != nil {
 		updateFn(&posState)
 	}
-	posState.LastManagedAt = time.Now()
+	posState.LastManagedAt = s.now()
 	state.PositionStates[key] = posState
 	s.setSymbolLocked(traderID, symbol, state)
 	return posState
@@ -401,7 +402,7 @@ type ProgrammaticPartialCloseRecord struct {
 func (s *StateStore) RecordProgrammaticPartialClose(record ProgrammaticPartialCloseRecord) ProgrammaticPositionState {
 	executedAt := record.ExecutedAt
 	if executedAt.IsZero() {
-		executedAt = time.Now()
+		executedAt = s.now()
 	}
 	return s.UpdatePositionState(record.TraderID, record.Symbol, record.Side, func(state *ProgrammaticPositionState) {
 		guard := state.PartialCloseGuard
@@ -657,6 +658,13 @@ func emptyStateFile() ProgrammaticStateFile {
 		UpdatedAt: time.Now(),
 		Traders:   map[string]ProgrammaticTraderState{},
 	}
+}
+
+func (s *StateStore) now() time.Time {
+	if s != nil && s.Clock != nil {
+		return s.Clock()
+	}
+	return time.Now()
 }
 
 func normalizeSideKey(side string) string {
