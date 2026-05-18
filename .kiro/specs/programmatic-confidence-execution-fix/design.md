@@ -19,6 +19,8 @@ Scores are clamped to a conservative range so malformed inputs cannot produce im
 
 `OnExecutionResult` will mark a signal as executed only after a successful `open_long`, `open_short`, `add_long`, or `add_short` final action. Rejected, failed, held, or skipped signals will update markers but not `executed_signals`.
 
+For legacy runtime state polluted by the old pre-validation write, `HasExecutedSignal` will treat an `executed_signals` entry as retryable when the latest marker for that signal is `rejected` or `failed`. A later successful open/add can overwrite the stale entry and restore normal dedupe behavior.
+
 ## Testing
 
 Add focused tests for:

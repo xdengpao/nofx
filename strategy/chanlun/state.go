@@ -168,7 +168,7 @@ func (s *StateStore) MarkExecuted(traderID, symbol, signalID, action string) boo
 	if state.ExecutedSignals == nil {
 		state.ExecutedSignals = map[string]SignalExec{}
 	}
-	if _, exists := state.ExecutedSignals[signalID]; exists {
+	if _, exists := state.ExecutedSignals[signalID]; exists && !hasRetryableSignalMarker(state.RecentSignalMarkers, signalID) {
 		return false
 	}
 	state.ExecutedSignals[signalID] = SignalExec{SignalID: signalID, Action: action, ExecutedAt: time.Now()}
@@ -192,7 +192,22 @@ func (s *StateStore) HasExecutedSignal(traderID, symbol, signalID string) bool {
 	defer s.mu.Unlock()
 	state := s.ensureSymbolLocked(traderID, symbol)
 	_, exists := state.ExecutedSignals[signalID]
-	return exists
+	return exists && !hasRetryableSignalMarker(state.RecentSignalMarkers, signalID)
+}
+
+func hasRetryableSignalMarker(markers []SignalMarker, signalID string) bool {
+	for i := len(markers) - 1; i >= 0; i-- {
+		if markers[i].SignalID != signalID {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(markers[i].Status)) {
+		case "rejected", "failed":
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 func (s *StateStore) SetLastAnalyzedClosedKline(traderID, symbol, timeframe string, closeTime int64) {

@@ -148,6 +148,47 @@ func TestStateStoreDetectedMarkerDoesNotDowngradeProcessedMarker(t *testing.T) {
 	}
 }
 
+func TestStateStoreRejectedExecutedSignalRemainsRetryable(t *testing.T) {
+	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"))
+	if !store.MarkExecuted("t1", "BTCUSDT", "sig-rejected", "open_short") {
+		t.Fatal("应能写入旧executed状态")
+	}
+	store.StoreSignalMarker("t1", "BTCUSDT", SignalMarker{
+		Symbol:      "BTCUSDT",
+		Timeframe:   "1h",
+		CloseTime:   100,
+		SignalType:  SignalSell2,
+		Direction:   SideShort,
+		SourceLayer: "main_signal",
+		Status:      "rejected",
+		SignalID:    "sig-rejected",
+		Action:      "open_short",
+		TradeIntent: "open_short",
+		Reason:      "open gate要求更高置信度",
+	})
+	if store.HasExecutedSignal("t1", "BTCUSDT", "sig-rejected") {
+		t.Fatal("已拒绝marker不应被旧executed_signals阻断重试")
+	}
+	if !store.MarkExecuted("t1", "BTCUSDT", "sig-rejected", "open_short") {
+		t.Fatal("已拒绝的旧executed记录应允许成功成交后覆盖")
+	}
+	store.StoreSignalMarker("t1", "BTCUSDT", SignalMarker{
+		Symbol:      "BTCUSDT",
+		Timeframe:   "1h",
+		CloseTime:   100,
+		SignalType:  SignalSell2,
+		Direction:   SideShort,
+		SourceLayer: "main_signal",
+		Status:      "executed",
+		SignalID:    "sig-rejected",
+		Action:      "open_short",
+		TradeIntent: "open_short",
+	})
+	if !store.HasExecutedSignal("t1", "BTCUSDT", "sig-rejected") {
+		t.Fatal("成功执行marker应恢复去重")
+	}
+}
+
 func TestStateStoreResetPositionGuardIfMissing(t *testing.T) {
 	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"))
 	store.RecordProgrammaticPartialClose(ProgrammaticPartialCloseRecord{
