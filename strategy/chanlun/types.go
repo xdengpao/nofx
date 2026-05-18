@@ -98,6 +98,10 @@ type ChanlunSignal struct {
 	SegmentEndTime    int64             `json:"segment_end_time,omitempty"`
 	Status            string            `json:"status,omitempty"`
 	SourceLayer       string            `json:"source_layer,omitempty"`
+	PreviewPhase      string            `json:"preview_phase,omitempty"`
+	PreviewSourceTF   string            `json:"preview_source_timeframe,omitempty"`
+	PreviewComponents int               `json:"preview_closed_components,omitempty"`
+	PreviewConfirmed  bool              `json:"preview_confirmed,omitempty"`
 }
 
 type SignalReport struct {
@@ -134,6 +138,12 @@ type SignalMarker struct {
 	PositionSide      string  `json:"position_side,omitempty"`
 	Price             float64 `json:"price,omitempty"`
 	Reason            string  `json:"reason,omitempty"`
+	FreshnessState    string  `json:"freshness_state,omitempty"`
+	AgeCandles        int     `json:"age_candles,omitempty"`
+	PreviewPhase      string  `json:"preview_phase,omitempty"`
+	PreviewSourceTF   string  `json:"preview_source_timeframe,omitempty"`
+	PreviewComponents int     `json:"preview_closed_components,omitempty"`
+	PreviewConfirmed  bool    `json:"preview_confirmed,omitempty"`
 }
 
 type StrategySymbol struct {

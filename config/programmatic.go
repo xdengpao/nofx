@@ -37,6 +37,8 @@ type ProgrammaticStrategyConfig struct {
 	Position           ProgrammaticPositionConfig           `json:"position,omitempty"`
 	PositionManagement ProgrammaticPositionManagementConfig `json:"position_management,omitempty"`
 	TakeProfit         ProgrammaticTPConfig                 `json:"take_profit,omitempty"`
+	SignalFreshness    ProgrammaticSignalFreshnessConfig    `json:"signal_freshness,omitempty"`
+	PreviewSignals     ProgrammaticPreviewSignalsConfig     `json:"preview_signals,omitempty"`
 	State              ProgrammaticStateConfig              `json:"state,omitempty"`
 }
 
@@ -148,6 +150,29 @@ type ProgrammaticTPConfig struct {
 	MinNetRR     float64 `json:"min_net_rr,omitempty"`
 }
 
+type ProgrammaticSignalFreshnessConfig struct {
+	Enabled                      *bool          `json:"enabled,omitempty"`
+	SoftAgeCandles               int            `json:"soft_age_candles,omitempty"`
+	MaxLifetimeCandles           int            `json:"max_lifetime_candles,omitempty"`
+	SoftAgeBySignalType          map[string]int `json:"soft_age_by_signal_type,omitempty"`
+	MaxLifetimeBySignalType      map[string]int `json:"max_lifetime_by_signal_type,omitempty"`
+	MissedTargetGuard            *bool          `json:"missed_target_guard,omitempty"`
+	ConfidenceDecayPerAgedCandle int            `json:"confidence_decay_per_aged_candle,omitempty"`
+	MinRemainingNetRR            float64        `json:"min_remaining_net_rr,omitempty"`
+}
+
+type ProgrammaticPreviewSignalsConfig struct {
+	Enabled                    *bool   `json:"enabled,omitempty"`
+	ComponentTimeframe         string  `json:"component_timeframe,omitempty"`
+	TradeTimeframe             string  `json:"trade_timeframe,omitempty"`
+	WatchAfterClosedComponents int     `json:"watch_after_closed_components,omitempty"`
+	PilotAfterClosedComponents int     `json:"pilot_after_closed_components,omitempty"`
+	AllowPilotOpen             bool    `json:"allow_pilot_open,omitempty"`
+	PilotRiskFraction          float64 `json:"pilot_risk_fraction,omitempty"`
+	PilotMinConfidence         int     `json:"pilot_min_confidence,omitempty"`
+	RequireConfirmedUpgrade    *bool   `json:"require_confirmed_upgrade,omitempty"`
+}
+
 type ProgrammaticStateConfig struct {
 	Path      string `json:"path,omitempty"`
 	Bootstrap bool   `json:"bootstrap,omitempty"`
@@ -171,6 +196,8 @@ type ProgrammaticStrategyProfile struct {
 	Position           ProgrammaticPositionProfile
 	PositionManagement ProgrammaticPositionManagementProfile
 	TakeProfit         ProgrammaticTPProfile
+	SignalFreshness    ProgrammaticSignalFreshnessProfile
+	PreviewSignals     ProgrammaticPreviewSignalsProfile
 	State              ProgrammaticStateProfile
 }
 
@@ -279,6 +306,29 @@ type ProgrammaticTPProfile struct {
 	MinNetRR     float64
 }
 
+type ProgrammaticSignalFreshnessProfile struct {
+	Enabled                      bool
+	SoftAgeCandles               int
+	MaxLifetimeCandles           int
+	SoftAgeBySignalType          map[string]int
+	MaxLifetimeBySignalType      map[string]int
+	MissedTargetGuard            bool
+	ConfidenceDecayPerAgedCandle int
+	MinRemainingNetRR            float64
+}
+
+type ProgrammaticPreviewSignalsProfile struct {
+	Enabled                    bool
+	ComponentTimeframe         string
+	TradeTimeframe             string
+	WatchAfterClosedComponents int
+	PilotAfterClosedComponents int
+	AllowPilotOpen             bool
+	PilotRiskFraction          float64
+	PilotMinConfidence         int
+	RequireConfirmedUpgrade    bool
+}
+
 type ProgrammaticStateProfile struct {
 	Path      string
 	Bootstrap bool
@@ -384,6 +434,14 @@ func normalizeProgrammaticStrategyConfig(cfg ProgrammaticStrategyConfig) (Progra
 	if err != nil {
 		return ProgrammaticStrategyProfile{}, err
 	}
+	freshness, err := normalizeProgrammaticSignalFreshness(cfg.SignalFreshness, tp.MinNetRR)
+	if err != nil {
+		return ProgrammaticStrategyProfile{}, err
+	}
+	preview, err := normalizeProgrammaticPreviewSignals(cfg.PreviewSignals, timeframes)
+	if err != nil {
+		return ProgrammaticStrategyProfile{}, err
+	}
 	signals, err := normalizeEnabledSignals(cfg.EnabledSignals)
 	if err != nil {
 		return ProgrammaticStrategyProfile{}, err
@@ -421,6 +479,8 @@ func normalizeProgrammaticStrategyConfig(cfg ProgrammaticStrategyConfig) (Progra
 		Position:           position,
 		PositionManagement: positionManagement,
 		TakeProfit:         tp,
+		SignalFreshness:    freshness,
+		PreviewSignals:     preview,
 		State: ProgrammaticStateProfile{
 			Path:      statePath,
 			Bootstrap: cfg.State.Bootstrap,
@@ -878,6 +938,167 @@ func normalizeProgrammaticTP(cfg ProgrammaticTPConfig) (ProgrammaticTPProfile, e
 		return ProgrammaticTPProfile{}, fmt.Errorf("take_profit.min_net_rr不能低于1: %.4f", minRR)
 	}
 	return ProgrammaticTPProfile{Mode: mode, FallbackMode: fallbackMode, MinNetRR: minRR}, nil
+}
+
+func normalizeProgrammaticSignalFreshness(cfg ProgrammaticSignalFreshnessConfig, fallbackMinRR float64) (ProgrammaticSignalFreshnessProfile, error) {
+	enabled := true
+	if cfg.Enabled != nil {
+		enabled = *cfg.Enabled
+	}
+	missedTargetGuard := true
+	if cfg.MissedTargetGuard != nil {
+		missedTargetGuard = *cfg.MissedTargetGuard
+	}
+	softAge := cfg.SoftAgeCandles
+	if softAge <= 0 {
+		softAge = 2
+	}
+	maxLifetime := cfg.MaxLifetimeCandles
+	if maxLifetime <= 0 {
+		maxLifetime = 4
+	}
+	if softAge < 1 || softAge > 48 {
+		return ProgrammaticSignalFreshnessProfile{}, fmt.Errorf("signal_freshness.soft_age_candles必须在1-48之间: %d", softAge)
+	}
+	if maxLifetime < softAge || maxLifetime > 96 {
+		return ProgrammaticSignalFreshnessProfile{}, fmt.Errorf("signal_freshness.max_lifetime_candles必须在soft_age_candles和96之间: %d", maxLifetime)
+	}
+	softByType, err := normalizeSignalAgeOverrides(cfg.SoftAgeBySignalType, softAge, 48, "signal_freshness.soft_age_by_signal_type")
+	if err != nil {
+		return ProgrammaticSignalFreshnessProfile{}, err
+	}
+	maxByType, err := normalizeSignalAgeOverrides(cfg.MaxLifetimeBySignalType, maxLifetime, 96, "signal_freshness.max_lifetime_by_signal_type")
+	if err != nil {
+		return ProgrammaticSignalFreshnessProfile{}, err
+	}
+	for signalType, soft := range softByType {
+		if maxValue, ok := maxByType[signalType]; ok && maxValue < soft {
+			return ProgrammaticSignalFreshnessProfile{}, fmt.Errorf("signal_freshness.%s max_lifetime不能小于soft_age: %d < %d", signalType, maxValue, soft)
+		}
+	}
+	decay := cfg.ConfidenceDecayPerAgedCandle
+	if decay < 0 {
+		return ProgrammaticSignalFreshnessProfile{}, fmt.Errorf("signal_freshness.confidence_decay_per_aged_candle不能为负数: %d", decay)
+	}
+	if decay == 0 {
+		decay = 3
+	}
+	if decay > 20 {
+		return ProgrammaticSignalFreshnessProfile{}, fmt.Errorf("signal_freshness.confidence_decay_per_aged_candle必须在0-20之间: %d", decay)
+	}
+	minRR := cfg.MinRemainingNetRR
+	if minRR <= 0 {
+		minRR = fallbackMinRR
+	}
+	if minRR <= 0 {
+		minRR = defaultStrategyMinNetRR
+	}
+	if minRR < 1 {
+		return ProgrammaticSignalFreshnessProfile{}, fmt.Errorf("signal_freshness.min_remaining_net_rr不能低于1: %.4f", minRR)
+	}
+	return ProgrammaticSignalFreshnessProfile{
+		Enabled:                      enabled,
+		SoftAgeCandles:               softAge,
+		MaxLifetimeCandles:           maxLifetime,
+		SoftAgeBySignalType:          softByType,
+		MaxLifetimeBySignalType:      maxByType,
+		MissedTargetGuard:            missedTargetGuard,
+		ConfidenceDecayPerAgedCandle: decay,
+		MinRemainingNetRR:            minRR,
+	}, nil
+}
+
+func normalizeSignalAgeOverrides(values map[string]int, fallback, maxAllowed int, field string) (map[string]int, error) {
+	result := map[string]int{
+		"buy1":  fallback,
+		"sell1": fallback,
+		"buy2":  fallback,
+		"sell2": fallback,
+		"buy3":  fallback,
+		"sell3": fallback,
+	}
+	if strings.Contains(field, "soft_age") {
+		result["buy3"] = 1
+		result["sell3"] = 1
+	} else if strings.Contains(field, "max_lifetime") {
+		if fallback > 2 {
+			result["buy3"] = 2
+			result["sell3"] = 2
+		}
+	}
+	allowed := map[string]bool{"buy1": true, "buy2": true, "buy3": true, "sell1": true, "sell2": true, "sell3": true}
+	for key, value := range values {
+		signalType := strings.ToLower(strings.TrimSpace(key))
+		if !allowed[signalType] {
+			return nil, fmt.Errorf("%s包含不支持的信号类型: %q", field, key)
+		}
+		if value < 1 || value > maxAllowed {
+			return nil, fmt.Errorf("%s.%s必须在1-%d之间: %d", field, signalType, maxAllowed, value)
+		}
+		result[signalType] = value
+	}
+	return result, nil
+}
+
+func normalizeProgrammaticPreviewSignals(cfg ProgrammaticPreviewSignalsConfig, timeframes ProgrammaticTimeframesProfile) (ProgrammaticPreviewSignalsProfile, error) {
+	enabled := true
+	if cfg.Enabled != nil {
+		enabled = *cfg.Enabled
+	}
+	componentTF := defaultString(cfg.ComponentTimeframe, timeframes.Sub)
+	tradeTF := defaultString(cfg.TradeTimeframe, timeframes.Trade)
+	if componentTF == "" {
+		componentTF = defaultSubTimeframeForTrade(tradeTF)
+	}
+	if !isSupportedProgrammaticTimeframe(componentTF) {
+		return ProgrammaticPreviewSignalsProfile{}, fmt.Errorf("preview_signals.component_timeframe必须是 3m、15m、1h 或 4h: %q", componentTF)
+	}
+	if !isSupportedProgrammaticTradeTimeframe(tradeTF) {
+		return ProgrammaticPreviewSignalsProfile{}, fmt.Errorf("preview_signals.trade_timeframe必须是 15m、1h 或 4h: %q", tradeTF)
+	}
+	watchAfter := cfg.WatchAfterClosedComponents
+	if watchAfter <= 0 {
+		watchAfter = 2
+	}
+	pilotAfter := cfg.PilotAfterClosedComponents
+	if pilotAfter <= 0 {
+		pilotAfter = 3
+	}
+	if watchAfter < 1 || watchAfter > 16 {
+		return ProgrammaticPreviewSignalsProfile{}, fmt.Errorf("preview_signals.watch_after_closed_components必须在1-16之间: %d", watchAfter)
+	}
+	if pilotAfter < watchAfter || pilotAfter > 16 {
+		return ProgrammaticPreviewSignalsProfile{}, fmt.Errorf("preview_signals.pilot_after_closed_components必须在watch_after和16之间: %d", pilotAfter)
+	}
+	pilotRisk := cfg.PilotRiskFraction
+	if pilotRisk <= 0 {
+		pilotRisk = 0.3
+	}
+	if pilotRisk <= 0 || pilotRisk > 1 {
+		return ProgrammaticPreviewSignalsProfile{}, fmt.Errorf("preview_signals.pilot_risk_fraction必须在0-1之间: %.4f", pilotRisk)
+	}
+	pilotConfidence := cfg.PilotMinConfidence
+	if pilotConfidence <= 0 {
+		pilotConfidence = 90
+	}
+	if pilotConfidence < 1 || pilotConfidence > 100 {
+		return ProgrammaticPreviewSignalsProfile{}, fmt.Errorf("preview_signals.pilot_min_confidence必须在1-100之间: %d", pilotConfidence)
+	}
+	requireUpgrade := true
+	if cfg.RequireConfirmedUpgrade != nil {
+		requireUpgrade = *cfg.RequireConfirmedUpgrade
+	}
+	return ProgrammaticPreviewSignalsProfile{
+		Enabled:                    enabled,
+		ComponentTimeframe:         componentTF,
+		TradeTimeframe:             tradeTF,
+		WatchAfterClosedComponents: watchAfter,
+		PilotAfterClosedComponents: pilotAfter,
+		AllowPilotOpen:             cfg.AllowPilotOpen,
+		PilotRiskFraction:          pilotRisk,
+		PilotMinConfidence:         pilotConfidence,
+		RequireConfirmedUpgrade:    requireUpgrade,
+	}, nil
 }
 
 func normalizeEnabledSignals(values []string) ([]string, error) {

@@ -313,11 +313,43 @@ func decisionProgrammaticStrategyPolicy(profile config.ProgrammaticStrategyProfi
 			FallbackMode: profile.TakeProfit.FallbackMode,
 			MinNetRR:     profile.TakeProfit.MinNetRR,
 		},
+		SignalFreshness: decision.ProgrammaticSignalFreshnessPolicy{
+			Enabled:                      profile.SignalFreshness.Enabled,
+			SoftAgeCandles:               profile.SignalFreshness.SoftAgeCandles,
+			MaxLifetimeCandles:           profile.SignalFreshness.MaxLifetimeCandles,
+			SoftAgeBySignalType:          copyStringIntMap(profile.SignalFreshness.SoftAgeBySignalType),
+			MaxLifetimeBySignalType:      copyStringIntMap(profile.SignalFreshness.MaxLifetimeBySignalType),
+			MissedTargetGuard:            profile.SignalFreshness.MissedTargetGuard,
+			ConfidenceDecayPerAgedCandle: profile.SignalFreshness.ConfidenceDecayPerAgedCandle,
+			MinRemainingNetRR:            profile.SignalFreshness.MinRemainingNetRR,
+		},
+		PreviewSignals: decision.ProgrammaticPreviewSignalsPolicy{
+			Enabled:                    profile.PreviewSignals.Enabled,
+			ComponentTimeframe:         profile.PreviewSignals.ComponentTimeframe,
+			TradeTimeframe:             profile.PreviewSignals.TradeTimeframe,
+			WatchAfterClosedComponents: profile.PreviewSignals.WatchAfterClosedComponents,
+			PilotAfterClosedComponents: profile.PreviewSignals.PilotAfterClosedComponents,
+			AllowPilotOpen:             profile.PreviewSignals.AllowPilotOpen,
+			PilotRiskFraction:          profile.PreviewSignals.PilotRiskFraction,
+			PilotMinConfidence:         profile.PreviewSignals.PilotMinConfidence,
+			RequireConfirmedUpgrade:    profile.PreviewSignals.RequireConfirmedUpgrade,
+		},
 		State: decision.ProgrammaticStatePolicy{
 			Path:      profile.State.Path,
 			Bootstrap: profile.State.Bootstrap,
 		},
 	}
+}
+
+func copyStringIntMap(values map[string]int) map[string]int {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 // GetOrderTracker 获取指定trader的订单追踪器

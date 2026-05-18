@@ -323,6 +323,20 @@ func TestNormalizeProgrammaticStrategies_ProgrammaticDefaults(t *testing.T) {
 	if profile.PositionManagement.StructureBreak.PartialCloseGuardAction != "bypass_cooldown_clip_budget" {
 		t.Fatalf("structure_break guard默认动作错误: %+v", profile.PositionManagement.StructureBreak)
 	}
+	if !profile.SignalFreshness.Enabled || profile.SignalFreshness.SoftAgeCandles != 2 || profile.SignalFreshness.MaxLifetimeCandles != 4 {
+		t.Fatalf("signal freshness默认值错误: %+v", profile.SignalFreshness)
+	}
+	if !profile.SignalFreshness.MissedTargetGuard || profile.SignalFreshness.SoftAgeBySignalType["sell3"] != 1 || profile.SignalFreshness.MaxLifetimeBySignalType["sell3"] != 2 {
+		t.Fatalf("signal freshness信号类型默认值错误: %+v", profile.SignalFreshness)
+	}
+	if !profile.PreviewSignals.Enabled || profile.PreviewSignals.ComponentTimeframe != "15m" || profile.PreviewSignals.TradeTimeframe != "1h" {
+		t.Fatalf("preview signals默认周期错误: %+v", profile.PreviewSignals)
+	}
+	if profile.PreviewSignals.WatchAfterClosedComponents != 2 || profile.PreviewSignals.PilotAfterClosedComponents != 3 ||
+		profile.PreviewSignals.AllowPilotOpen || profile.PreviewSignals.PilotRiskFraction != 0.3 ||
+		profile.PreviewSignals.PilotMinConfidence != 90 || !profile.PreviewSignals.RequireConfirmedUpgrade {
+		t.Fatalf("preview signals默认策略错误: %+v", profile.PreviewSignals)
+	}
 	if profile.MovingAverage.ShortPeriod != 20 || profile.MovingAverage.LongPeriod != 50 {
 		t.Fatalf("默认均线周期错误: %+v", profile.MovingAverage)
 	}
@@ -334,6 +348,55 @@ func TestNormalizeProgrammaticStrategies_ProgrammaticDefaults(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("programmatic模式不应要求AI key: %v", err)
+	}
+}
+
+func TestNormalizeProgrammaticStrategies_SignalFreshnessPreviewOverridesAndHash(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].DecisionMode = DecisionModeProgrammatic
+	disabledFreshness := false
+	disabledPreview := false
+	cfg.Traders[0].ProgrammaticStrategy.SignalFreshness = ProgrammaticSignalFreshnessConfig{
+		Enabled:                      &disabledFreshness,
+		SoftAgeCandles:               3,
+		MaxLifetimeCandles:           6,
+		SoftAgeBySignalType:          map[string]int{"sell2": 2},
+		MaxLifetimeBySignalType:      map[string]int{"sell2": 5},
+		ConfidenceDecayPerAgedCandle: 4,
+		MinRemainingNetRR:            3.1,
+	}
+	cfg.Traders[0].ProgrammaticStrategy.PreviewSignals = ProgrammaticPreviewSignalsConfig{
+		Enabled:                    &disabledPreview,
+		ComponentTimeframe:         "15m",
+		TradeTimeframe:             "1h",
+		WatchAfterClosedComponents: 2,
+		PilotAfterClosedComponents: 3,
+		AllowPilotOpen:             true,
+		PilotRiskFraction:          0.25,
+		PilotMinConfidence:         92,
+	}
+
+	profiles, err := cfg.NormalizeProgrammaticStrategies()
+	if err != nil {
+		t.Fatalf("合法signal freshness/preview配置不应失败: %v", err)
+	}
+	profile := profiles["trader1"]
+	if profile.SignalFreshness.Enabled || profile.SignalFreshness.SoftAgeBySignalType["sell2"] != 2 ||
+		profile.SignalFreshness.MaxLifetimeBySignalType["sell2"] != 5 || profile.SignalFreshness.MinRemainingNetRR != 3.1 {
+		t.Fatalf("signal freshness override未生效: %+v", profile.SignalFreshness)
+	}
+	if profile.PreviewSignals.Enabled || !profile.PreviewSignals.AllowPilotOpen ||
+		profile.PreviewSignals.PilotRiskFraction != 0.25 || profile.PreviewSignals.PilotMinConfidence != 92 {
+		t.Fatalf("preview override未生效: %+v", profile.PreviewSignals)
+	}
+	firstHash := profile.ConfigHash
+	cfg.Traders[0].ProgrammaticStrategy.PreviewSignals.PilotMinConfidence = 95
+	profiles, err = cfg.NormalizeProgrammaticStrategies()
+	if err != nil {
+		t.Fatalf("修改preview配置后归一化不应失败: %v", err)
+	}
+	if profiles["trader1"].ConfigHash == firstHash {
+		t.Fatal("signal freshness/preview配置变化后config_hash应变化")
 	}
 }
 
@@ -448,6 +511,16 @@ func TestNormalizeProgrammaticStrategies_InvalidValues(t *testing.T) {
 		}},
 		{name: "bad structure guard action", mutate: func(t *TraderConfig) {
 			t.ProgrammaticStrategy.PositionManagement.StructureBreak.PartialCloseGuardAction = "panic"
+		}},
+		{name: "bad signal freshness type", mutate: func(t *TraderConfig) {
+			t.ProgrammaticStrategy.SignalFreshness.SoftAgeBySignalType = map[string]int{"buy9": 2}
+		}},
+		{name: "bad signal freshness decay", mutate: func(t *TraderConfig) {
+			t.ProgrammaticStrategy.SignalFreshness.ConfidenceDecayPerAgedCandle = -1
+		}},
+		{name: "bad preview pilot order", mutate: func(t *TraderConfig) {
+			t.ProgrammaticStrategy.PreviewSignals.WatchAfterClosedComponents = 3
+			t.ProgrammaticStrategy.PreviewSignals.PilotAfterClosedComponents = 2
 		}},
 	}
 	for _, tt := range tests {

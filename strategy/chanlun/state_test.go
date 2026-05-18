@@ -189,6 +189,39 @@ func TestStateStoreRejectedExecutedSignalRemainsRetryable(t *testing.T) {
 	}
 }
 
+func TestStateStoreSignalSuppressionSeparateFromExecuted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store := NewStateStore(path)
+	store.StoreSignalSuppression("t1", "SOLUSDT", SignalSuppression{
+		SignalID:          "sig-target-crossed",
+		Action:            "open_short",
+		ReasonCode:        "target_already_crossed",
+		SuppressedAt:      time.Unix(100, 0),
+		SignalCloseTime:   10,
+		DecisionCloseTime: 20,
+		FreshnessState:    "expired",
+		CurrentPrice:      84.82,
+		StopLoss:          86.92,
+		TakeProfit:        85.89,
+	})
+	if !store.HasSuppressedSignal("t1", "SOLUSDT", "sig-target-crossed", "open_short", "target_already_crossed") {
+		t.Fatal("应能按signal/action/reason查询suppression")
+	}
+	if store.HasExecutedSignal("t1", "SOLUSDT", "sig-target-crossed") {
+		t.Fatal("suppressed信号不应被视为executed")
+	}
+	if err := store.Save(); err != nil {
+		t.Fatalf("保存suppression失败: %v", err)
+	}
+	reloaded := NewStateStore(path)
+	if !reloaded.HasSuppressedSignal("t1", "SOLUSDT", "sig-target-crossed", "open_short", "target_already_crossed") {
+		t.Fatal("suppression应持久化")
+	}
+	if reloaded.HasExecutedSignal("t1", "SOLUSDT", "sig-target-crossed") {
+		t.Fatal("重载后suppressed仍不应污染executed_signals")
+	}
+}
+
 func TestStateStoreResetPositionGuardIfMissing(t *testing.T) {
 	store := NewStateStore(filepath.Join(t.TempDir(), "state.json"))
 	store.RecordProgrammaticPartialClose(ProgrammaticPartialCloseRecord{

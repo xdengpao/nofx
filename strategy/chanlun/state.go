@@ -35,6 +35,7 @@ type ProgrammaticSymbolState struct {
 	LastAnalyzedClosedKline map[string]int64                     `json:"last_analyzed_closed_kline,omitempty"`
 	ConfirmedSignals        map[string]StoredSignal              `json:"confirmed_signals,omitempty"`
 	ExecutedSignals         map[string]SignalExec                `json:"executed_signals,omitempty"`
+	SuppressedSignals       map[string]SignalSuppression         `json:"suppressed_signals,omitempty"`
 	AddCountBySide          map[string]int                       `json:"add_count_by_side,omitempty"`
 	ShortTradeState         *ShortTradeState                     `json:"short_trade_state,omitempty"`
 	PositionStates          map[string]ProgrammaticPositionState `json:"position_states,omitempty"`
@@ -82,6 +83,19 @@ type SignalExec struct {
 	SignalID   string    `json:"signal_id"`
 	Action     string    `json:"action"`
 	ExecutedAt time.Time `json:"executed_at"`
+}
+
+type SignalSuppression struct {
+	SignalID          string    `json:"signal_id"`
+	Action            string    `json:"action"`
+	ReasonCode        string    `json:"reason_code"`
+	SuppressedAt      time.Time `json:"suppressed_at"`
+	SignalCloseTime   int64     `json:"signal_close_time,omitempty"`
+	DecisionCloseTime int64     `json:"decision_close_time,omitempty"`
+	FreshnessState    string    `json:"freshness_state,omitempty"`
+	CurrentPrice      float64   `json:"current_price,omitempty"`
+	StopLoss          float64   `json:"stop_loss,omitempty"`
+	TakeProfit        float64   `json:"take_profit,omitempty"`
 }
 
 type ShortTradeState struct {
@@ -193,6 +207,38 @@ func (s *StateStore) HasExecutedSignal(traderID, symbol, signalID string) bool {
 	state := s.ensureSymbolLocked(traderID, symbol)
 	_, exists := state.ExecutedSignals[signalID]
 	return exists && !hasRetryableSignalMarker(state.RecentSignalMarkers, signalID)
+}
+
+func (s *StateStore) HasSuppressedSignal(traderID, symbol, signalID, action, reasonCode string) bool {
+	if signalID == "" || action == "" || reasonCode == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	_, exists := state.SuppressedSignals[signalSuppressionKey(signalID, action, reasonCode)]
+	return exists
+}
+
+func (s *StateStore) StoreSignalSuppression(traderID, symbol string, suppression SignalSuppression) {
+	if suppression.SignalID == "" || suppression.Action == "" || suppression.ReasonCode == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	if state.SuppressedSignals == nil {
+		state.SuppressedSignals = map[string]SignalSuppression{}
+	}
+	if suppression.SuppressedAt.IsZero() {
+		suppression.SuppressedAt = time.Now()
+	}
+	state.SuppressedSignals[signalSuppressionKey(suppression.SignalID, suppression.Action, suppression.ReasonCode)] = suppression
+	s.setSymbolLocked(traderID, symbol, state)
+}
+
+func signalSuppressionKey(signalID, action, reasonCode string) string {
+	return signalID + "|" + strings.ToLower(strings.TrimSpace(action)) + "|" + strings.ToLower(strings.TrimSpace(reasonCode))
 }
 
 func hasRetryableSignalMarker(markers []SignalMarker, signalID string) bool {
@@ -553,6 +599,9 @@ func (s *StateStore) ensureSymbolLocked(traderID, symbol string) ProgrammaticSym
 	}
 	if state.ExecutedSignals == nil {
 		state.ExecutedSignals = map[string]SignalExec{}
+	}
+	if state.SuppressedSignals == nil {
+		state.SuppressedSignals = map[string]SignalSuppression{}
 	}
 	if state.AddCountBySide == nil {
 		state.AddCountBySide = map[string]int{}

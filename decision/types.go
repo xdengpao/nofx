@@ -438,6 +438,8 @@ type ProgrammaticStrategyPolicy struct {
 	Position           ProgrammaticPositionPolicy
 	PositionManagement ProgrammaticPositionManagementPolicy
 	TakeProfit         ProgrammaticTPPolicy
+	SignalFreshness    ProgrammaticSignalFreshnessPolicy
+	PreviewSignals     ProgrammaticPreviewSignalsPolicy
 	State              ProgrammaticStatePolicy
 }
 
@@ -551,6 +553,29 @@ type ProgrammaticTPPolicy struct {
 	Mode         string
 	FallbackMode string
 	MinNetRR     float64
+}
+
+type ProgrammaticSignalFreshnessPolicy struct {
+	Enabled                      bool
+	SoftAgeCandles               int
+	MaxLifetimeCandles           int
+	SoftAgeBySignalType          map[string]int
+	MaxLifetimeBySignalType      map[string]int
+	MissedTargetGuard            bool
+	ConfidenceDecayPerAgedCandle int
+	MinRemainingNetRR            float64
+}
+
+type ProgrammaticPreviewSignalsPolicy struct {
+	Enabled                    bool
+	ComponentTimeframe         string
+	TradeTimeframe             string
+	WatchAfterClosedComponents int
+	PilotAfterClosedComponents int
+	AllowPilotOpen             bool
+	PilotRiskFraction          float64
+	PilotMinConfidence         int
+	RequireConfirmedUpgrade    bool
 }
 
 type ProgrammaticStatePolicy struct {
