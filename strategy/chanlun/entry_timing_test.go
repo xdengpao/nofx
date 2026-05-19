@@ -154,6 +154,46 @@ func TestEntryTimingPullbackRetestResumeBuildsValidOpenCandidate(t *testing.T) {
 	}
 }
 
+func TestEntryTimingSymbolOverridesLoosenBlueChipThresholds(t *testing.T) {
+	engine := testFreshnessEngine(t)
+	engine.Policy.EntryTiming.EntryZone.MaxChaseRatio = 0.35
+	engine.Policy.EntryTiming.EntryZone.MinRemainingNetRR = 2.5
+	engine.Policy.EntryTiming.EntryZone.SymbolOverrides = map[string]decision.ProgrammaticEntryZoneOverridePolicy{
+		"BTCUSDT": {MaxChaseRatio: 0.4, MinRemainingNetRR: 2.2},
+	}
+
+	base := time.Date(2026, 5, 18, 5, 59, 59, 0, time.UTC).UnixMilli()
+	ctx, data := testGuardContext(100)
+	ctx.MarketDataMap["BTCUSDT"] = &market.Data{Symbol: "BTCUSDT", CurrentPrice: 100}
+
+	btcRR := testSignal(SignalBuy2, SideLong, base, base, 90, 125, 100)
+	btcRR.Symbol = "BTCUSDT"
+	btcDecision := engine.signalToMainDecision(ctx, btcRR)
+	guarded, rejection, _ := engine.applyProgrammaticSignalGuard(ctx, btcRR, btcDecision, ctx.MarketDataMap["BTCUSDT"], time.UnixMilli(base))
+	if rejection != nil || guarded.Action != "open_long" || metadataFloat64(guarded.StrategyMetadata, "min_remaining_net_rr") != 2.2 {
+		t.Fatalf("BTC应使用2.2 RR override通过接近阈值候选: guarded=%+v rejection=%+v", guarded, rejection)
+	}
+
+	solRR := testSignal(SignalBuy2, SideLong, base, base, 90, 125, 100)
+	solDecision := engine.signalToMainDecision(ctx, solRR)
+	_, rejection, _ = engine.applyProgrammaticSignalGuard(ctx, solRR, solDecision, data, time.UnixMilli(base))
+	if rejection == nil || rejection.GateReasons[0] != "remaining_net_rr_too_low" {
+		t.Fatalf("无override的SOL仍应按2.5 RR拒绝: %+v", rejection)
+	}
+
+	chaseSignal := testSignal(SignalBuy2, SideLong, base, base, 136, 236, 100)
+	chaseSignal.Symbol = "BTCUSDT"
+	chaseWindow := engine.evaluateStructureEntryWindow(ctx, chaseSignal, &market.Data{Symbol: "BTCUSDT", CurrentPrice: 137})
+	if !chaseWindow.Valid {
+		t.Fatalf("BTC chase_ratio 0.37 应被0.40 override放行: %+v", chaseWindow)
+	}
+	chaseSignal.Symbol = "SOLUSDT"
+	chaseWindow = engine.evaluateStructureEntryWindow(ctx, chaseSignal, &market.Data{Symbol: "SOLUSDT", CurrentPrice: 137})
+	if chaseWindow.Valid || chaseWindow.ReasonCode != "entry_chase_ratio_too_high" {
+		t.Fatalf("SOL chase_ratio 0.37 应仍被0.35全局阈值拒绝: %+v", chaseWindow)
+	}
+}
+
 func TestEntryTimingReplayFixturesOld161SignalsDoNotOpen(t *testing.T) {
 	type staleFixture struct {
 		Symbol         string  `json:"symbol"`

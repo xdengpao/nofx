@@ -139,6 +139,53 @@
           "fallback_mode": "reject",
           "min_net_rr": 2.5
         },
+        "signal_freshness": {
+          "enabled": true,
+          "missed_target_guard": true,
+          "min_remaining_net_rr": 2.5
+        },
+        "preview_signals": {
+          "enabled": true,
+          "component_timeframe": "15m",
+          "trade_timeframe": "1h",
+          "watch_after_closed_components": 2,
+          "pilot_after_closed_components": 3,
+          "allow_pilot_open": true,
+          "pilot_risk_fraction": 0.3,
+          "pilot_min_confidence": 90,
+          "require_confirmed_upgrade": true
+        },
+        "entry_timing": {
+          "enabled": true,
+          "direct_structure_open": false,
+          "require_fresh_trigger": true,
+          "trigger_timeframe": "15m",
+          "allowed_trigger_types": ["preview_2x15m_watchlist", "preview_3x15m_pilot", "pullback_retest_resume"],
+          "entry_zone": {
+            "max_chase_ratio": 0.35,
+            "min_remaining_net_rr": 2.5,
+            "symbol_overrides": {
+              "BTCUSDT": {
+                "max_chase_ratio": 0.4,
+                "min_remaining_net_rr": 2.2
+              },
+              "ETHUSDT": {
+                "max_chase_ratio": 0.4,
+                "min_remaining_net_rr": 2.2
+              },
+              "BNBUSDT": {
+                "max_chase_ratio": 0.4,
+                "min_remaining_net_rr": 2.2
+              }
+            }
+          },
+          "pilot": {
+            "enabled": true,
+            "risk_fraction": 0.3,
+            "min_confidence": 90
+          },
+          "continuation_after_target_crossed": "disabled"
+        },
         "state": {
           "path": "data/programmatic_strategy_state.json",
           "bootstrap": false

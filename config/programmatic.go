@@ -189,7 +189,13 @@ type ProgrammaticEntryTimingConfig struct {
 }
 
 type ProgrammaticEntryZoneConfig struct {
-	Mode              string  `json:"mode,omitempty"`
+	Mode              string                                         `json:"mode,omitempty"`
+	MaxChaseRatio     float64                                        `json:"max_chase_ratio,omitempty"`
+	MinRemainingNetRR float64                                        `json:"min_remaining_net_rr,omitempty"`
+	SymbolOverrides   map[string]ProgrammaticEntryZoneOverrideConfig `json:"symbol_overrides,omitempty"`
+}
+
+type ProgrammaticEntryZoneOverrideConfig struct {
 	MaxChaseRatio     float64 `json:"max_chase_ratio,omitempty"`
 	MinRemainingNetRR float64 `json:"min_remaining_net_rr,omitempty"`
 }
@@ -373,6 +379,12 @@ type ProgrammaticEntryTimingProfile struct {
 
 type ProgrammaticEntryZoneProfile struct {
 	Mode              string
+	MaxChaseRatio     float64
+	MinRemainingNetRR float64
+	SymbolOverrides   map[string]ProgrammaticEntryZoneOverrideProfile
+}
+
+type ProgrammaticEntryZoneOverrideProfile struct {
 	MaxChaseRatio     float64
 	MinRemainingNetRR float64
 }
@@ -1282,7 +1294,43 @@ func normalizeProgrammaticEntryZone(cfg ProgrammaticEntryZoneConfig, fallbackMin
 	if minRR < 1 {
 		return ProgrammaticEntryZoneProfile{}, fmt.Errorf("entry_timing.entry_zone.min_remaining_net_rr不能低于1: %.4f", minRR)
 	}
-	return ProgrammaticEntryZoneProfile{Mode: mode, MaxChaseRatio: maxChase, MinRemainingNetRR: minRR}, nil
+	overrides, err := normalizeProgrammaticEntryZoneOverrides(cfg.SymbolOverrides)
+	if err != nil {
+		return ProgrammaticEntryZoneProfile{}, err
+	}
+	return ProgrammaticEntryZoneProfile{
+		Mode:              mode,
+		MaxChaseRatio:     maxChase,
+		MinRemainingNetRR: minRR,
+		SymbolOverrides:   overrides,
+	}, nil
+}
+
+func normalizeProgrammaticEntryZoneOverrides(values map[string]ProgrammaticEntryZoneOverrideConfig) (map[string]ProgrammaticEntryZoneOverrideProfile, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	result := make(map[string]ProgrammaticEntryZoneOverrideProfile, len(values))
+	for rawSymbol, override := range values {
+		symbol := normalizeProgrammaticSymbol(rawSymbol)
+		if symbol == "" || !programmaticSymbolPattern.MatchString(symbol) {
+			return nil, fmt.Errorf("entry_timing.entry_zone.symbol_overrides包含无效symbol: %q", rawSymbol)
+		}
+		if _, exists := result[symbol]; exists {
+			return nil, fmt.Errorf("entry_timing.entry_zone.symbol_overrides重复symbol: %s", symbol)
+		}
+		if override.MaxChaseRatio < 0 || override.MaxChaseRatio > 1 {
+			return nil, fmt.Errorf("entry_timing.entry_zone.symbol_overrides[%s].max_chase_ratio必须在0-1之间: %.4f", symbol, override.MaxChaseRatio)
+		}
+		if override.MinRemainingNetRR > 0 && override.MinRemainingNetRR < 1 {
+			return nil, fmt.Errorf("entry_timing.entry_zone.symbol_overrides[%s].min_remaining_net_rr不能低于1: %.4f", symbol, override.MinRemainingNetRR)
+		}
+		result[symbol] = ProgrammaticEntryZoneOverrideProfile{
+			MaxChaseRatio:     override.MaxChaseRatio,
+			MinRemainingNetRR: override.MinRemainingNetRR,
+		}
+	}
+	return result, nil
 }
 
 func normalizeProgrammaticEntryPilot(cfg ProgrammaticEntryPilotConfig) (ProgrammaticEntryPilotProfile, error) {

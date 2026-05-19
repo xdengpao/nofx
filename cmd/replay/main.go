@@ -14,6 +14,8 @@ func main() {
 	output := flag.String("output", "", "optional output JSON path")
 	reportOnly := flag.Bool("report-only", true, "calculate gate effects without changing live trading behavior")
 	dryRun := flag.Bool("dry-run", true, "mark report as dry-run/paper analysis")
+	openRejectionDaily := flag.Bool("open-rejection-daily", false, "output read-only daily open rejection report instead of full replay report")
+	nearMissLimit := flag.Int("near-miss-limit", 20, "maximum near-miss candidates in open rejection daily report")
 	includeBackups := flag.Bool("include-backups", false, "include .bak/backup decision log directories")
 	traderID := flag.String("trader", "", "optional trader id filter")
 	fromText := flag.String("from", "", "optional inclusive start time (RFC3339 or YYYY-MM-DD)")
@@ -42,6 +44,10 @@ func main() {
 		From:           from,
 		To:             to,
 	})
+	if *openRejectionDaily {
+		writeJSONOutput(logger.BuildOpenRejectionDailyReport(records, *nearMissLimit), *output)
+		return
+	}
 	report := logger.BuildReplayReport(records, *reportOnly, *dryRun)
 	if *exchangeCloseJSON != "" {
 		data, err := os.ReadFile(*exchangeCloseJSON)
@@ -57,14 +63,18 @@ func main() {
 		logger.AttachExchangeCloseSnapshots(&report, records, exchangeCloses)
 	}
 
-	data, err := json.MarshalIndent(report, "", "  ")
+	writeJSONOutput(report, *output)
+}
+
+func writeJSONOutput(value any, output string) {
+	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "序列化replay报告失败: %v\n", err)
+		fmt.Fprintf(os.Stderr, "序列化replay输出失败: %v\n", err)
 		os.Exit(1)
 	}
-	if *output != "" {
-		if err := os.WriteFile(*output, data, 0644); err != nil {
-			fmt.Fprintf(os.Stderr, "写入replay报告失败: %v\n", err)
+	if output != "" {
+		if err := os.WriteFile(output, data, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "写入replay输出失败: %v\n", err)
 			os.Exit(1)
 		}
 		return

@@ -146,6 +146,7 @@ func normalizeRuntimeEntryTiming(policy decision.ProgrammaticEntryTimingPolicy, 
 	uninitialized := !policy.Enabled && !policy.DirectStructureOpen && policy.DirectOpenMaxAgeCandles == 0 &&
 		!policy.RequireFreshTrigger && policy.TriggerTimeframe == "" && len(policy.AllowedTriggerTypes) == 0 &&
 		policy.EntryZone.Mode == "" && policy.EntryZone.MaxChaseRatio == 0 && policy.EntryZone.MinRemainingNetRR == 0 &&
+		len(policy.EntryZone.SymbolOverrides) == 0 &&
 		policy.MaxTriggerAgeCandles == 0 && policy.MinTriggerConfidence == 0 &&
 		!policy.Pilot.Enabled && policy.Pilot.RiskFraction == 0 && policy.Pilot.MinConfidence == 0 &&
 		policy.ContinuationAfterTargetCrossed == ""
@@ -570,7 +571,8 @@ func (e *Engine) tryPullbackRetestEntryTrigger(ctx *decision.Context, signal *Ch
 	if len(components) == 0 {
 		return false, componentDiagnostics
 	}
-	pattern, ok := detectPullbackRetestResume(*signal, components, e.Policy.EntryTiming.EntryZone.MaxChaseRatio)
+	entryZone := e.entryZoneForSymbol(signal.Symbol)
+	pattern, ok := detectPullbackRetestResume(*signal, components, entryZone.MaxChaseRatio)
 	if !ok {
 		return false, []string{fmt.Sprintf("%s %s 等待%s pullback_retest_resume，当前%s闭合组件%d根", signal.Symbol, signal.SignalType, triggerTF, triggerTF, componentCount)}
 	}
@@ -694,6 +696,7 @@ func (e *Engine) candidateActionForSignal(ctx *decision.Context, signal ChanlunS
 
 func (e *Engine) evaluateStructureEntryWindow(ctx *decision.Context, signal ChanlunSignal, data *market.Data) entryWindowEvaluation {
 	currentPrice := currentPriceForGuard(data, e.Policy.Timeframes.Trade)
+	entryZone := e.entryZoneForSymbol(signal.Symbol)
 	result := entryWindowEvaluation{
 		State:        "entry_window_valid",
 		ReasonCode:   "entry_trigger_ready",
@@ -749,7 +752,7 @@ func (e *Engine) evaluateStructureEntryWindow(ctx *decision.Context, signal Chan
 		if signal.Diagnostics.Metrics == nil {
 			signal.Diagnostics.Metrics = map[string]any{}
 		}
-		maxChase := e.Policy.EntryTiming.EntryZone.MaxChaseRatio
+		maxChase := entryZone.MaxChaseRatio
 		if maxChase <= 0 {
 			maxChase = 0.35
 		}
@@ -763,7 +766,7 @@ func (e *Engine) evaluateStructureEntryWindow(ctx *decision.Context, signal Chan
 	}
 	if rr, ok := remainingNetRRForDecision(signal.Direction, currentPrice, signal.StopLoss, signal.TakeProfit, tradingCostPct(ctx)); ok {
 		result.RemainingNetRR = rr
-		minRR := e.Policy.EntryTiming.EntryZone.MinRemainingNetRR
+		minRR := entryZone.MinRemainingNetRR
 		if minRR <= 0 {
 			minRR = e.Policy.SignalFreshness.MinRemainingNetRR
 		}
@@ -779,6 +782,36 @@ func (e *Engine) evaluateStructureEntryWindow(ctx *decision.Context, signal Chan
 		}
 	}
 	return result
+}
+
+func (e *Engine) entryZoneForSymbol(symbol string) decision.ProgrammaticEntryZonePolicy {
+	zone := e.Policy.EntryTiming.EntryZone
+	normalized := market.Normalize(symbol)
+	if override, ok := zone.SymbolOverrides[normalized]; ok {
+		if override.MaxChaseRatio > 0 {
+			zone.MaxChaseRatio = override.MaxChaseRatio
+		}
+		if override.MinRemainingNetRR > 0 {
+			zone.MinRemainingNetRR = override.MinRemainingNetRR
+		}
+	}
+	if zone.MaxChaseRatio <= 0 {
+		zone.MaxChaseRatio = 0.35
+	}
+	if zone.MinRemainingNetRR <= 0 {
+		zone.MinRemainingNetRR = e.Policy.SignalFreshness.MinRemainingNetRR
+	}
+	if zone.MinRemainingNetRR <= 0 {
+		zone.MinRemainingNetRR = e.Policy.TakeProfit.MinNetRR
+	}
+	if zone.MinRemainingNetRR <= 0 {
+		zone.MinRemainingNetRR = 2.5
+	}
+	return zone
+}
+
+func (e *Engine) minRemainingNetRRForSymbol(symbol string) float64 {
+	return e.entryZoneForSymbol(symbol).MinRemainingNetRR
 }
 
 func (e *Engine) applyEntryWindowMetadata(signal *ChanlunSignal, window entryWindowEvaluation) {
@@ -1161,7 +1194,8 @@ func (e *Engine) applyProgrammaticSignalGuard(ctx *decision.Context, signal Chan
 		d.StrategyMetadata["entry_trigger_close_time"] = signal.EntryTriggerClose
 	}
 	d.StrategyMetadata["decision_close_time"] = decisionClose
-	d.StrategyMetadata["min_remaining_net_rr"] = e.Policy.SignalFreshness.MinRemainingNetRR
+	minRemainingNetRR := e.minRemainingNetRRForSymbol(d.Symbol)
+	d.StrategyMetadata["min_remaining_net_rr"] = minRemainingNetRR
 	guardDirection := signal.Direction
 	if guardDirection == "" {
 		guardDirection = directionForAction(d.Action)
@@ -1225,8 +1259,8 @@ func (e *Engine) applyProgrammaticSignalGuard(ctx *decision.Context, signal Chan
 		if d.Explanation != nil {
 			d.Explanation.Details["remaining_net_rr"] = remainingNetRR
 		}
-		if remainingNetRR < e.Policy.SignalFreshness.MinRemainingNetRR {
-			reason := fmt.Sprintf("%s %s 被拒: 剩余净RR %.2f低于阈值%.2f，当前价%.6f 止损%.6f 止盈%.6f", d.Symbol, d.Action, remainingNetRR, e.Policy.SignalFreshness.MinRemainingNetRR, currentPrice, d.StopLoss, d.TakeProfit)
+		if remainingNetRR < minRemainingNetRR {
+			reason := fmt.Sprintf("%s %s 被拒: 剩余净RR %.2f低于阈值%.2f，当前价%.6f 止损%.6f 止盈%.6f", d.Symbol, d.Action, remainingNetRR, minRemainingNetRR, currentPrice, d.StopLoss, d.TakeProfit)
 			return reject("remaining_net_rr_too_low", reason, map[string]any{"remaining_net_rr": remainingNetRR})
 		}
 	}

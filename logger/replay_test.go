@@ -46,6 +46,50 @@ func TestBuildReplayReport_OpenRejectionAndPnL(t *testing.T) {
 	}
 }
 
+func TestBuildOpenRejectionDailyReport(t *testing.T) {
+	now := time.Date(2026, 5, 19, 17, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{{
+		Timestamp:   now,
+		CycleNumber: 7,
+		Decisions: []DecisionAction{{
+			Action:      "open_rejected",
+			Symbol:      "BTCUSDT",
+			Success:     false,
+			Error:       "BTCUSDT open_short 被拒: 剩余净RR 2.30低于阈值2.50，当前价77015.800000 止损77384.600000 止盈76014.200000",
+			GateReasons: []string{"remaining_net_rr_too_low"},
+			GateDiagnostics: map[string]any{
+				"remaining_net_rr": 2.3,
+			},
+			StrategyMetadata: map[string]any{
+				"min_remaining_net_rr": 2.5,
+			},
+			Timestamp: now,
+		}},
+		StrategyDiagnostics: map[string]any{
+			"messages": []any{
+				"BNBUSDT sell2 结构信号不进入开仓: 入场追价比例0.37超过阈值0.35",
+				"ETHUSDT sell2 作为结构背景保留，direct_structure_open关闭，等待15m fresh entry trigger",
+			},
+		},
+	}}
+
+	report := BuildOpenRejectionDailyReport(records, 10)
+	if report.RejectedOpenCount != 1 || report.DiagnosticCount != 2 {
+		t.Fatalf("日报计数错误: %+v", report)
+	}
+	if report.ByReason["remaining_net_rr_too_low"] != 1 || report.ByReason["entry_chase_ratio_too_high"] != 1 ||
+		report.ByReason["structure_background_only"] != 1 {
+		t.Fatalf("reason聚合错误: %+v", report.ByReason)
+	}
+	if report.BySymbol["BTCUSDT"] != 1 || report.BySymbol["BNBUSDT"] != 1 || report.BySymbol["ETHUSDT"] != 1 {
+		t.Fatalf("symbol聚合错误: %+v", report.BySymbol)
+	}
+	if len(report.NearMisses) != 2 || report.NearMisses[0].Metric != "entry_chase_ratio" || report.NearMisses[0].Gap < 0.019 ||
+		report.NearMisses[0].Gap > 0.021 {
+		t.Fatalf("near miss排序/解析错误: %+v", report.NearMisses)
+	}
+}
+
 func TestBuildReplayReport_UsesStructuredSimulationSource(t *testing.T) {
 	now := time.Date(2026, 5, 6, 14, 0, 0, 0, time.UTC)
 	records := []*DecisionRecord{{

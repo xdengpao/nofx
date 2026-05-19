@@ -340,6 +340,7 @@ func TestNormalizeProgrammaticStrategies_ProgrammaticDefaults(t *testing.T) {
 	if !profile.EntryTiming.Enabled || profile.EntryTiming.DirectStructureOpen || !profile.EntryTiming.RequireFreshTrigger ||
 		profile.EntryTiming.DirectOpenMaxAgeCandles != 0 || profile.EntryTiming.TriggerTimeframe != "15m" ||
 		profile.EntryTiming.EntryZone.MinRemainingNetRR != profile.TakeProfit.MinNetRR ||
+		len(profile.EntryTiming.EntryZone.SymbolOverrides) != 0 ||
 		profile.EntryTiming.ContinuationAfterTargetCrossed != "disabled" {
 		t.Fatalf("entry timing默认策略错误: %+v", profile.EntryTiming)
 	}
@@ -391,6 +392,12 @@ func TestNormalizeProgrammaticStrategies_SignalFreshnessPreviewOverridesAndHash(
 		EntryZone: ProgrammaticEntryZoneConfig{
 			MaxChaseRatio:     0.25,
 			MinRemainingNetRR: 3.2,
+			SymbolOverrides: map[string]ProgrammaticEntryZoneOverrideConfig{
+				"btc": {
+					MaxChaseRatio:     0.4,
+					MinRemainingNetRR: 2.2,
+				},
+			},
 		},
 		Pilot: ProgrammaticEntryPilotConfig{
 			Enabled:       true,
@@ -420,8 +427,14 @@ func TestNormalizeProgrammaticStrategies_SignalFreshnessPreviewOverridesAndHash(
 		profile.EntryTiming.ContinuationAfterTargetCrossed != "report_only" {
 		t.Fatalf("entry timing override未生效: %+v", profile.EntryTiming)
 	}
+	if got := profile.EntryTiming.EntryZone.SymbolOverrides["BTCUSDT"]; got.MaxChaseRatio != 0.4 || got.MinRemainingNetRR != 2.2 {
+		t.Fatalf("entry zone symbol override未归一化: %+v", profile.EntryTiming.EntryZone.SymbolOverrides)
+	}
 	firstHash := profile.ConfigHash
-	cfg.Traders[0].ProgrammaticStrategy.EntryTiming.EntryZone.MaxChaseRatio = 0.3
+	cfg.Traders[0].ProgrammaticStrategy.EntryTiming.EntryZone.SymbolOverrides["btc"] = ProgrammaticEntryZoneOverrideConfig{
+		MaxChaseRatio:     0.4,
+		MinRemainingNetRR: 2.3,
+	}
 	profiles, err = cfg.NormalizeProgrammaticStrategies()
 	if err != nil {
 		t.Fatalf("修改entry timing配置后归一化不应失败: %v", err)
@@ -558,6 +571,11 @@ func TestNormalizeProgrammaticStrategies_InvalidValues(t *testing.T) {
 		}},
 		{name: "bad entry chase ratio", mutate: func(t *TraderConfig) {
 			t.ProgrammaticStrategy.EntryTiming.EntryZone.MaxChaseRatio = 2
+		}},
+		{name: "bad entry zone override", mutate: func(t *TraderConfig) {
+			t.ProgrammaticStrategy.EntryTiming.EntryZone.SymbolOverrides = map[string]ProgrammaticEntryZoneOverrideConfig{
+				"BTCUSDT": {MinRemainingNetRR: 0.5},
+			}
 		}},
 		{name: "bad continuation mode", mutate: func(t *TraderConfig) {
 			t.ProgrammaticStrategy.EntryTiming.ContinuationAfterTargetCrossed = "rewrite"

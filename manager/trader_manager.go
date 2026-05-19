@@ -345,6 +345,7 @@ func decisionProgrammaticStrategyPolicy(profile config.ProgrammaticStrategyProfi
 				Mode:              profile.EntryTiming.EntryZone.Mode,
 				MaxChaseRatio:     profile.EntryTiming.EntryZone.MaxChaseRatio,
 				MinRemainingNetRR: profile.EntryTiming.EntryZone.MinRemainingNetRR,
+				SymbolOverrides:   copyEntryZoneOverrides(profile.EntryTiming.EntryZone.SymbolOverrides),
 			},
 			MaxTriggerAgeCandles: profile.EntryTiming.MaxTriggerAgeCandles,
 			MinTriggerConfidence: profile.EntryTiming.MinTriggerConfidence,
@@ -369,6 +370,20 @@ func copyStringIntMap(values map[string]int) map[string]int {
 	out := make(map[string]int, len(values))
 	for key, value := range values {
 		out[key] = value
+	}
+	return out
+}
+
+func copyEntryZoneOverrides(values map[string]config.ProgrammaticEntryZoneOverrideProfile) map[string]decision.ProgrammaticEntryZoneOverridePolicy {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]decision.ProgrammaticEntryZoneOverridePolicy, len(values))
+	for key, value := range values {
+		out[key] = decision.ProgrammaticEntryZoneOverridePolicy{
+			MaxChaseRatio:     value.MaxChaseRatio,
+			MinRemainingNetRR: value.MinRemainingNetRR,
+		}
 	}
 	return out
 }

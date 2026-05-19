@@ -597,6 +597,12 @@ type ProgrammaticEntryZonePolicy struct {
 	Mode              string
 	MaxChaseRatio     float64
 	MinRemainingNetRR float64
+	SymbolOverrides   map[string]ProgrammaticEntryZoneOverridePolicy
+}
+
+type ProgrammaticEntryZoneOverridePolicy struct {
+	MaxChaseRatio     float64
+	MinRemainingNetRR float64
 }
 
 type ProgrammaticEntryPilotPolicy struct {

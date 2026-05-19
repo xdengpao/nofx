@@ -6,7 +6,9 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -47,6 +49,47 @@ type ReplayReport struct {
 	ReportOnlySimulationSymbols   map[string]int              `json:"report_only_simulation_symbols,omitempty"`
 	Notes                         []string                    `json:"notes,omitempty"`
 	RecentOpenRejectionText       []string                    `json:"recent_open_rejection_text,omitempty"`
+}
+
+// OpenRejectionDailyReport 汇总开仓被拒和接近放行的诊断。
+type OpenRejectionDailyReport struct {
+	GeneratedAt       time.Time               `json:"generated_at"`
+	PeriodStart       time.Time               `json:"period_start,omitempty"`
+	PeriodEnd         time.Time               `json:"period_end,omitempty"`
+	RecordCount       int                     `json:"record_count"`
+	RejectedOpenCount int                     `json:"rejected_open_count"`
+	DiagnosticCount   int                     `json:"diagnostic_count"`
+	ByReason          map[string]int          `json:"by_reason"`
+	BySymbol          map[string]int          `json:"by_symbol"`
+	ByBucket          map[string]int          `json:"by_bucket"`
+	NearMisses        []OpenRejectionNearMiss `json:"near_misses,omitempty"`
+	RecentExamples    []OpenRejectionEvent    `json:"recent_examples,omitempty"`
+	Notes             []string                `json:"notes,omitempty"`
+}
+
+// OpenRejectionEvent 是日报里的单条拒绝/阻塞样本。
+type OpenRejectionEvent struct {
+	Timestamp   time.Time `json:"timestamp"`
+	CycleNumber int       `json:"cycle_number,omitempty"`
+	Symbol      string    `json:"symbol,omitempty"`
+	ReasonCode  string    `json:"reason_code"`
+	Bucket      string    `json:"bucket"`
+	Reason      string    `json:"reason"`
+	Source      string    `json:"source"`
+}
+
+// OpenRejectionNearMiss 表示只差少量 RR 或 chase 阈值的候选。
+type OpenRejectionNearMiss struct {
+	Timestamp   time.Time `json:"timestamp"`
+	CycleNumber int       `json:"cycle_number,omitempty"`
+	Symbol      string    `json:"symbol,omitempty"`
+	ReasonCode  string    `json:"reason_code"`
+	Metric      string    `json:"metric"`
+	Value       float64   `json:"value"`
+	Threshold   float64   `json:"threshold"`
+	Gap         float64   `json:"gap"`
+	Reason      string    `json:"reason"`
+	Source      string    `json:"source"`
 }
 
 // StrategyDiseaseReport 汇总策略病因诊断。
@@ -316,6 +359,269 @@ func BuildReplayReport(records []*DecisionRecord, reportOnly bool, dryRun bool) 
 		report.Notes = append(report.Notes, "report-only包含结构化模拟和/或旧日志文本推断；source=text_inferred不等同于实盘模拟")
 	}
 	return report
+}
+
+var (
+	rrNearMissPattern    = regexp.MustCompile(`([A-Z0-9]+USDT).*剩余净RR\s*([0-9]+(?:\.[0-9]+)?)低于阈值([0-9]+(?:\.[0-9]+)?)`)
+	chaseNearMissPattern = regexp.MustCompile(`([A-Z0-9]+USDT).*入场追价比例([0-9]+(?:\.[0-9]+)?)超过阈值([0-9]+(?:\.[0-9]+)?)`)
+	suppressedPattern    = regexp.MustCompile(`已因([a-zA-Z0-9_]+)抑制`)
+)
+
+// BuildOpenRejectionDailyReport 基于已过滤记录生成只读开仓拒绝日报。
+func BuildOpenRejectionDailyReport(records []*DecisionRecord, maxNearMisses int) OpenRejectionDailyReport {
+	if maxNearMisses <= 0 {
+		maxNearMisses = 20
+	}
+	report := OpenRejectionDailyReport{
+		GeneratedAt: time.Now(),
+		RecordCount: len(records),
+		ByReason:    make(map[string]int),
+		BySymbol:    make(map[string]int),
+		ByBucket:    make(map[string]int),
+	}
+	if len(records) == 0 {
+		report.Notes = append(report.Notes, "未发现决策日志，日报为空")
+		return report
+	}
+	report.PeriodStart = records[0].Timestamp
+	report.PeriodEnd = records[len(records)-1].Timestamp
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		for _, action := range record.Decisions {
+			if action.Action != "open_rejected" && !(isOpenAction(action.Action) && isOpenRejection(action)) {
+				continue
+			}
+			report.RejectedOpenCount++
+			reason := actionFailureReason(action)
+			if reason == "" {
+				reason = "unknown"
+			}
+			reasonCode := openRejectionReasonCode(reason, action)
+			event := OpenRejectionEvent{
+				Timestamp:   record.Timestamp,
+				CycleNumber: record.CycleNumber,
+				Symbol:      marketSymbolOrAction(action.Symbol, reason),
+				ReasonCode:  reasonCode,
+				Bucket:      classifyRejectionBucket(reason, action),
+				Reason:      reason,
+				Source:      "decision_action",
+			}
+			addOpenRejectionEvent(&report, event)
+			if !appendNearMissFromText(&report, record, event.Symbol, reasonCode, reason, event.Source) {
+				appendNearMissFromAction(&report, record, action, reasonCode, reason)
+			}
+		}
+		for _, message := range strategyDiagnosticMessages(record) {
+			reasonCode := diagnosticRejectionReasonCode(message)
+			if reasonCode == "" {
+				continue
+			}
+			report.DiagnosticCount++
+			event := OpenRejectionEvent{
+				Timestamp:   record.Timestamp,
+				CycleNumber: record.CycleNumber,
+				Symbol:      marketSymbolOrAction("", message),
+				ReasonCode:  reasonCode,
+				Bucket:      classifyRejectionBucket(reasonCode+" "+message, DecisionAction{}),
+				Reason:      message,
+				Source:      "strategy_diagnostic",
+			}
+			addOpenRejectionEvent(&report, event)
+			appendNearMissFromText(&report, record, event.Symbol, reasonCode, message, event.Source)
+		}
+	}
+	sort.SliceStable(report.NearMisses, func(i, j int) bool {
+		if report.NearMisses[i].Gap == report.NearMisses[j].Gap {
+			return report.NearMisses[i].Timestamp.After(report.NearMisses[j].Timestamp)
+		}
+		return report.NearMisses[i].Gap < report.NearMisses[j].Gap
+	})
+	if len(report.NearMisses) > maxNearMisses {
+		report.NearMisses = report.NearMisses[:maxNearMisses]
+	}
+	if report.RejectedOpenCount == 0 && report.DiagnosticCount == 0 {
+		report.Notes = append(report.Notes, "未发现开仓拒绝或策略阻塞诊断")
+	}
+	return report
+}
+
+func addOpenRejectionEvent(report *OpenRejectionDailyReport, event OpenRejectionEvent) {
+	if report == nil {
+		return
+	}
+	if event.ReasonCode == "" {
+		event.ReasonCode = "unknown"
+	}
+	if event.Bucket == "" {
+		event.Bucket = "other"
+	}
+	if event.Symbol == "" {
+		event.Symbol = "UNKNOWN"
+	}
+	report.ByReason[event.ReasonCode]++
+	report.BySymbol[event.Symbol]++
+	report.ByBucket[event.Bucket]++
+	report.RecentExamples = appendLimitedEvent(report.RecentExamples, event, 20)
+}
+
+func appendLimitedEvent(values []OpenRejectionEvent, event OpenRejectionEvent, max int) []OpenRejectionEvent {
+	if max <= 0 {
+		return values
+	}
+	values = append(values, event)
+	if len(values) > max {
+		return values[len(values)-max:]
+	}
+	return values
+}
+
+func strategyDiagnosticMessages(record *DecisionRecord) []string {
+	if record == nil || len(record.StrategyDiagnostics) == 0 {
+		return nil
+	}
+	raw, ok := record.StrategyDiagnostics["messages"]
+	if !ok {
+		return nil
+	}
+	switch values := raw.(type) {
+	case []string:
+		return append([]string(nil), values...)
+	case []any:
+		out := make([]string, 0, len(values))
+		for _, value := range values {
+			if text := strings.TrimSpace(fmt.Sprint(value)); text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func diagnosticRejectionReasonCode(message string) string {
+	switch {
+	case strings.Contains(message, "入场追价比例"):
+		return "entry_chase_ratio_too_high"
+	case strings.Contains(message, "剩余净RR"):
+		return "remaining_net_rr_too_low"
+	case strings.Contains(message, "direct_structure_open关闭") || strings.Contains(message, "作为结构背景保留"):
+		return "structure_background_only"
+	case strings.Contains(message, "止损/止盈结构不合法") || strings.Contains(message, "结构不合法"):
+		return "invalid_stop_take_profit_structure"
+	case strings.Contains(message, "越过止盈目标") || strings.Contains(message, "target_already_crossed"):
+		return "target_already_crossed"
+	case strings.Contains(message, "signal_expired") || strings.Contains(message, "信号已过期"):
+		return "signal_expired"
+	}
+	if matches := suppressedPattern.FindStringSubmatch(message); len(matches) == 2 {
+		return matches[1]
+	}
+	return ""
+}
+
+func openRejectionReasonCode(reason string, action DecisionAction) string {
+	if len(action.GateReasons) > 0 && strings.TrimSpace(action.GateReasons[0]) != "" {
+		return strings.TrimSpace(action.GateReasons[0])
+	}
+	if action.GateDiagnostics != nil {
+		if code, ok := metadataString(action.GateDiagnostics, "reason_code"); ok && code != "" {
+			return code
+		}
+	}
+	if code := diagnosticRejectionReasonCode(reason); code != "" {
+		return code
+	}
+	return classifyRejectionBucket(reason, action)
+}
+
+func marketSymbolOrAction(symbol, text string) string {
+	symbol = strings.ToUpper(strings.TrimSpace(symbol))
+	if symbol != "" {
+		return symbol
+	}
+	for _, field := range strings.Fields(text) {
+		field = strings.Trim(field, "：:，,;；()[]{}")
+		if strings.HasSuffix(field, "USDT") {
+			return field
+		}
+	}
+	return ""
+}
+
+func appendNearMissFromText(report *OpenRejectionDailyReport, record *DecisionRecord, symbol, reasonCode, reason, source string) bool {
+	if report == nil || record == nil || reason == "" {
+		return false
+	}
+	if matches := rrNearMissPattern.FindStringSubmatch(reason); len(matches) == 4 {
+		value, valueOK := parseReplayFloat(matches[2])
+		threshold, thresholdOK := parseReplayFloat(matches[3])
+		if valueOK && thresholdOK {
+			appendNearMiss(report, record, firstNonEmpty(symbol, matches[1]), reasonCode, "remaining_net_rr", value, threshold, threshold-value, reason, source)
+			return true
+		}
+		return false
+	}
+	if matches := chaseNearMissPattern.FindStringSubmatch(reason); len(matches) == 4 {
+		value, valueOK := parseReplayFloat(matches[2])
+		threshold, thresholdOK := parseReplayFloat(matches[3])
+		if valueOK && thresholdOK {
+			appendNearMiss(report, record, firstNonEmpty(symbol, matches[1]), reasonCode, "entry_chase_ratio", value, threshold, value-threshold, reason, source)
+			return true
+		}
+	}
+	return false
+}
+
+func appendNearMissFromAction(report *OpenRejectionDailyReport, record *DecisionRecord, action DecisionAction, reasonCode, reason string) {
+	if report == nil || record == nil {
+		return
+	}
+	remaining, hasRemaining := metadataFloat(action.GateDiagnostics, "remaining_net_rr")
+	if !hasRemaining {
+		remaining, hasRemaining = metadataFloat(action.StrategyMetadata, "remaining_net_rr")
+	}
+	threshold, hasThreshold := metadataFloat(action.StrategyMetadata, "min_remaining_net_rr")
+	if hasRemaining && hasThreshold {
+		appendNearMiss(report, record, action.Symbol, reasonCode, "remaining_net_rr", remaining, threshold, threshold-remaining, reason, "decision_action")
+	}
+}
+
+func appendNearMiss(report *OpenRejectionDailyReport, record *DecisionRecord, symbol, reasonCode, metric string, value, threshold, gap float64, reason, source string) {
+	if report == nil || record == nil {
+		return
+	}
+	if gap < 0 {
+		gap = -gap
+	}
+	report.NearMisses = append(report.NearMisses, OpenRejectionNearMiss{
+		Timestamp:   record.Timestamp,
+		CycleNumber: record.CycleNumber,
+		Symbol:      marketSymbolOrAction(symbol, reason),
+		ReasonCode:  reasonCode,
+		Metric:      metric,
+		Value:       value,
+		Threshold:   threshold,
+		Gap:         gap,
+		Reason:      reason,
+		Source:      source,
+	})
+}
+
+func parseReplayFloat(value string) (float64, bool) {
+	out, err := strconv.ParseFloat(value, 64)
+	return out, err == nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 const (
