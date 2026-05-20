@@ -557,20 +557,23 @@ func TestProperty33_SortDecisionsByPriority_CloseBeforeOpen(t *testing.T) {
 
 // mockTrader 实现 Trader 接口，用于单元测试
 type mockTrader struct {
-	openLongCalled      bool
-	openShortCalled     bool
-	closeLongCalled     bool
-	closeShortCalled    bool
-	lastSymbol          string
-	lastQuantity        float64
-	lastLeverage        int
-	shouldError         bool
-	stopLossError       bool
-	takeProfitError     bool
-	stopLossCalls       int
-	takeProfitCalls     int
-	lastTakeProfitPrice float64
-	positions           []map[string]interface{}
+	openLongCalled        bool
+	openShortCalled       bool
+	closeLongCalled       bool
+	closeShortCalled      bool
+	lastSymbol            string
+	lastQuantity          float64
+	lastLeverage          int
+	shouldError           bool
+	stopLossError         bool
+	takeProfitError       bool
+	stopLossCalls         int
+	takeProfitCalls       int
+	cancelStopLossCalls   int
+	cancelTakeProfitCalls int
+	cancelStopOrdersCalls int
+	lastTakeProfitPrice   float64
+	positions             []map[string]interface{}
 }
 
 func (m *mockTrader) GetBalance() (map[string]interface{}, error) {
@@ -642,10 +645,19 @@ func (m *mockTrader) SetTakeProfit(symbol, positionSide string, qty, price float
 	}
 	return nil
 }
-func (m *mockTrader) CancelStopOrders(symbol string) error       { return nil }
-func (m *mockTrader) CancelStopLossOrders(symbol string) error   { return nil }
-func (m *mockTrader) CancelTakeProfitOrders(symbol string) error { return nil }
-func (m *mockTrader) CancelAllOrders(symbol string) error        { return nil }
+func (m *mockTrader) CancelStopOrders(symbol string) error {
+	m.cancelStopOrdersCalls++
+	return nil
+}
+func (m *mockTrader) CancelStopLossOrders(symbol string) error {
+	m.cancelStopLossCalls++
+	return nil
+}
+func (m *mockTrader) CancelTakeProfitOrders(symbol string) error {
+	m.cancelTakeProfitCalls++
+	return nil
+}
+func (m *mockTrader) CancelAllOrders(symbol string) error { return nil }
 func (m *mockTrader) FormatQuantity(symbol string, quantity float64) (string, error) {
 	return fmt.Sprintf("%.3f", quantity), nil
 }
@@ -667,6 +679,47 @@ func TestMockTrader_ImplementsInterface(t *testing.T) {
 	if tr == nil {
 		t.Error("mockTrader 应实现 Trader 接口")
 	}
+}
+
+func TestPropertyStopLossTakeProfitCancelPathsSeparated(t *testing.T) {
+	parameters := gopter.DefaultTestParametersWithSeed(42)
+	parameters.MinSuccessfulTests = 30
+	properties := gopter.NewProperties(parameters)
+	properties.Property("Property 3: 止损/止盈调用路径分离", prop.ForAll(
+		func(updateStopLoss bool) bool {
+			previousGetMarketData := getMarketData
+			getMarketData = func(symbol string) (*market.Data, error) {
+				return &market.Data{Symbol: symbol, CurrentPrice: 120}, nil
+			}
+			defer func() { getMarketData = previousGetMarketData }()
+
+			mock := &mockTrader{positions: []map[string]interface{}{{
+				"symbol":      "BTCUSDT",
+				"positionAmt": float64(1),
+				"side":        "LONG",
+				"entryPrice":  float64(100),
+			}}}
+			at := &AutoTrader{id: "property", trader: mock}
+			record := &logger.DecisionAction{}
+			if updateStopLoss {
+				err := at.executeUpdateStopLossWithRecord(&decision.Decision{Symbol: "BTCUSDT", NewStopLoss: 110}, record)
+				return err == nil &&
+					mock.cancelStopLossCalls == 1 &&
+					mock.cancelTakeProfitCalls == 0 &&
+					mock.cancelStopOrdersCalls == 0 &&
+					mock.stopLossCalls == 1 &&
+					mock.takeProfitCalls == 0
+			}
+			err := at.executeUpdateTakeProfitWithRecord(&decision.Decision{Symbol: "BTCUSDT", NewTakeProfit: 140}, record)
+			return err == nil &&
+				mock.cancelTakeProfitCalls == 1 &&
+				mock.cancelStopLossCalls == 0 &&
+				mock.cancelStopOrdersCalls == 0 &&
+				mock.takeProfitCalls == 1
+		},
+		gen.Bool(),
+	))
+	properties.TestingRun(t)
 }
 
 func TestNewAutoTrader_ProgrammaticDoesNotInitializeAIClient(t *testing.T) {

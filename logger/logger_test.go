@@ -265,6 +265,52 @@ func TestBuildTradeReplay_PartialCloseMissingSideIsUnmatched(t *testing.T) {
 	}
 }
 
+func TestPropertyReplayRebuildsCompletePositionLifecycle(t *testing.T) {
+	parameters := gopter.DefaultTestParametersWithSeed(42)
+	parameters.MinSuccessfulTests = 30
+	properties := gopter.NewProperties(parameters)
+	properties.Property("Property 5: Replay 可完整重建 Position_Lifecycle", prop.ForAll(
+		func(lifecycleCount int, shortSide bool) bool {
+			baseTime := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+			side := "long"
+			openAction := "open_long"
+			addAction := "add_long"
+			closeAction := "close_long"
+			partialPrice := 110.0
+			closePrice := 120.0
+			if shortSide {
+				side = "short"
+				openAction = "open_short"
+				addAction = "add_short"
+				closeAction = "close_short"
+				partialPrice = 90
+				closePrice = 80
+			}
+			var records []*DecisionRecord
+			for i := 0; i < lifecycleCount; i++ {
+				symbol := "BTCUSDT"
+				if i%2 == 1 {
+					symbol = "ETHUSDT"
+				}
+				start := baseTime.Add(time.Duration(i) * 10 * time.Minute)
+				records = append(records,
+					&DecisionRecord{Timestamp: start, Decisions: []DecisionAction{{Action: openAction, Symbol: symbol, Quantity: 1, Leverage: 5, Price: 100, Timestamp: start, Success: true}}},
+					&DecisionRecord{Timestamp: start.Add(time.Minute), Decisions: []DecisionAction{{Action: addAction, Symbol: symbol, Quantity: 1, Leverage: 5, Price: 100, Timestamp: start.Add(time.Minute), Success: true}}},
+					&DecisionRecord{Timestamp: start.Add(2 * time.Minute), Decisions: []DecisionAction{{Action: "partial_close", Symbol: symbol, Quantity: 1, CloseQuantity: 1, Price: partialPrice, Timestamp: start.Add(2 * time.Minute), Success: true, StrategyMetadata: map[string]any{"side": side}}}},
+					&DecisionRecord{Timestamp: start.Add(3 * time.Minute), Decisions: []DecisionAction{{Action: closeAction, Symbol: symbol, Price: closePrice, Timestamp: start.Add(3 * time.Minute), Success: true}}},
+				)
+			}
+			replay := BuildTradeReplay(records)
+			return len(replay.Unmatched) == 0 &&
+				len(replay.FullOutcomes) == lifecycleCount &&
+				len(replay.Events) == lifecycleCount*2
+		},
+		gen.IntRange(1, 12),
+		gen.Bool(),
+	))
+	properties.TestingRun(t)
+}
+
 func mathAbs(value float64) float64 {
 	if value < 0 {
 		return -value

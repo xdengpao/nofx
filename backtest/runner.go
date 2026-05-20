@@ -2,11 +2,14 @@ package backtest
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -80,7 +83,7 @@ func (r *Runner) Run(ctx context.Context) (RunResult, error) {
 	snapshotData, _ := json.MarshalIndent(snapshot, "", "  ")
 	_ = os.WriteFile(filepath.Join(runDir, "config_snapshot.json"), snapshotData, 0644)
 
-	broker := NewPaperBroker(r.Config.InitialEquity, r.Config.Costs, r.Config.Execution)
+	broker := NewPaperBrokerWithExchange(r.Config.InitialEquity, r.Config.Costs, r.Config.Execution, r.Config.Exchange)
 	provider := &HistoricalMarketDataProvider{
 		Store:  r.Store,
 		Source: r.Config.Source,
@@ -162,7 +165,7 @@ func (r *Runner) Run(ctx context.Context) (RunResult, error) {
 			DrawdownPct:   drawdown,
 		})
 		r.Progress.Executions = len(broker.Executions)
-		r.Progress.Rejections = len(rejections)
+		r.Progress.Rejections = len(rejections) + len(broker.OpenRejections)
 		r.Progress.Signals = countMarkers(markers)
 		r.Progress.CompletedPercent = current.Sub(r.Config.BacktestFromTime()).Seconds() / r.Config.BacktestToTime().Sub(r.Config.BacktestFromTime()).Seconds() * 100
 	}
@@ -176,12 +179,26 @@ func (r *Runner) Run(ctx context.Context) (RunResult, error) {
 	for _, lifecycle := range broker.Lifecycles {
 		trades = append(trades, *lifecycle)
 	}
+	sort.Slice(trades, func(i, j int) bool {
+		return trades[i].LifecycleID < trades[j].LifecycleID
+	})
 	signals := signalOutcomesFromMarkers(markers)
+	dataHash, dataHashes, err := r.buildRunDataHashes(ctx)
+	if err != nil {
+		return RunResult{}, err
+	}
+	allRejections := append([]decision.OpenRejection{}, rejections...)
+	allRejections = append(allRejections, broker.OpenRejections...)
+	structures := BuildStructureSnapshots("backtest", r.Config.Exchange, markers)
 	report := Report{
 		RunID:                    runID,
 		GeneratedAt:              time.Now().UTC(),
 		GitCommit:                gitCommit(),
 		ConfigHash:               r.Config.ConfigHash(),
+		DataHash:                 dataHash,
+		DataHashes:               dataHashes,
+		TraderID:                 "backtest",
+		Exchange:                 r.Config.Exchange,
 		Timezone:                 r.Config.Timezone,
 		WarmupFrom:               r.Config.WarmupFromTime(),
 		BacktestFrom:             r.Config.BacktestFromTime(),
@@ -199,12 +216,19 @@ func (r *Runner) Run(ctx context.Context) (RunResult, error) {
 			"liquidation_mode=not_modelled",
 			"market orders fill at next available 3m open",
 		},
-		ConfigSnapshot:   snapshot,
-		Summary:          BuildSummary(r.Config.InitialEquity, broker.Account, trades, broker.Executions, signals, rejections, equity),
-		BySymbol:         buildSymbolStats(trades),
-		BySignalType:     buildSignalStats(signals),
-		RejectionBuckets: buildRejectionBuckets(rejections),
-		Cancelled:        r.Progress.Status == "cancelled",
+		ConfigSnapshot:     snapshot,
+		Summary:            BuildSummary(r.Config.InitialEquity, broker.Account, trades, broker.Executions, signals, allRejections, equity),
+		BySymbol:           buildSymbolStats(trades),
+		BySignalType:       buildSignalStats(signals),
+		BySide:             BuildBucketStats(trades, func(t TradeLifecycle) string { return t.Side }),
+		ByMarketState:      BuildBucketStats(trades, func(TradeLifecycle) string { return "unknown" }),
+		ByATRProfile:       BuildBucketStats(trades, func(TradeLifecycle) string { return "unknown" }),
+		ByADXRange:         BuildBucketStats(trades, func(TradeLifecycle) string { return "unknown" }),
+		BySymbolCategory:   BuildBucketStats(trades, func(t TradeLifecycle) string { return SymbolCategory(t.Symbol) }),
+		RejectionBuckets:   buildRejectionBuckets(allRejections),
+		MinNotionalRejects: CountMinNotionalRejects(allRejections),
+		Files:              ArtifactFiles(),
+		Cancelled:          r.Progress.Status == "cancelled",
 	}
 	if r.Progress.Status == "running" {
 		r.Progress.Status = "completed"
@@ -214,9 +238,10 @@ func (r *Runner) Run(ctx context.Context) (RunResult, error) {
 		Trades:     trades,
 		Executions: broker.Executions,
 		Signals:    signals,
-		Rejections: rejections,
+		Rejections: allRejections,
 		Equity:     equity,
 		Markers:    markers,
+		Structures: structures,
 	}
 	if err := WriteArtifacts(runDir, artifacts); err != nil {
 		return RunResult{}, err
@@ -244,7 +269,7 @@ func (r *Runner) buildDecisionContext(broker *PaperBroker, now time.Time) *decis
 	return &decision.Context{
 		CurrentTime:              now.Format("2006-01-02 15:04:05"),
 		TraderID:                 "backtest",
-		Exchange:                 "backtest",
+		Exchange:                 r.Config.Exchange,
 		RuntimeMinutes:           int(now.Sub(r.Config.BacktestFromTime()).Minutes()),
 		Account:                  broker.AccountInfo(),
 		Positions:                broker.DecisionPositions(now),
@@ -261,6 +286,36 @@ func (r *Runner) buildDecisionContext(broker *PaperBroker, now time.Time) *decis
 		FrequencyState:           &decision.FrequencyState{},
 		StrategyRiskPolicy:       &decision.StrategyRiskPolicy{Legacy: true, RollbackLegacyValidation: true, FeeSlippagePct: 0.002, DefaultMinNetRR: 2.5, ADXTimeframe: "1h"},
 	}
+}
+
+func (r *Runner) buildRunDataHashes(ctx context.Context) (string, map[string]string, error) {
+	hashes := map[string]string{}
+	for _, symbol := range r.Config.Symbols {
+		for _, timeframe := range RequiredTimeframes() {
+			hash, err := r.Store.DataHash(ctx, r.Config.Source, symbol, timeframe, r.Config.WarmupFromTime(), r.Config.BacktestToTime())
+			if err != nil {
+				return "", nil, err
+			}
+			key := fmt.Sprintf("%s|%s|%s|%s|%s",
+				r.Config.Source,
+				symbol,
+				timeframe,
+				r.Config.WarmupFromTime().UTC().Format(time.RFC3339),
+				r.Config.BacktestToTime().UTC().Format(time.RFC3339),
+			)
+			hashes[key] = hash
+		}
+	}
+	keys := make([]string, 0, len(hashes))
+	for key := range hashes {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	h := sha256.New()
+	for _, key := range keys {
+		_, _ = fmt.Fprintf(h, "%s=%s\n", key, hashes[key])
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16], hashes, nil
 }
 
 func countMarkers(markers map[string][]chanlun.SignalMarker) int {

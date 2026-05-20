@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,6 +66,23 @@ func TestPaperBrokerOpenPartialCloseAndFullClose(t *testing.T) {
 	}
 }
 
+func TestPaperBrokerUsesPreflightForMinNotional(t *testing.T) {
+	broker := NewPaperBrokerWithExchange(1000, CostConfig{}, ExecutionConfig{}, "binance")
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	open := decision.Decision{Symbol: "BTCUSDT", Action: "open_long", Leverage: 5, PositionSizeUSD: 20, StopLoss: 95, TakeProfit: 120, Reasoning: "too small"}
+	broker.SubmitDecision(open, now)
+	broker.ProcessBar("BTCUSDT", market.Kline{Open: 100, High: 101, Low: 99, Close: 100, CloseTime: now.UnixMilli()}, now)
+	if len(broker.Positions) != 0 {
+		t.Fatalf("低于Binance BTCUSDT最小名义额的开仓应被拒绝")
+	}
+	if len(broker.OpenRejections) != 1 {
+		t.Fatalf("preflight拒绝应进入OpenRejections，got %d", len(broker.OpenRejections))
+	}
+	if !strings.Contains(broker.OpenRejections[0].Reason, "名义额") {
+		t.Fatalf("拒绝原因应包含名义额: %s", broker.OpenRejections[0].Reason)
+	}
+}
+
 func TestRunnerGeneratesReportFiles(t *testing.T) {
 	store := openBacktestStore(t)
 	defer store.Close()
@@ -88,7 +106,7 @@ func TestRunnerGeneratesReportFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runner执行失败: %v", err)
 	}
-	for _, file := range []string{"report.json", "trades.csv", "equity.csv", "signals.csv", "rejections.csv"} {
+	for _, file := range []string{"report.json", "trades.csv", "equity.csv", "signals.csv", "rejections.csv", "structures.json", "metrics.json"} {
 		if result.OutputDir == "" {
 			t.Fatal("缺少输出目录")
 		}
@@ -98,6 +116,15 @@ func TestRunnerGeneratesReportFiles(t *testing.T) {
 	}
 	if result.Report.FundingMode != "disabled" || result.Report.LiquidationMode != "not_modelled" {
 		t.Fatalf("报告应记录v1假设")
+	}
+	if result.Report.DataHash == "" || len(result.Report.DataHashes) == 0 {
+		t.Fatalf("报告应记录共同data_hash和分项hash")
+	}
+	if result.Report.Exchange != "binance" || result.Report.TraderID != "backtest" {
+		t.Fatalf("报告应记录trader/exchange上下文: %+v", result.Report)
+	}
+	if _, ok := result.Report.Files["metrics"]; !ok {
+		t.Fatalf("报告files应包含metrics: %+v", result.Report.Files)
 	}
 }
 

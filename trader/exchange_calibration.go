@@ -3,6 +3,10 @@ package trader
 import "strings"
 
 func calibratedExchangeMinNotionalUSDT(exchange, symbol string) float64 {
+	return CalibratedExchangeMinNotionalUSDT(exchange, symbol)
+}
+
+func CalibratedExchangeMinNotionalUSDT(exchange, symbol string) float64 {
 	exchange = strings.ToLower(strings.TrimSpace(exchange))
 	symbol = strings.ToUpper(strings.TrimSpace(symbol))
 	switch exchange {
@@ -23,11 +27,19 @@ func calibratedExchangeMinNotionalUSDT(exchange, symbol string) float64 {
 }
 
 func calibratedOpenMinOrderValueUSDT(exchange, symbol string) float64 {
-	return maxFloat(minPreflightOrderValueUSDT, calibratedExchangeMinNotionalUSDT(exchange, symbol))
+	return CalibratedOpenMinOrderValueUSDT(exchange, symbol)
+}
+
+func CalibratedOpenMinOrderValueUSDT(exchange, symbol string) float64 {
+	return maxFloat(minPreflightOrderValueUSDT, CalibratedExchangeMinNotionalUSDT(exchange, symbol))
 }
 
 func calibratedPartialCloseMinValueUSDT(exchange, symbol string) float64 {
-	return maxFloat(minPartialCloseOrderValueUSDT, calibratedExchangeMinNotionalUSDT(exchange, symbol))
+	return CalibratedPartialCloseMinValueUSDT(exchange, symbol)
+}
+
+func CalibratedPartialCloseMinValueUSDT(exchange, symbol string) float64 {
+	return maxFloat(minPartialCloseOrderValueUSDT, CalibratedExchangeMinNotionalUSDT(exchange, symbol))
 }
 
 func maxFloat(a, b float64) float64 {

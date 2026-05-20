@@ -42,6 +42,7 @@ type BacktestConfig struct {
 	HistoryDB           string          `json:"history_db,omitempty"`
 	OutputDir           string          `json:"output_dir,omitempty"`
 	Source              string          `json:"source,omitempty"`
+	Exchange            string          `json:"exchange,omitempty"`
 	Symbols             []string        `json:"symbols,omitempty"`
 	InitialEquity       float64         `json:"initial_equity,omitempty"`
 	ScanIntervalMinutes int             `json:"scan_interval_minutes,omitempty"`
@@ -158,6 +159,9 @@ func (c *BacktestConfig) NormalizeAndValidate() error {
 	}
 	if strings.TrimSpace(c.Source) == "" {
 		c.Source = DefaultSource
+	}
+	if strings.TrimSpace(c.Exchange) == "" {
+		c.Exchange = defaultExchangeForSource(c.Source)
 	}
 	if c.InitialEquity <= 0 {
 		c.InitialEquity = DefaultInitialEquity
@@ -561,6 +565,7 @@ func (c *BacktestConfig) sanitizedSnapshot() map[string]any {
 		"history_db":            sanitizePath(c.HistoryDB),
 		"output_dir":            sanitizePath(c.OutputDir),
 		"source":                c.Source,
+		"exchange":              c.Exchange,
 		"symbols":               append([]string(nil), c.Symbols...),
 		"initial_equity":        c.InitialEquity,
 		"scan_interval_minutes": c.ScanIntervalMinutes,
@@ -593,6 +598,19 @@ func sanitizePath(path string) string {
 		return "[redacted]"
 	}
 	return path
+}
+
+func defaultExchangeForSource(source string) string {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "", "binance", "binance-futures":
+		return "binance"
+	case "aster", "aster-dex":
+		return "aster"
+	case "hyperliquid":
+		return "hyperliquid"
+	default:
+		return strings.ToLower(strings.TrimSpace(source))
+	}
 }
 
 func hashConfigSnapshot(snapshot map[string]any) (string, error) {

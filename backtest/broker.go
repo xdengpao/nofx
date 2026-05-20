@@ -8,6 +8,7 @@ import (
 
 	"nofx/decision"
 	"nofx/market"
+	"nofx/trader"
 )
 
 type PaperAccount struct {
@@ -46,16 +47,22 @@ type PendingOrder struct {
 }
 
 type PaperBroker struct {
-	Account    PaperAccount
-	Positions  map[string]*PaperPosition
-	Pending    []PendingOrder
-	Executions []ExecutionEvent
-	Lifecycles map[string]*TradeLifecycle
-	Costs      CostConfig
-	Execution  ExecutionConfig
+	Account        PaperAccount
+	Positions      map[string]*PaperPosition
+	Pending        []PendingOrder
+	Executions     []ExecutionEvent
+	Lifecycles     map[string]*TradeLifecycle
+	Costs          CostConfig
+	Execution      ExecutionConfig
+	Exchange       string
+	OpenRejections []decision.OpenRejection
 }
 
 func NewPaperBroker(initialEquity float64, costs CostConfig, execution ExecutionConfig) *PaperBroker {
+	return NewPaperBrokerWithExchange(initialEquity, costs, execution, "backtest")
+}
+
+func NewPaperBrokerWithExchange(initialEquity float64, costs CostConfig, execution ExecutionConfig, exchange string) *PaperBroker {
 	return &PaperBroker{
 		Account: PaperAccount{
 			InitialEquity: initialEquity,
@@ -66,6 +73,7 @@ func NewPaperBroker(initialEquity float64, costs CostConfig, execution Execution
 		Lifecycles: map[string]*TradeLifecycle{},
 		Costs:      normalizeCostConfig(costs),
 		Execution:  normalizeExecutionConfig(execution),
+		Exchange:   exchange,
 	}
 }
 
@@ -94,6 +102,9 @@ func (b *PaperBroker) fillPending(symbol string, bar market.Kline, now time.Time
 		}
 		if err := b.executeDecision(d, bar.Open, now, "strategy"); err != nil {
 			b.Executions = append(b.Executions, executionFromDecision(d, now, "rejected", 0, 0, 0, err.Error()))
+			if isRiskIncreaseAction(d.Action) {
+				b.OpenRejections = append(b.OpenRejections, decision.NewOpenRejectionFromDecision(d, err.Error()))
+			}
 		}
 	}
 	b.Pending = remaining
@@ -133,6 +144,9 @@ func (b *PaperBroker) openPosition(d decision.Decision, side string, rawPrice fl
 	}
 	price := b.slippedPrice(side, "entry", rawPrice)
 	qty := notional / price
+	if result := b.evaluatePreflight(d, side, qty, price, leverage, "open"); !result.Allowed {
+		return fmt.Errorf("preflight失败: %s", strings.Join(result.Reasons, "; "))
+	}
 	fee := b.fee(notional)
 	margin := notional / float64(leverage)
 	if b.Account.Cash-margin-fee < -1e-9 {
@@ -171,6 +185,8 @@ func (b *PaperBroker) openPosition(d decision.Decision, side string, rawPrice fl
 		EntryReason: d.Reasoning,
 		SignalID:    d.SignalID,
 		SignalType:  d.SignalType,
+		MFE:         0,
+		MAE:         0,
 	}
 	b.Executions = append(b.Executions, executionFromDecision(d, now, "filled", price, qty, fee, "open"))
 	b.recomputeAccount()
@@ -191,6 +207,13 @@ func (b *PaperBroker) addPosition(d decision.Decision, side string, rawPrice flo
 	}
 	price := b.slippedPrice(side, "entry", rawPrice)
 	qty := notional / price
+	leverage := d.Leverage
+	if leverage <= 0 {
+		leverage = pos.Leverage
+	}
+	if result := b.evaluatePreflight(d, side, qty, price, leverage, "add"); !result.Allowed {
+		return fmt.Errorf("preflight失败: %s", strings.Join(result.Reasons, "; "))
+	}
 	fee := b.fee(notional)
 	newQty := pos.Quantity + qty
 	pos.AverageEntry = (pos.AverageEntry*pos.Quantity + price*qty) / newQty
@@ -228,6 +251,12 @@ func (b *PaperBroker) closePosition(d decision.Decision, rawPrice float64, now t
 	}
 	price := b.slippedPrice(pos.Side, "exit", rawPrice)
 	notional := qty * price
+	if !full {
+		minPartialCloseValue := trader.CalibratedPartialCloseMinValueUSDT(b.Exchange, d.Symbol)
+		if notional < minPartialCloseValue {
+			return fmt.Errorf("部分平仓名义额 %.4f USDT 低于最小值 %.2f USDT", notional, minPartialCloseValue)
+		}
+	}
 	fee := b.fee(notional)
 	pnl := pnlFor(pos.Side, pos.AverageEntry, price, qty)
 	b.Account.Cash += pnl - fee
@@ -240,11 +269,18 @@ func (b *PaperBroker) closePosition(d decision.Decision, rawPrice float64, now t
 		lifecycle.ExitReason = d.Reasoning
 		lifecycle.RealizedPnL += pnl
 		lifecycle.ExecutionCount++
+		if pos.InitialRisk > 0 && qty > 0 {
+			lifecycle.RMultiple = lifecycle.RealizedPnL / (pos.InitialRisk * qty)
+			lifecycle.FinalRMultiple = lifecycle.RMultiple
+		}
 		if pos.Quantity <= 1e-12 {
 			lifecycle.ExitTime = now
 			lifecycle.ExitPrice = price
 			lifecycle.Closed = true
 			lifecycle.DurationMinutes = now.Sub(lifecycle.EntryTime).Minutes()
+			if lifecycle.RealizedPnL >= 0 {
+				lifecycle.RecoveryMinutes = lifecycle.DurationMinutes
+			}
 		}
 	}
 	status := "filled"
@@ -316,7 +352,63 @@ func (b *PaperBroker) MarkToMarket(symbol string, price float64, _ time.Time) {
 	if price < pos.TroughPrice || pos.TroughPrice == 0 {
 		pos.TroughPrice = price
 	}
+	b.updateLifecycleExcursions(pos, price)
 	b.recomputeAccount()
+}
+
+func (b *PaperBroker) evaluatePreflight(d decision.Decision, side string, quantity float64, price float64, leverage int, intent string) trader.ExecutionPreflightResult {
+	return trader.EvaluateExecutionPreflight(trader.ExecutionPreflightInput{
+		Symbol:        market.Normalize(d.Symbol),
+		Side:          side,
+		Quantity:      quantity,
+		Price:         price,
+		Leverage:      leverage,
+		MinOrderValue: trader.CalibratedOpenMinOrderValueUSDT(b.Exchange, d.Symbol),
+		Positions:     b.preflightPositions(),
+		Intent:        intent,
+	})
+}
+
+func (b *PaperBroker) preflightPositions() []map[string]interface{} {
+	positions := make([]map[string]interface{}, 0, len(b.Positions))
+	for _, pos := range b.Positions {
+		amount := pos.Quantity
+		if pos.Side == "short" {
+			amount = -amount
+		}
+		positions = append(positions, map[string]interface{}{
+			"symbol":      pos.Symbol,
+			"side":        pos.Side,
+			"positionAmt": amount,
+		})
+	}
+	return positions
+}
+
+func (b *PaperBroker) updateLifecycleExcursions(pos *PaperPosition, price float64) {
+	if pos == nil || pos.InitialRisk <= 0 {
+		return
+	}
+	lifecycle := b.Lifecycles[pos.LifecycleID]
+	if lifecycle == nil {
+		return
+	}
+	favorable := 0.0
+	adverse := 0.0
+	if pos.Side == "short" {
+		favorable = pos.AverageEntry - price
+		adverse = price - pos.AverageEntry
+	} else {
+		favorable = price - pos.AverageEntry
+		adverse = pos.AverageEntry - price
+	}
+	if favorable > 0 {
+		lifecycle.MFE = math.Max(lifecycle.MFE, favorable/pos.InitialRisk)
+	}
+	if adverse > 0 {
+		lifecycle.MAE = math.Max(lifecycle.MAE, adverse/pos.InitialRisk)
+		lifecycle.MaxDrawdownPct = math.Max(lifecycle.MaxDrawdownPct, adverse/pos.AverageEntry*100)
+	}
 }
 
 func (b *PaperBroker) DecisionPositions(now time.Time) []decision.PositionInfo {
@@ -403,6 +495,10 @@ func closeAction(side string) string {
 		return "close_short"
 	}
 	return "close_long"
+}
+
+func isRiskIncreaseAction(action string) bool {
+	return action == "open_long" || action == "open_short" || action == "add_long" || action == "add_short"
 }
 
 func effectiveStopLoss(d decision.Decision) float64 {
