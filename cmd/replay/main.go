@@ -14,6 +14,7 @@ func main() {
 	output := flag.String("output", "", "optional output JSON path")
 	reportOnly := flag.Bool("report-only", true, "calculate gate effects without changing live trading behavior")
 	dryRun := flag.Bool("dry-run", true, "mark report as dry-run/paper analysis")
+	defectFixPack := flag.Bool("defect-fix-pack", false, "annotate replay as chanlun defect fix pack analysis")
 	openRejectionDaily := flag.Bool("open-rejection-daily", false, "output read-only daily open rejection report instead of full replay report")
 	nearMissLimit := flag.Int("near-miss-limit", 20, "maximum near-miss candidates in open rejection daily report")
 	includeBackups := flag.Bool("include-backups", false, "include .bak/backup decision log directories")
@@ -49,6 +50,9 @@ func main() {
 		return
 	}
 	report := logger.BuildReplayReport(records, *reportOnly, *dryRun)
+	if *defectFixPack {
+		report.Notes = append(report.Notes, "defect_fix_pack=true: 本报告用于程序化缠论缺陷修复包的离线验收")
+	}
 	if *exchangeCloseJSON != "" {
 		data, err := os.ReadFile(*exchangeCloseJSON)
 		if err != nil {

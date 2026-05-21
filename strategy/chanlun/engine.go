@@ -18,9 +18,12 @@ type Engine struct {
 	MarketDataProvider func(symbol string, opts decision.CyclePreparationOptions) (*market.Data, error)
 	DisableOITopFetch  bool
 
-	mu             sync.RWMutex
-	latestSignals  map[string]*SignalReport
-	symbolUniverse map[string][]StrategySymbol
+	mu               sync.RWMutex
+	latestSignals    map[string]*SignalReport
+	symbolUniverse   map[string][]StrategySymbol
+	activeMode       string
+	loosenMinRRDelta float64
+	loosenChaseBump  float64
 }
 
 func NewEngine(policy decision.ProgrammaticStrategyPolicy) (*Engine, error) {
@@ -46,8 +49,8 @@ func NewEngine(policy decision.ProgrammaticStrategyPolicy) (*Engine, error) {
 		policy.PositionManagement = defaultPositionManagementPolicy(policy.Position.PartialClosePct)
 	}
 	policy.SignalFreshness = normalizeRuntimeSignalFreshness(policy.SignalFreshness, policy.TakeProfit.MinNetRR)
-	policy.PreviewSignals = normalizeRuntimePreviewSignals(policy.PreviewSignals, policy.Timeframes)
-	policy.EntryTiming = normalizeRuntimeEntryTiming(policy.EntryTiming, policy.Timeframes, policy.TakeProfit.MinNetRR)
+	policy.PreviewSignals = normalizeRuntimePreviewSignals(policy.PreviewSignals, policy.Timeframes, policy.DefectFixPackEnabled)
+	policy.EntryTiming = normalizeRuntimeEntryTiming(policy.EntryTiming, policy.Timeframes, policy.TakeProfit.MinNetRR, policy.DefectFixPackEnabled)
 	engine := &Engine{
 		Policy:         policy,
 		StateStore:     NewStateStore(policy.State.Path),
@@ -106,7 +109,7 @@ func normalizeRuntimeSignalFreshness(policy decision.ProgrammaticSignalFreshness
 	return policy
 }
 
-func normalizeRuntimePreviewSignals(policy decision.ProgrammaticPreviewSignalsPolicy, timeframes decision.ProgrammaticTimeframesPolicy) decision.ProgrammaticPreviewSignalsPolicy {
+func normalizeRuntimePreviewSignals(policy decision.ProgrammaticPreviewSignalsPolicy, timeframes decision.ProgrammaticTimeframesPolicy, defectFixPackEnabled bool) decision.ProgrammaticPreviewSignalsPolicy {
 	uninitialized := policy.ComponentTimeframe == "" && policy.TradeTimeframe == "" &&
 		policy.WatchAfterClosedComponents == 0 && policy.PilotAfterClosedComponents == 0 &&
 		policy.PilotRiskFraction == 0 && policy.PilotMinConfidence == 0 &&
@@ -133,16 +136,27 @@ func normalizeRuntimePreviewSignals(policy decision.ProgrammaticPreviewSignalsPo
 		policy.PilotRiskFraction = 0.3
 	}
 	if policy.PilotMinConfidence <= 0 {
-		policy.PilotMinConfidence = 90
+		if defectFixPackEnabled {
+			policy.PilotMinConfidence = 70
+		} else {
+			policy.PilotMinConfidence = 90
+		}
+	}
+	if policy.P75Floor <= 0 {
+		policy.P75Floor = 65
+	}
+	if policy.P75Ceiling <= 0 {
+		policy.P75Ceiling = 85
 	}
 	if uninitialized {
 		policy.Enabled = true
 		policy.RequireConfirmedUpgrade = true
+		policy.PilotMinConfidenceUseP75 = defectFixPackEnabled
 	}
 	return policy
 }
 
-func normalizeRuntimeEntryTiming(policy decision.ProgrammaticEntryTimingPolicy, timeframes decision.ProgrammaticTimeframesPolicy, fallbackMinRR float64) decision.ProgrammaticEntryTimingPolicy {
+func normalizeRuntimeEntryTiming(policy decision.ProgrammaticEntryTimingPolicy, timeframes decision.ProgrammaticTimeframesPolicy, fallbackMinRR float64, defectFixPackEnabled bool) decision.ProgrammaticEntryTimingPolicy {
 	uninitialized := !policy.Enabled && !policy.DirectStructureOpen && policy.DirectOpenMaxAgeCandles == 0 &&
 		!policy.RequireFreshTrigger && policy.TriggerTimeframe == "" && len(policy.AllowedTriggerTypes) == 0 &&
 		policy.EntryZone.Mode == "" && policy.EntryZone.MaxChaseRatio == 0 && policy.EntryZone.MinRemainingNetRR == 0 &&
@@ -153,6 +167,10 @@ func normalizeRuntimeEntryTiming(policy decision.ProgrammaticEntryTimingPolicy, 
 	if uninitialized {
 		policy.Enabled = true
 		policy.RequireFreshTrigger = true
+		policy.DirectStructureOpen = defectFixPackEnabled
+	}
+	if policy.DirectStructureMinConfidence <= 0 {
+		policy.DirectStructureMinConfidence = 70
 	}
 	if policy.TriggerTimeframe == "" {
 		policy.TriggerTimeframe = timeframes.Sub
@@ -170,19 +188,43 @@ func normalizeRuntimeEntryTiming(policy decision.ProgrammaticEntryTimingPolicy, 
 		policy.EntryZone.MaxChaseRatio = 0.35
 	}
 	if policy.EntryZone.MinRemainingNetRR <= 0 {
-		policy.EntryZone.MinRemainingNetRR = fallbackMinRR
+		if defectFixPackEnabled {
+			policy.EntryZone.MinRemainingNetRR = 2.0
+		} else {
+			policy.EntryZone.MinRemainingNetRR = fallbackMinRR
+		}
 	}
 	if policy.EntryZone.MinRemainingNetRR <= 0 {
 		policy.EntryZone.MinRemainingNetRR = 2.5
 	}
+	if policy.EntryZone.MaxChaseATRMultiplier <= 0 {
+		policy.EntryZone.MaxChaseATRMultiplier = 0.6
+	}
+	if policy.EntryZone.FreshAgeChaseRelax <= 0 {
+		policy.EntryZone.FreshAgeChaseRelax = 0.10
+	}
+	if policy.EntryZone.SignalTypeMinRR == nil {
+		policy.EntryZone.SignalTypeMinRR = map[string]float64{}
+	}
+	if defectFixPackEnabled && len(policy.EntryZone.SignalTypeMinRR) == 0 {
+		policy.EntryZone.SignalTypeMinRR = defaultRuntimeSignalTypeMinRR()
+		policy.EntryZone.TheoreticalRRUnreachableSkip = true
+	}
 	if policy.MaxTriggerAgeCandles <= 0 {
 		policy.MaxTriggerAgeCandles = 1
+	}
+	if policy.MaxNoTriggerSubCandles <= 0 {
+		policy.MaxNoTriggerSubCandles = 3
 	}
 	if policy.Pilot.RiskFraction <= 0 {
 		policy.Pilot.RiskFraction = 0.3
 	}
 	if policy.Pilot.MinConfidence <= 0 {
-		policy.Pilot.MinConfidence = 90
+		if defectFixPackEnabled {
+			policy.Pilot.MinConfidence = 70
+		} else {
+			policy.Pilot.MinConfidence = 90
+		}
 	}
 	if policy.ContinuationAfterTargetCrossed == "" {
 		policy.ContinuationAfterTargetCrossed = "disabled"
@@ -190,11 +232,51 @@ func normalizeRuntimeEntryTiming(policy decision.ProgrammaticEntryTimingPolicy, 
 	return policy
 }
 
+func defaultRuntimeSignalTypeMinRR() map[string]float64 {
+	return map[string]float64{
+		"buy1@1h":  2.0,
+		"sell1@1h": 2.0,
+		"buy2@1h":  1.6,
+		"sell2@1h": 1.6,
+		"buy3@1h":  1.4,
+		"sell3@1h": 1.4,
+		"buy1":     2.0,
+		"sell1":    2.0,
+		"buy2":     1.6,
+		"sell2":    1.6,
+		"buy3":     1.4,
+		"sell3":    1.4,
+	}
+}
+
 func maxInt(a, b int) int {
 	if a > b {
 		return a
 	}
 	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func clampInt(value, low, high int) int {
+	if low <= 0 {
+		low = 1
+	}
+	if high < low {
+		high = low
+	}
+	if value < low {
+		return low
+	}
+	if value > high {
+		return high
+	}
+	return value
 }
 
 func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision, error) {
@@ -205,6 +287,7 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 	if e.StateStore != nil {
 		e.StateStore.Clock = e.now
 	}
+	governorDiagnostics := e.applyCandidateGovernor(ctx)
 	universe := ResolveProgrammaticSymbols(ctx.CandidateCoins, ctx.Positions, e.Policy)
 	marketSymbols := make([]string, 0, len(universe))
 	for _, item := range universe {
@@ -233,22 +316,33 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 	if prep.FullStop && prep.HaltDecision != nil {
 		prep.HaltDecision.UserPrompt = ""
 		prep.HaltDecision.AICallAttempted = false
-		e.applyDecisionMetadata(prep.HaltDecision, nil)
+		e.applyDecisionMetadata(ctx, prep.HaltDecision, nil, nil, AccountSizeDecision{})
 		return prep.HaltDecision, nil
 	}
 
 	var strategyDecisions []decision.Decision
 	var diagnostics []string
 	var preRejections []decision.OpenRejection
+	diagnostics = append(diagnostics, governorDiagnostics...)
 	positionDecisions, positionDiagnostics := e.evaluatePositionManagement(ctx, now)
 	strategyDecisions = append(strategyDecisions, positionDecisions...)
 	diagnostics = append(diagnostics, positionDiagnostics...)
+	accountGate := e.accountSizeGate(ctx)
+	activeMode := e.loosenModeController(ctx, accountGate.AccountTooSmall)
+	if accountGate.HoldOnly {
+		diagnostics = append(diagnostics, accountGate.Reason)
+	}
+	if activeMode != "" && activeMode != "normal" {
+		diagnostics = append(diagnostics, fmt.Sprintf("active_mode=%s", activeMode))
+	}
 	if prep.RiskIncreaseBlocked {
 		reason := prep.StopReason
 		if strings.TrimSpace(reason) == "" {
 			reason = "风险增加已阻断"
 		}
 		diagnostics = append(diagnostics, "主信号层跳过open/add: "+reason)
+	} else if accountGate.HoldOnly {
+		diagnostics = append(diagnostics, "账户尺寸gate进入hold_only，仅保留持仓管理")
 	} else {
 		mainDecisions, mainDiagnostics, mainRejections := e.evaluateMainSignals(ctx, universe, now)
 		strategyDecisions = append(strategyDecisions, mainDecisions...)
@@ -278,15 +372,16 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		summary += "; 风控拒绝 " + strings.Join(openRejectionText(rejections), "; ")
 	}
 	fullDecision := &decision.FullDecision{
-		UserPrompt:      "",
-		CoTTrace:        summary,
-		Decisions:       allDecisions,
-		Timestamp:       now,
-		AICallAttempted: false,
-		AICallSucceeded: false,
-		OpenRejections:  rejections,
+		UserPrompt:        "",
+		CoTTrace:          summary,
+		Decisions:         allDecisions,
+		Timestamp:         now,
+		WaitReasonSummary: waitReasonSummary(diagnostics, rejections, allDecisions),
+		AICallAttempted:   false,
+		AICallSucceeded:   false,
+		OpenRejections:    rejections,
 	}
-	e.applyDecisionMetadata(fullDecision, diagnostics)
+	e.applyDecisionMetadata(ctx, fullDecision, diagnostics, rejections, accountGate)
 	return fullDecision, nil
 }
 
@@ -295,6 +390,7 @@ func (e *Engine) evaluateMainSignals(ctx *decision.Context, universe []StrategyS
 	var diagnostics []string
 	var rejections []decision.OpenRejection
 	noNewClosedCount := 0
+	skipSet := e.fastSkipSuppressed(ctx)
 	for _, symbol := range universe {
 		data := ctx.MarketDataMap[symbol.Symbol]
 		if data == nil || len(data.Klines) == 0 {
@@ -317,9 +413,32 @@ func (e *Engine) evaluateMainSignals(ctx *decision.Context, universe []StrategyS
 			if signal.SourceLayer == "" || signal.SourceLayer == "main_signal" {
 				signal.SourceLayer = "structure"
 			}
+			signal.Tier = tierForStrategySymbol(symbol)
+			if reason, skipped := skipSet[signal.StructureKey]; skipped {
+				diagnostics = append(diagnostics, fmt.Sprintf("%s %s suppressed_fast_skip: %s", signal.Symbol, signal.SignalType, reason))
+				continue
+			}
+			if e.Policy.DefectFixPackEnabled {
+				if reason, skipped := e.StateStore.FastSkipReason(ctx.TraderID, market.Normalize(signal.Symbol), signal.StructureKey); skipped {
+					diagnostics = append(diagnostics, fmt.Sprintf("%s %s suppressed_fast_skip: %s", signal.Symbol, signal.SignalType, reason))
+					continue
+				}
+			}
 			e.StateStore.StoreConfirmedSignal(ctx.TraderID, signal.Symbol, signal, false)
 			e.reconcilePreviewMarkers(ctx.TraderID, signal.Symbol, signal)
-			openable, timingDiagnostics := e.prepareStructureEntry(ctx, &signal, data, now)
+			signal.EntryPath = e.decideEntryPath(signal)
+			if rejection, skipDiagnostics := e.shouldSkipBeforeEntry(ctx, signal, data, now); rejection != nil {
+				diagnostics = append(diagnostics, skipDiagnostics...)
+				rejections = append(rejections, *rejection)
+				continue
+			}
+			var openable bool
+			var timingDiagnostics []string
+			if signal.EntryPath == EntryPathDirectStructure {
+				openable, timingDiagnostics = e.prepareDirectStructureEntry(ctx, &signal, data, now)
+			} else {
+				openable, timingDiagnostics = e.prepareStructureEntry(ctx, &signal, data, now)
+			}
 			diagnostics = append(diagnostics, timingDiagnostics...)
 			if !openable {
 				continue
@@ -388,6 +507,7 @@ func (e *Engine) evaluatePreviewSignals(ctx *decision.Context, symbol string, da
 	var previewDecisions []decision.Decision
 	var rejections []decision.OpenRejection
 	previewObservationCounts := map[string]int{}
+	skipSet := e.fastSkipSuppressed(ctx)
 	for _, signal := range signals {
 		parentID := signal.SignalID
 		triggerType := previewTriggerType(phase, componentTF, componentCount, policy)
@@ -410,13 +530,24 @@ func (e *Engine) evaluatePreviewSignals(ctx *decision.Context, symbol string, da
 		signal.DecisionCloseTime = synthetic.CloseTime
 		signal.SignalID = triggerID
 		signal.LifecycleKey = fmt.Sprintf("preview:%s:%s:%d", signal.StructureKey, phase, parentTradeCandleClose(synthetic.CloseTime, tradeTF))
+		if reason, skipped := skipSet[signal.StructureKey]; skipped {
+			diagnostics = append(diagnostics, fmt.Sprintf("%s %s suppressed_fast_skip: %s", signal.Symbol, signal.SignalType, reason))
+			continue
+		}
+		if e.Policy.DefectFixPackEnabled {
+			if reason, skipped := e.StateStore.FastSkipReason(ctx.TraderID, market.Normalize(signal.Symbol), signal.StructureKey); skipped {
+				diagnostics = append(diagnostics, fmt.Sprintf("%s %s suppressed_fast_skip: %s", signal.Symbol, signal.SignalType, reason))
+				continue
+			}
+		}
 		previewSignals = append(previewSignals, signal)
 		previewObservationCounts[phase]++
 		if !policy.AllowPilotOpen || componentCount < policy.PilotAfterClosedComponents {
 			continue
 		}
-		if signal.Confidence < policy.PilotMinConfidence {
-			diagnostics = append(diagnostics, fmt.Sprintf("%s %s pilot跳过: 置信度%d低于%d", symbol, signal.SignalType, signal.Confidence, policy.PilotMinConfidence))
+		minConfidence := e.effectivePilotMinConfidence(ctx, signal.SignalType)
+		if signal.Confidence < minConfidence {
+			diagnostics = append(diagnostics, fmt.Sprintf("%s %s pilot跳过: 置信度%d低于%d", symbol, signal.SignalType, signal.Confidence, minConfidence))
 			continue
 		}
 		d := e.signalToMainDecision(ctx, signal)
@@ -429,6 +560,16 @@ func (e *Engine) evaluatePreviewSignals(ctx *decision.Context, symbol string, da
 		}
 		if msg, suppressed := e.suppressedSignalDiagnostic(ctx, d); suppressed {
 			diagnostics = append(diagnostics, msg)
+			continue
+		}
+		if gate := e.pilotSizeGate(ctx); gate.RejectPilot {
+			rejection := e.rejectProgrammaticSignal(ctx, d, signal, data, now, "pilot_size_below_min_notional", gate.Reason, map[string]any{
+				"required_min_notional": gate.RequiredMinNotional,
+				"max_allowed_notional":  gate.MaxAllowedNotional,
+				"account_too_small":     gate.AccountTooSmall,
+			})
+			rejections = append(rejections, rejection)
+			diagnostics = append(diagnostics, gate.Reason)
 			continue
 		}
 		e.applyPreviewPilotSizing(ctx, data, &d)
@@ -446,12 +587,340 @@ func (e *Engine) evaluatePreviewSignals(ctx *decision.Context, symbol string, da
 	return previewSignals, previewDecisions, diagnostics, rejections
 }
 
+func (e *Engine) effectivePilotMinConfidence(ctx *decision.Context, signalType string) int {
+	base := e.Policy.PreviewSignals.PilotMinConfidence
+	if value := e.Policy.PreviewSignals.PilotMinConfidenceBySignal[strings.ToLower(strings.TrimSpace(signalType))]; value > 0 {
+		base = value
+	}
+	if base <= 0 {
+		base = 70
+	}
+	if e.Policy.PreviewSignals.PilotMinConfidenceUseP75 && e.StateStore != nil && ctx != nil {
+		samples := e.StateStore.ConfidenceWindow(ctx.TraderID, signalType, 7*24*time.Hour)
+		if len(samples) >= 30 {
+			sort.Ints(samples)
+			p75 := samples[(len(samples)*3)/4]
+			base = clampInt(p75, e.Policy.PreviewSignals.P75Floor, e.Policy.PreviewSignals.P75Ceiling)
+		}
+	}
+	if ctx != nil && ctx.FrequencyPolicy != nil {
+		mode := strings.ToLower(strings.TrimSpace(firstNonEmptyString(ctx.FrequencyPolicy.EffectiveMode, ctx.FrequencyPolicy.Mode)))
+		switch mode {
+		case "loosen":
+			drop := ctx.FrequencyPolicy.LoosenMode.PilotConfidenceDrop
+			if drop <= 0 {
+				drop = 10
+			}
+			floor := ctx.FrequencyPolicy.LoosenMode.HardFloorPilotConfidence
+			if floor <= 0 {
+				floor = 60
+			}
+			base = maxInt(base-drop, floor)
+		case "safe":
+			base = minInt(base+10, 95)
+		}
+	}
+	if ctx != nil && ctx.LossMode != nil && ctx.LossMode.Active {
+		base = minInt(base+10, 95)
+	}
+	return clampInt(base, 1, 100)
+}
+
+type AccountSizeDecision struct {
+	HoldOnly             bool
+	RejectPilot          bool
+	AccountTooSmall      bool
+	Reason               string
+	RequiredMinNotional  float64
+	MaxAllowedNotional   float64
+	PilotPositionSizeUSD float64
+}
+
+func (e *Engine) accountSizeGate(ctx *decision.Context) AccountSizeDecision {
+	if ctx == nil || !e.Policy.DefectFixPackEnabled {
+		return AccountSizeDecision{}
+	}
+	minNotional := e.Policy.MinPilotNotionalUSD
+	if minNotional <= 0 {
+		minNotional = 30
+	}
+	maxPct := e.Policy.MaxPilotNotionalPct
+	if maxPct <= 0 || maxPct > 1 {
+		maxPct = 0.6
+	}
+	lev := maxInt(ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+	if lev <= 0 {
+		lev = 1
+	}
+	availableNotional := ctx.Account.AvailableBalance * float64(lev)
+	maxAllowed := availableNotional * maxPct
+	result := AccountSizeDecision{
+		RequiredMinNotional: minNotional,
+		MaxAllowedNotional:  maxAllowed,
+	}
+	if availableNotional < minNotional {
+		result.HoldOnly = true
+		result.AccountTooSmall = true
+		result.Reason = fmt.Sprintf("account_too_small: 可用名义%.2f低于最小试单%.2f", availableNotional, minNotional)
+		return result
+	}
+	if maxAllowed < minNotional {
+		result.RejectPilot = true
+		result.Reason = fmt.Sprintf("pilot_size_below_min_notional: max_allowed_notional %.2f < min_notional %.2f", maxAllowed, minNotional)
+		return result
+	}
+	result.PilotPositionSizeUSD = maxAllowed
+	return result
+}
+
+func (e *Engine) pilotSizeGate(ctx *decision.Context) AccountSizeDecision {
+	gate := e.accountSizeGate(ctx)
+	if gate.HoldOnly {
+		gate.RejectPilot = true
+	}
+	return gate
+}
+
+func (e *Engine) applyCandidateGovernor(ctx *decision.Context) []string {
+	if ctx == nil || !e.Policy.DefectFixPackEnabled || !e.Policy.CandidateGovernor.Enabled {
+		return nil
+	}
+	policy := e.Policy.CandidateGovernor
+	allowNonCrypto := map[string]bool{}
+	for _, symbol := range policy.AllowNonCryptoSymbols {
+		allowNonCrypto[market.Normalize(symbol)] = true
+	}
+	core := map[string]bool{}
+	for _, symbol := range policy.CoreSymbolsMustAppear {
+		core[market.Normalize(symbol)] = true
+	}
+	if len(core) == 0 {
+		core["BTCUSDT"] = true
+		core["ETHUSDT"] = true
+	}
+	maxSpread := policy.MaxQuoteSpreadBps
+	if maxSpread <= 0 {
+		maxSpread = 20
+	}
+	seen := map[string]bool{}
+	var out []decision.CandidateCoin
+	var diagnostics []string
+	for _, coin := range ctx.CandidateCoins {
+		coin.Symbol = market.Normalize(coin.Symbol)
+		if coin.Symbol == "" {
+			continue
+		}
+		if !isCryptoUSDT(coin.Symbol) && !allowNonCrypto[coin.Symbol] {
+			coin.IncludedInPrompt = false
+			coin.FilterReason = "non_crypto_symbol"
+			coin.Errors = appendCandidateError(coin.Errors, "non_crypto_symbol")
+			diagnostics = append(diagnostics, fmt.Sprintf("%s candidate_governor剔除: non_crypto_symbol", coin.Symbol))
+			out = append(out, coin)
+			continue
+		}
+		if ctx.QuoteSpreadProvider != nil {
+			quote, exec, err := ctx.QuoteSpreadProvider(coin.Symbol)
+			if err == nil {
+				if spread := quoteSpreadBps(quote, exec); spread > maxSpread {
+					coin.IncludedInPrompt = false
+					coin.FilterReason = "quote_spread_too_high"
+					coin.Errors = appendCandidateError(coin.Errors, "quote_spread_too_high")
+					diagnostics = append(diagnostics, fmt.Sprintf("%s candidate_governor剔除: quote_spread_too_high %.2fbps > %.2fbps", coin.Symbol, spread, maxSpread))
+					out = append(out, coin)
+					continue
+				}
+			}
+		}
+		seen[coin.Symbol] = true
+		out = append(out, coin)
+	}
+	for symbol := range core {
+		if symbol == "" || seen[symbol] {
+			continue
+		}
+		out = append(out, decision.CandidateCoin{
+			Symbol:           symbol,
+			Sources:          []string{"core"},
+			Tier:             "core",
+			IncludedInPrompt: true,
+		})
+		diagnostics = append(diagnostics, fmt.Sprintf("%s candidate_governor强制保留core symbol", symbol))
+	}
+	ctx.CandidateCoins = out
+	return diagnostics
+}
+
+func appendCandidateError(values []string, item string) []string {
+	for _, value := range values {
+		if value == item {
+			return values
+		}
+	}
+	return append(values, item)
+}
+
+func isCryptoUSDT(symbol string) bool {
+	normalized := strings.ToUpper(strings.TrimSpace(symbol))
+	if !(strings.HasSuffix(normalized, "USDT") || strings.HasSuffix(normalized, "USDC")) {
+		return false
+	}
+	for _, prefix := range []string{"XAU", "XAG", "CL", "COPPER", "NG", "SI"} {
+		if strings.HasPrefix(normalized, prefix) {
+			return false
+		}
+	}
+	return true
+}
+
+func quoteSpreadBps(quoteMid, execMid float64) float64 {
+	if quoteMid <= 0 || execMid <= 0 {
+		return 0
+	}
+	diff := quoteMid - execMid
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff / quoteMid * 10000
+}
+
+func (e *Engine) fastSkipSuppressed(ctx *decision.Context) map[string]string {
+	if ctx == nil || e.StateStore == nil || !e.Policy.DefectFixPackEnabled {
+		return nil
+	}
+	return e.StateStore.FastSkipSet(ctx.TraderID)
+}
+
+func (e *Engine) decideEntryPath(signal ChanlunSignal) string {
+	if e.Policy.EntryTiming.DirectStructureOpen &&
+		signal.Confidence >= e.Policy.EntryTiming.DirectStructureMinConfidence {
+		return EntryPathDirectStructure
+	}
+	return EntryPathPreviewThenTrigger
+}
+
+func (e *Engine) loosenModeController(ctx *decision.Context, accountTooSmall bool) string {
+	mode := "normal"
+	if ctx != nil && ctx.FrequencyPolicy != nil {
+		configMode := strings.ToLower(strings.TrimSpace(firstNonEmptyString(ctx.FrequencyPolicy.EffectiveMode, ctx.FrequencyPolicy.Mode, "normal")))
+		if configMode != "" {
+			mode = configMode
+		}
+	}
+	if ctx == nil || e.StateStore == nil || !e.Policy.DefectFixPackEnabled || ctx.FrequencyPolicy == nil || !ctx.FrequencyPolicy.LoosenMode.Enabled {
+		e.setActiveMode(mode)
+		return mode
+	}
+	now := e.now()
+	policy := ctx.FrequencyPolicy.LoosenMode
+	if policy.InactivityWindowMinutes <= 0 {
+		policy.InactivityWindowMinutes = 720
+	}
+	if policy.MaxDurationHours <= 0 {
+		policy.MaxDurationHours = 24
+	}
+	state := e.StateStore.LoosenState(ctx.TraderID)
+	lossActive := ctx.LossMode != nil && ctx.LossMode.Active
+	safeActive := mode == "safe" || mode == "loss"
+	if accountTooSmall || lossActive || safeActive || (ctx.FrequencyState != nil && ctx.FrequencyState.OpenCount24h > 0) ||
+		(state.Active && !state.ExpiresAt.IsZero() && !state.ExpiresAt.After(now)) {
+		if state.Active {
+			state = LoosenState{}
+			e.StateStore.SetLoosenState(ctx.TraderID, state)
+		}
+		if lossActive {
+			mode = "loss"
+		}
+		e.setActiveMode(mode)
+		return mode
+	}
+	inactiveFor := time.Duration(ctx.RuntimeMinutes) * time.Minute
+	if ctx.FrequencyState != nil && !ctx.FrequencyState.LastOpenAt.IsZero() {
+		inactiveFor = now.Sub(ctx.FrequencyState.LastOpenAt)
+	}
+	if state.Active {
+		ctx.FrequencyPolicy.EffectiveMode = "loosen"
+		e.setLoosenAdjustments(policy)
+		e.setActiveMode("loosen")
+		return "loosen"
+	}
+	if inactiveFor >= time.Duration(policy.InactivityWindowMinutes)*time.Minute {
+		state = LoosenState{
+			Active:    true,
+			EnteredAt: now,
+			ExpiresAt: now.Add(time.Duration(policy.MaxDurationHours) * time.Hour),
+		}
+		e.StateStore.SetLoosenState(ctx.TraderID, state)
+		ctx.FrequencyPolicy.EffectiveMode = "loosen"
+		e.setLoosenAdjustments(policy)
+		e.setActiveMode("loosen")
+		return "loosen"
+	}
+	e.setActiveMode(mode)
+	return mode
+}
+
+func (e *Engine) setActiveMode(mode string) {
+	if mode == "" {
+		mode = "normal"
+	}
+	e.mu.Lock()
+	e.activeMode = mode
+	if mode != "loosen" {
+		e.loosenMinRRDelta = 0
+		e.loosenChaseBump = 0
+	}
+	e.mu.Unlock()
+}
+
+func (e *Engine) setLoosenAdjustments(policy decision.LoosenModePolicy) {
+	delta := policy.MinNetRRDelta
+	if delta == 0 {
+		delta = -0.4
+	}
+	bump := policy.MaxChaseRatioBump
+	if bump == 0 {
+		bump = 0.05
+	}
+	e.mu.Lock()
+	e.loosenMinRRDelta = delta
+	e.loosenChaseBump = bump
+	e.mu.Unlock()
+}
+
+func (e *Engine) activeRuntimeMode() string {
+	e.mu.RLock()
+	mode := e.activeMode
+	e.mu.RUnlock()
+	if mode == "" {
+		return "normal"
+	}
+	return mode
+}
+
+func (e *Engine) activeLoosenAdjustments() (float64, float64) {
+	e.mu.RLock()
+	delta := e.loosenMinRRDelta
+	bump := e.loosenChaseBump
+	e.mu.RUnlock()
+	if delta == 0 {
+		delta = -0.4
+	}
+	if bump == 0 {
+		bump = 0.05
+	}
+	return delta, bump
+}
+
 type entryWindowEvaluation struct {
 	State          string
 	ReasonCode     string
 	Reason         string
 	CurrentPrice   float64
 	RemainingNetRR float64
+	ChaseRatio     float64
+	ChaseATR       float64
+	EntryZoneLow   float64
+	EntryZoneHigh  float64
 	Valid          bool
 	Invalidated    bool
 }
@@ -482,12 +951,16 @@ func (e *Engine) prepareStructureEntry(ctx *decision.Context, signal *ChanlunSig
 		decisionClose = signalClose
 	}
 	ageCandles := signalAgeCandles(signalClose, decisionClose, e.Policy.Timeframes.Trade)
-	window := e.evaluateStructureEntryWindow(ctx, *signal, data)
+	if signal.EntryPath == "" {
+		signal.EntryPath = e.decideEntryPath(*signal)
+	}
+	window := e.evaluateStructureEntryWindow(ctx, *signal, data, ageCandles)
 	e.applyEntryWindowMetadata(signal, window)
 	if signal.Diagnostics.Metrics == nil {
 		signal.Diagnostics.Metrics = map[string]any{}
 	}
 	signal.Diagnostics.Metrics["source_layer"] = "structure"
+	signal.Diagnostics.Metrics["entry_path"] = signal.EntryPath
 	signal.Diagnostics.Metrics["entry_age_candles"] = ageCandles
 	signal.Diagnostics.Metrics["entry_direct_open"] = e.Policy.EntryTiming.DirectStructureOpen
 	signal.Diagnostics.Metrics["entry_require_fresh_trigger"] = e.Policy.EntryTiming.RequireFreshTrigger
@@ -505,13 +978,27 @@ func (e *Engine) prepareStructureEntry(ctx *decision.Context, signal *ChanlunSig
 	}
 	maxAge := e.Policy.EntryTiming.DirectOpenMaxAgeCandles
 	freshEnough := ageCandles <= maxAge
-	directAllowed := e.Policy.EntryTiming.DirectStructureOpen && freshEnough
+	directAllowed := signal.EntryPath == EntryPathDirectStructure && e.Policy.EntryTiming.DirectStructureOpen && freshEnough
 	if e.Policy.EntryTiming.RequireFreshTrigger && !freshEnough {
 		directAllowed = false
 	}
 	if !directAllowed {
 		if triggered, triggerDiagnostics := e.tryPullbackRetestEntryTrigger(ctx, signal, data, window); triggered {
 			return true, triggerDiagnostics
+		}
+		subAgeCandles := signalAgeCandles(signalClose, decisionClose, e.Policy.EntryTiming.TriggerTimeframe)
+		if maxNoTrigger := e.Policy.EntryTiming.MaxNoTriggerSubCandles; e.Policy.DefectFixPackEnabled && maxNoTrigger > 0 && subAgeCandles >= maxNoTrigger {
+			reasonCode := "entry_window_missed_no_trigger"
+			reason := fmt.Sprintf("%s %s 入场窗口终结: 连续%d根%s未出现fresh entry trigger", signal.Symbol, signal.SignalType, subAgeCandles, e.Policy.EntryTiming.TriggerTimeframe)
+			signal.Status = "invalidated"
+			signal.ReasonCode = reasonCode
+			signal.EntryWindowState = reasonCode
+			signal.EntryInvalidated = true
+			signal.EntryInvalidReason = reasonCode
+			e.storeStructureMarker(ctx, *signal, "invalidated", reason)
+			e.storeStructureSuppression(ctx, *signal, action, reasonCode, now, window, signalClose, decisionClose)
+			e.StateStore.TerminateLifecycle(ctx.TraderID, market.Normalize(signal.Symbol), signal.StructureKey, reasonCode, signal.SignalID, lifecycleExpiry(now, e.Policy.Timeframes.Trade, e.Policy.SignalFreshness.MaxLifetimeCandles))
+			return false, []string{reason}
 		}
 		reasonCode := "waiting_for_fresh_entry_trigger"
 		reason := fmt.Sprintf("%s %s 作为结构背景保留，等待%s fresh entry trigger，结构年龄%d根%s", signal.Symbol, signal.SignalType, e.Policy.EntryTiming.TriggerTimeframe, ageCandles, e.Policy.Timeframes.Trade)
@@ -553,6 +1040,66 @@ func (e *Engine) prepareStructureEntry(ctx *decision.Context, signal *ChanlunSig
 	signal.Diagnostics.Metrics["entry_trigger_close_time"] = triggerClose
 	e.storeEntryTriggerMarker(ctx, *signal, fmt.Sprintf("%s %s new_structure_segment ready", signal.Symbol, signal.SignalType))
 	return true, []string{fmt.Sprintf("%s %s fresh entry trigger ready: %s", signal.Symbol, signal.SignalType, triggerID)}
+}
+
+func (e *Engine) prepareDirectStructureEntry(ctx *decision.Context, signal *ChanlunSignal, data *market.Data, now time.Time) (bool, []string) {
+	if signal == nil {
+		return false, nil
+	}
+	if signal.SourceLayer == "" || signal.SourceLayer == "main_signal" {
+		signal.SourceLayer = "structure"
+	}
+	if !e.Policy.EntryTiming.Enabled {
+		return true, nil
+	}
+	action := e.candidateActionForSignal(ctx, *signal)
+	if action == "" {
+		return true, nil
+	}
+	signalClose := firstPositiveInt64(signal.SignalCloseTime, signal.TriggerCloseTime, signal.SegmentEndTime)
+	decisionClose := signal.DecisionCloseTime
+	if decisionClose == 0 {
+		decisionClose = latestKlineClose(data, e.Policy.Timeframes.Trade)
+	}
+	if decisionClose > 0 && signalClose > 0 && decisionClose < signalClose {
+		decisionClose = signalClose
+	}
+	ageCandles := signalAgeCandles(signalClose, decisionClose, e.Policy.Timeframes.Trade)
+	signal.EntryPath = EntryPathDirectStructure
+	window := e.evaluateStructureEntryWindow(ctx, *signal, data, ageCandles)
+	e.applyEntryWindowMetadata(signal, window)
+	if signal.Diagnostics.Metrics == nil {
+		signal.Diagnostics.Metrics = map[string]any{}
+	}
+	signal.Diagnostics.Metrics["source_layer"] = "structure"
+	signal.Diagnostics.Metrics["entry_path"] = signal.EntryPath
+	signal.Diagnostics.Metrics["entry_age_candles"] = ageCandles
+	signal.Diagnostics.Metrics["entry_direct_open"] = true
+	signal.Diagnostics.Metrics["entry_require_fresh_trigger"] = false
+	signal.Diagnostics.Metrics["latest_trade_close_time"] = decisionClose
+	if !window.Valid {
+		signal.Status = "invalidated"
+		signal.ReasonCode = window.ReasonCode
+		signal.EntryInvalidated = true
+		if signal.EntryInvalidReason == "" {
+			signal.EntryInvalidReason = window.ReasonCode
+		}
+		e.storeStructureMarker(ctx, *signal, "invalidated", window.Reason)
+		e.storeStructureSuppression(ctx, *signal, action, window.ReasonCode, now, window, signalClose, decisionClose)
+		if window.Invalidated {
+			e.StateStore.TerminateLifecycle(ctx.TraderID, market.Normalize(signal.Symbol), signal.StructureKey, window.ReasonCode, signal.SignalID, lifecycleExpiry(now, e.Policy.Timeframes.Trade, e.Policy.SignalFreshness.MaxLifetimeCandles))
+		}
+		return false, []string{fmt.Sprintf("%s %s direct_structure不进入开仓: %s", signal.Symbol, signal.SignalType, window.Reason)}
+	}
+	signal.ParentSignalID = signal.SignalID
+	signal.ParentStructureKey = signal.StructureKey
+	signal.EntryReference = window.CurrentPrice
+	signal.TriggerConfidence = signal.Confidence
+	signal.Status = "ready"
+	signal.EntryWindowState = "direct_structure_ready"
+	signal.LifecycleKey = "direct_structure:" + signal.StructureKey
+	e.storeStructureMarker(ctx, *signal, "ready", fmt.Sprintf("%s %s direct_structure ready", signal.Symbol, signal.SignalType))
+	return true, []string{fmt.Sprintf("%s %s direct_structure ready", signal.Symbol, signal.SignalType)}
 }
 
 func (e *Engine) tryPullbackRetestEntryTrigger(ctx *decision.Context, signal *ChanlunSignal, data *market.Data, window entryWindowEvaluation) (bool, []string) {
@@ -694,7 +1241,11 @@ func (e *Engine) candidateActionForSignal(ctx *decision.Context, signal ChanlunS
 	}
 }
 
-func (e *Engine) evaluateStructureEntryWindow(ctx *decision.Context, signal ChanlunSignal, data *market.Data) entryWindowEvaluation {
+func (e *Engine) evaluateStructureEntryWindow(ctx *decision.Context, signal ChanlunSignal, data *market.Data, ageCandlesValues ...int) entryWindowEvaluation {
+	ageCandles := 1
+	if len(ageCandlesValues) > 0 {
+		ageCandles = ageCandlesValues[0]
+	}
 	currentPrice := currentPriceForGuard(data, e.Policy.Timeframes.Trade)
 	entryZone := e.entryZoneForSymbol(signal.Symbol)
 	result := entryWindowEvaluation{
@@ -752,27 +1303,26 @@ func (e *Engine) evaluateStructureEntryWindow(ctx *decision.Context, signal Chan
 		if signal.Diagnostics.Metrics == nil {
 			signal.Diagnostics.Metrics = map[string]any{}
 		}
-		maxChase := entryZone.MaxChaseRatio
-		if maxChase <= 0 {
-			maxChase = 0.35
-		}
-		if chaseRatio > maxChase {
+		maxChase := e.effectiveMaxChaseRatio(signal.Symbol, signal.Tier, ageCandles)
+		chaseATR := entryChaseATR(signal.Direction, signal.Price, currentPrice, market.GetATR(data, e.Policy.EntryTiming.TriggerTimeframe))
+		zoneLow, zoneHigh := entryZoneBounds(signal.Direction, signal.Price, signal.StopLoss, maxChase)
+		result.ChaseRatio = chaseRatio
+		result.ChaseATR = chaseATR
+		result.EntryZoneLow = zoneLow
+		result.EntryZoneHigh = zoneHigh
+		atrPass := entryZone.MaxChaseATRMultiplier > 0 && chaseATR > 0 && chaseATR <= entryZone.MaxChaseATRMultiplier
+		ratioPass := chaseRatio <= maxChase
+		if !ratioPass && !atrPass {
 			result.State = "entry_window_missed"
 			result.ReasonCode = "entry_chase_ratio_too_high"
-			result.Reason = fmt.Sprintf("入场追价比例%.2f超过阈值%.2f", chaseRatio, maxChase)
+			result.Reason = fmt.Sprintf("入场追价比例%.2f超过阈值%.2f，ATR追价%.2f超过阈值%.2f", chaseRatio, maxChase, chaseATR, entryZone.MaxChaseATRMultiplier)
 			result.Valid = false
 			return result
 		}
 	}
 	if rr, ok := remainingNetRRForDecision(signal.Direction, currentPrice, signal.StopLoss, signal.TakeProfit, tradingCostPct(ctx)); ok {
 		result.RemainingNetRR = rr
-		minRR := entryZone.MinRemainingNetRR
-		if minRR <= 0 {
-			minRR = e.Policy.SignalFreshness.MinRemainingNetRR
-		}
-		if minRR <= 0 {
-			minRR = 2.5
-		}
+		minRR := e.minRemainingNetRRForSignal(signal.SignalType, e.Policy.Timeframes.Trade, signal.Symbol, signal.Tier)
 		if rr < minRR {
 			result.State = "entry_window_missed"
 			result.ReasonCode = "remaining_net_rr_too_low"
@@ -810,8 +1360,95 @@ func (e *Engine) entryZoneForSymbol(symbol string) decision.ProgrammaticEntryZon
 	return zone
 }
 
+func (e *Engine) effectiveMaxChaseRatio(symbol, tier string, ageCandles int) float64 {
+	zone := e.Policy.EntryTiming.EntryZone
+	maxChase := zone.MaxChaseRatio
+	if maxChase <= 0 {
+		maxChase = 0.35
+	}
+	if tier != "" {
+		if override, ok := zone.TierOverrides[strings.ToLower(strings.TrimSpace(tier))]; ok && override.MaxChaseRatio > 0 {
+			maxChase = override.MaxChaseRatio
+		}
+	}
+	if override, ok := zone.SymbolOverrides[market.Normalize(symbol)]; ok && override.MaxChaseRatio > 0 {
+		maxChase = override.MaxChaseRatio
+	}
+	if ageCandles == 0 && zone.FreshAgeChaseRelax > 0 {
+		maxChase += zone.FreshAgeChaseRelax
+	}
+	if e.activeRuntimeMode() == "loosen" {
+		_, bump := e.activeLoosenAdjustments()
+		maxChase += bump
+	}
+	if maxChase > 1 {
+		return 1
+	}
+	return maxChase
+}
+
 func (e *Engine) minRemainingNetRRForSymbol(symbol string) float64 {
 	return e.entryZoneForSymbol(symbol).MinRemainingNetRR
+}
+
+func (e *Engine) minRemainingNetRRForSignal(signalType, timeframe, symbol, tier string) float64 {
+	zone := e.entryZoneForSymbol(symbol)
+	normalizedType := strings.ToLower(strings.TrimSpace(signalType))
+	normalizedTF := strings.ToLower(strings.TrimSpace(timeframe))
+	if normalizedType != "" && normalizedTF != "" {
+		if value := zone.SignalTypeMinRR[normalizedType+"@"+normalizedTF]; value > 0 {
+			return e.applyLoosenMinRR(value)
+		}
+		if strings.HasPrefix(normalizedType, "buy") {
+			if value := zone.SignalTypeMinRR["buy*@"+normalizedTF]; value > 0 {
+				return e.applyLoosenMinRR(value)
+			}
+		}
+		if strings.HasPrefix(normalizedType, "sell") {
+			if value := zone.SignalTypeMinRR["sell*@"+normalizedTF]; value > 0 {
+				return e.applyLoosenMinRR(value)
+			}
+		}
+		if value := zone.SignalTypeMinRR["*@"+normalizedTF]; value > 0 {
+			return e.applyLoosenMinRR(value)
+		}
+	}
+	if value := zone.SignalTypeMinRR[normalizedType]; value > 0 {
+		return e.applyLoosenMinRR(value)
+	}
+	if strings.HasPrefix(normalizedType, "buy") {
+		if value := zone.SignalTypeMinRR["buy*"]; value > 0 {
+			return e.applyLoosenMinRR(value)
+		}
+	}
+	if strings.HasPrefix(normalizedType, "sell") {
+		if value := zone.SignalTypeMinRR["sell*"]; value > 0 {
+			return e.applyLoosenMinRR(value)
+		}
+	}
+	if override, ok := e.Policy.EntryTiming.EntryZone.SymbolOverrides[market.Normalize(symbol)]; ok && override.MinRemainingNetRR > 0 {
+		return e.applyLoosenMinRR(override.MinRemainingNetRR)
+	}
+	if tier != "" {
+		if override, ok := zone.TierOverrides[strings.ToLower(strings.TrimSpace(tier))]; ok && override.MinRemainingNetRR > 0 {
+			return e.applyLoosenMinRR(override.MinRemainingNetRR)
+		}
+	}
+	if zone.MinRemainingNetRR > 0 {
+		return e.applyLoosenMinRR(zone.MinRemainingNetRR)
+	}
+	return e.applyLoosenMinRR(e.minRemainingNetRRForSymbol(symbol))
+}
+
+func (e *Engine) applyLoosenMinRR(value float64) float64 {
+	if e.activeRuntimeMode() == "loosen" {
+		delta, _ := e.activeLoosenAdjustments()
+		value += delta
+		if value < 1 {
+			value = 1
+		}
+	}
+	return value
 }
 
 func (e *Engine) applyEntryWindowMetadata(signal *ChanlunSignal, window entryWindowEvaluation) {
@@ -831,6 +1468,18 @@ func (e *Engine) applyEntryWindowMetadata(signal *ChanlunSignal, window entryWin
 	signal.Diagnostics.Metrics["current_price"] = window.CurrentPrice
 	if window.RemainingNetRR > 0 {
 		signal.Diagnostics.Metrics["remaining_net_rr"] = window.RemainingNetRR
+	}
+	if window.ChaseRatio > 0 {
+		signal.Diagnostics.Metrics["chase_ratio"] = window.ChaseRatio
+	}
+	if window.ChaseATR > 0 {
+		signal.Diagnostics.Metrics["chase_ratio_atr"] = window.ChaseATR
+	}
+	if window.EntryZoneLow > 0 {
+		signal.Diagnostics.Metrics["entry_zone_low"] = window.EntryZoneLow
+	}
+	if window.EntryZoneHigh > 0 {
+		signal.Diagnostics.Metrics["entry_zone_high"] = window.EntryZoneHigh
 	}
 }
 
@@ -875,11 +1524,11 @@ func (e *Engine) storeStructureSuppression(ctx *decision.Context, signal Chanlun
 }
 
 func entryChaseRatio(direction string, signalPrice, currentPrice, stopLoss, takeProfit float64) (float64, bool) {
-	width := takeProfit - stopLoss
-	if width < 0 {
-		width = -width
+	risk := signalPrice - stopLoss
+	if risk < 0 {
+		risk = -risk
 	}
-	if width <= 0 || signalPrice <= 0 || currentPrice <= 0 {
+	if risk <= 0 || signalPrice <= 0 || currentPrice <= 0 || takeProfit <= 0 {
 		return 0, false
 	}
 	switch direction {
@@ -887,14 +1536,52 @@ func entryChaseRatio(direction string, signalPrice, currentPrice, stopLoss, take
 		if currentPrice <= signalPrice {
 			return 0, true
 		}
-		return (currentPrice - signalPrice) / width, true
+		return (currentPrice - signalPrice) / risk, true
 	case SideShort:
 		if currentPrice >= signalPrice {
 			return 0, true
 		}
-		return (signalPrice - currentPrice) / width, true
+		return (signalPrice - currentPrice) / risk, true
 	default:
 		return 0, false
+	}
+}
+
+func entryChaseATR(direction string, signalPrice, currentPrice, atr float64) float64 {
+	if signalPrice <= 0 || currentPrice <= 0 || atr <= 0 {
+		return 0
+	}
+	switch direction {
+	case SideLong:
+		if currentPrice <= signalPrice {
+			return 0
+		}
+		return (currentPrice - signalPrice) / atr
+	case SideShort:
+		if currentPrice >= signalPrice {
+			return 0
+		}
+		return (signalPrice - currentPrice) / atr
+	default:
+		return 0
+	}
+}
+
+func entryZoneBounds(direction string, signalPrice, stopLoss, maxChaseRatio float64) (float64, float64) {
+	risk := signalPrice - stopLoss
+	if risk < 0 {
+		risk = -risk
+	}
+	if risk <= 0 || signalPrice <= 0 {
+		return 0, 0
+	}
+	switch direction {
+	case SideLong:
+		return signalPrice, signalPrice + risk*maxChaseRatio
+	case SideShort:
+		return signalPrice - risk*maxChaseRatio, signalPrice
+	default:
+		return 0, 0
 	}
 }
 
@@ -962,7 +1649,16 @@ func (e *Engine) detectSignalsFromKlines(traderID, symbol, tradeTF, triggerTF st
 		ADXTimeframe:      "1h",
 	})
 	lastClosed := tradeKlines[len(tradeKlines)-1].CloseTime
+	filtered := signals[:0]
 	for i := range signals {
+		if e.Policy.DefectFixPackEnabled && signals[i].IsBornInvalid() {
+			if signals[i].Diagnostics.Metrics == nil {
+				signals[i].Diagnostics.Metrics = map[string]any{}
+			}
+			signals[i].Diagnostics.Metrics["signal_invalid_at_birth"] = true
+			e.StateStore.StoreConfidenceSample(traderID, market.Normalize(symbol), signals[i].SignalType, signals[i].Confidence, now)
+			continue
+		}
 		signalClose := signals[i].SignalCloseTime
 		if signalClose == 0 {
 			signalClose = signals[i].TriggerCloseTime
@@ -973,8 +1669,10 @@ func (e *Engine) detectSignalsFromKlines(traderID, symbol, tradeTF, triggerTF st
 		signals[i].SignalCloseTime = signalClose
 		signals[i].TriggerCloseTime = signalClose
 		signals[i].DecisionCloseTime = lastClosed
+		e.StateStore.StoreConfidenceSample(traderID, market.Normalize(symbol), signals[i].SignalType, signals[i].Confidence, now)
+		filtered = append(filtered, signals[i])
 	}
-	return signals
+	return filtered
 }
 
 func previewClosedComponents(data *market.Data, tradeTF, componentTF string, watchAfter int) ([]market.Kline, string, int, []string) {
@@ -1108,6 +1806,13 @@ func (e *Engine) applyPreviewPilotSizing(ctx *decision.Context, data *market.Dat
 		RequestedPositionSizeUSD: d.PositionSizeUSD,
 	})
 	if sizing.PositionSizeUSD > 0 {
+		if gate := e.accountSizeGate(ctx); gate.MaxAllowedNotional > 0 {
+			d.StrategyMetadata["pilot_max_allowed_notional"] = gate.MaxAllowedNotional
+			d.StrategyMetadata["pilot_min_notional_usd"] = gate.RequiredMinNotional
+			if sizing.PositionSizeUSD > gate.MaxAllowedNotional {
+				sizing.PositionSizeUSD = gate.MaxAllowedNotional
+			}
+		}
 		d.PositionSizeUSD = sizing.PositionSizeUSD
 		d.RequestedPositionSizeUSD = sizing.PositionSizeUSD
 		d.StrategyMetadata["pilot_position_size_usd"] = sizing.PositionSizeUSD
@@ -1141,6 +1846,39 @@ func (e *Engine) reconcilePreviewMarkers(traderID, symbol string, confirmed Chan
 		marker.Reason = "confirmed_by_1h:" + confirmed.SignalID
 		e.StateStore.StoreSignalMarker(traderID, symbol, marker)
 	}
+}
+
+func (e *Engine) shouldSkipBeforeEntry(ctx *decision.Context, signal ChanlunSignal, data *market.Data, now time.Time) (*decision.OpenRejection, []string) {
+	if ctx == nil || !e.Policy.EntryTiming.EntryZone.TheoreticalRRUnreachableSkip {
+		return nil, nil
+	}
+	if e.candidateActionForSignal(ctx, signal) == "" {
+		return nil, nil
+	}
+	minRR := e.minRemainingNetRRForSignal(signal.SignalType, e.Policy.Timeframes.Trade, signal.Symbol, signal.Tier)
+	theoreticalRR, ok := theoreticalNetRRForSignal(signal, tradingCostPct(ctx))
+	if !ok || theoreticalRR >= minRR {
+		return nil, nil
+	}
+	d := e.signalToMainDecision(ctx, signal)
+	if d.Action == "" {
+		return nil, nil
+	}
+	if d.StrategyMetadata == nil {
+		d.StrategyMetadata = map[string]any{}
+	}
+	grossRR, _ := grossRRForDecision(signal.Direction, signal.Price, signal.StopLoss, signal.TakeProfit)
+	d.StrategyMetadata["gross_rr"] = grossRR
+	d.StrategyMetadata["structure_rr"] = grossRR
+	d.StrategyMetadata["theoretical_max_rr"] = theoreticalRR
+	d.StrategyMetadata["fee_slippage_pct"] = tradingCostPct(ctx)
+	d.StrategyMetadata["min_remaining_net_rr"] = minRR
+	reason := fmt.Sprintf("%s %s 理论净RR %.2f低于阈值%.2f，跳过入场生命周期", signal.Symbol, signal.SignalType, theoreticalRR, minRR)
+	rejection := e.rejectProgrammaticSignal(ctx, d, signal, data, now, "theoretical_rr_unreachable", reason, map[string]any{
+		"theoretical_max_rr":   theoreticalRR,
+		"min_remaining_net_rr": minRR,
+	})
+	return &rejection, []string{reason}
 }
 
 func (e *Engine) applyProgrammaticSignalGuard(ctx *decision.Context, signal ChanlunSignal, d decision.Decision, data *market.Data, now time.Time) (decision.Decision, *decision.OpenRejection, []string) {
@@ -1194,7 +1932,7 @@ func (e *Engine) applyProgrammaticSignalGuard(ctx *decision.Context, signal Chan
 		d.StrategyMetadata["entry_trigger_close_time"] = signal.EntryTriggerClose
 	}
 	d.StrategyMetadata["decision_close_time"] = decisionClose
-	minRemainingNetRR := e.minRemainingNetRRForSymbol(d.Symbol)
+	minRemainingNetRR := e.minRemainingNetRRForSignal(signal.SignalType, e.Policy.Timeframes.Trade, d.Symbol, signal.Tier)
 	d.StrategyMetadata["min_remaining_net_rr"] = minRemainingNetRR
 	guardDirection := signal.Direction
 	if guardDirection == "" {
@@ -1253,7 +1991,14 @@ func (e *Engine) applyProgrammaticSignalGuard(ctx *decision.Context, signal Chan
 		reason := fmt.Sprintf("%s %s 被拒: 信号已过期，年龄%d根%s超过硬上限%d根", d.Symbol, d.Action, ageCandles, e.Policy.Timeframes.Trade, maxLifetime)
 		return reject("signal_expired", reason, nil)
 	}
-	remainingNetRR, ok := remainingNetRRForDecision(guardDirection, currentPrice, d.StopLoss, d.TakeProfit, tradingCostPct(ctx))
+	costPct := tradingCostPct(ctx)
+	if grossRR, ok := grossRRForDecision(guardDirection, currentPrice, d.StopLoss, d.TakeProfit); ok {
+		d.StrategyMetadata["gross_rr"] = grossRR
+		d.StrategyMetadata["structure_rr"] = grossRR
+		d.StrategyMetadata["fee_slippage_pct"] = costPct
+		d.StrategyMetadata["theoretical_max_rr"] = grossRR
+	}
+	remainingNetRR, ok := remainingNetRRForDecision(guardDirection, currentPrice, d.StopLoss, d.TakeProfit, costPct)
 	if ok {
 		d.StrategyMetadata["remaining_net_rr"] = remainingNetRR
 		if d.Explanation != nil {
@@ -1290,6 +2035,14 @@ func (e *Engine) rejectProgrammaticSignal(ctx *decision.Context, d decision.Deci
 		"parent_signal_id":     d.StrategyMetadata["parent_signal_id"],
 		"entry_window_state":   d.StrategyMetadata["entry_window_state"],
 		"decision_close_time":  d.StrategyMetadata["decision_close_time"],
+		"gross_rr":             d.StrategyMetadata["gross_rr"],
+		"fee_slippage_pct":     d.StrategyMetadata["fee_slippage_pct"],
+		"structure_rr":         d.StrategyMetadata["structure_rr"],
+		"theoretical_max_rr":   d.StrategyMetadata["theoretical_max_rr"],
+		"chase_ratio":          d.StrategyMetadata["chase_ratio"],
+		"chase_ratio_atr":      d.StrategyMetadata["chase_ratio_atr"],
+		"entry_zone_low":       d.StrategyMetadata["entry_zone_low"],
+		"entry_zone_high":      d.StrategyMetadata["entry_zone_high"],
 	}
 	for key, value := range extra {
 		diagnostics[key] = value
@@ -1330,6 +2083,20 @@ func (e *Engine) rejectProgrammaticSignal(ctx *decision.Context, d decision.Deci
 		StopLoss:          d.StopLoss,
 		TakeProfit:        d.TakeProfit,
 	})
+	structureKey := metadataString(d.StrategyMetadata, "structure_key")
+	if e.Policy.DefectFixPackEnabled && structureKey != "" {
+		switch reasonCode {
+		case "invalid_stop_take_profit_structure", "target_already_crossed", "signal_expired", "theoretical_rr_unreachable":
+			e.StateStore.TerminateLifecycle(ctx.TraderID, market.Normalize(d.Symbol), structureKey, reasonCode, d.SignalID, lifecycleExpiry(now, e.Policy.Timeframes.Trade, e.Policy.SignalFreshness.MaxLifetimeCandles))
+		}
+		threshold := e.Policy.SuppressionPermanentThreshold
+		if threshold <= 0 {
+			threshold = 5
+		}
+		if e.StateStore.StructureSuppressionSeenCount(ctx.TraderID, market.Normalize(d.Symbol), structureKey) > threshold {
+			e.StateStore.MarkPermanentSkip(ctx.TraderID, market.Normalize(d.Symbol), structureKey)
+		}
+	}
 	return rejection
 }
 
@@ -1384,6 +2151,31 @@ func remainingNetRRForDecision(direction string, currentPrice, stopLoss, takePro
 		return 0, false
 	}
 	return (rewardPct - tradingCostPct) / riskPct, true
+}
+
+func theoreticalNetRRForSignal(signal ChanlunSignal, tradingCostPct float64) (float64, bool) {
+	return remainingNetRRForDecision(signal.Direction, signal.Price, signal.StopLoss, signal.TakeProfit, tradingCostPct)
+}
+
+func grossRRForDecision(direction string, currentPrice, stopLoss, takeProfit float64) (float64, bool) {
+	if invalidProgrammaticOpenStructure(direction, currentPrice, stopLoss, takeProfit) {
+		return 0, false
+	}
+	var risk, reward float64
+	switch direction {
+	case SideLong:
+		risk = currentPrice - stopLoss
+		reward = takeProfit - currentPrice
+	case SideShort:
+		risk = stopLoss - currentPrice
+		reward = currentPrice - takeProfit
+	default:
+		return 0, false
+	}
+	if risk <= 0 {
+		return 0, false
+	}
+	return reward / risk, true
 }
 
 func tradingCostPct(ctx *decision.Context) float64 {
@@ -1447,6 +2239,14 @@ func timeframeDuration(timeframe string) time.Duration {
 	default:
 		return 0
 	}
+}
+
+func lifecycleExpiry(now time.Time, timeframe string, maxLifetimeCandles int) time.Time {
+	duration := timeframeDuration(timeframe)
+	if duration <= 0 || maxLifetimeCandles <= 0 {
+		return time.Time{}
+	}
+	return now.Add(duration * time.Duration(maxLifetimeCandles))
 }
 
 func chineseSide(direction string) string {
@@ -1525,7 +2325,7 @@ func (e *Engine) markRejectedStrategyDecisions(ctx *decision.Context, candidates
 	}
 }
 
-func (e *Engine) applyDecisionMetadata(fullDecision *decision.FullDecision, diagnostics []string) {
+func (e *Engine) applyDecisionMetadata(ctx *decision.Context, fullDecision *decision.FullDecision, diagnostics []string, rejections []decision.OpenRejection, accountGate AccountSizeDecision) {
 	if fullDecision == nil {
 		return
 	}
@@ -1547,10 +2347,12 @@ func (e *Engine) applyDecisionMetadata(fullDecision *decision.FullDecision, diag
 		"signal_freshness":    e.Policy.SignalFreshness,
 		"preview_signals":     e.Policy.PreviewSignals,
 		"entry_timing":        e.Policy.EntryTiming,
+		"candidate_governor":  e.Policy.CandidateGovernor,
 	}
+	strategyDiagnostics := map[string]any{}
 	if len(diagnostics) > 0 {
 		mainMessages, positionMessages := splitLayerDiagnostics(diagnostics)
-		fullDecision.StrategyDiagnostics = map[string]any{
+		strategyDiagnostics = map[string]any{
 			"messages": append([]string(nil), diagnostics...),
 			"main_signal": map[string]any{
 				"trade_timeframe": e.Policy.Timeframes.Trade,
@@ -1563,6 +2365,191 @@ func (e *Engine) applyDecisionMetadata(fullDecision *decision.FullDecision, diag
 			},
 		}
 	}
+	if ctx != nil {
+		strategyDiagnostics["per_candidate"] = e.buildPerCandidateDiagnostics(ctx, rejections)
+		strategyDiagnostics["confidence_histogram"] = e.buildConfidenceHistogram(ctx)
+		strategyDiagnostics["signal_quality_breakdown"] = e.buildSignalQualityBreakdown(ctx.TraderID)
+		strategyDiagnostics["risk_state"] = e.buildStrategyRiskDiagnostics(ctx, accountGate)
+		strategyDiagnostics["account_state"] = map[string]any{
+			"account_too_small":  accountGate.AccountTooSmall,
+			"total_realized_24h": ctx.Account.TotalRealized24h,
+		}
+	}
+	if len(strategyDiagnostics) > 0 {
+		fullDecision.StrategyDiagnostics = strategyDiagnostics
+	}
+}
+
+func (e *Engine) buildPerCandidateDiagnostics(ctx *decision.Context, rejections []decision.OpenRejection) []map[string]any {
+	if ctx == nil {
+		return nil
+	}
+	reasonBySymbol := map[string]string{}
+	for _, rejection := range rejections {
+		reason := ""
+		if code, _ := rejection.GateDiagnostics["reason_code"].(string); code != "" {
+			reason = code
+		}
+		if reason == "" && len(rejection.GateReasons) > 0 {
+			reason = rejection.GateReasons[0]
+		}
+		if reason == "" {
+			reason = rejection.Reason
+		}
+		if reason != "" {
+			reasonBySymbol[market.Normalize(rejection.Symbol)] = reason
+		}
+	}
+	out := make([]map[string]any, 0, len(ctx.CandidateCoins))
+	for _, coin := range ctx.CandidateCoins {
+		symbol := market.Normalize(coin.Symbol)
+		item := map[string]any{
+			"symbol":               symbol,
+			"terminal_reason_code": reasonBySymbol[symbol],
+			"included_in_prompt":   coin.IncludedInPrompt,
+			"filter_reason":        coin.FilterReason,
+			"errors":               append([]string(nil), coin.Errors...),
+		}
+		if report := e.latestSignalReportSnapshot(ctx.TraderID, symbol); report != nil && len(report.Signals) > 0 {
+			signal := report.Signals[len(report.Signals)-1]
+			item["signal_type"] = signal.SignalType
+			item["confidence"] = signal.Confidence
+			item["structure_key"] = signal.StructureKey
+		}
+		if item["terminal_reason_code"] == "" {
+			if coin.FilterReason != "" {
+				item["terminal_reason_code"] = coin.FilterReason
+			} else {
+				item["terminal_reason_code"] = "no_signal"
+			}
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func (e *Engine) latestSignalReportSnapshot(traderID, symbol string) *SignalReport {
+	if e == nil {
+		return nil
+	}
+	symbol = market.Normalize(symbol)
+	e.mu.RLock()
+	report := e.latestSignals[traderID+"|"+symbol]
+	e.mu.RUnlock()
+	if report == nil {
+		return nil
+	}
+	copied := *report
+	copied.Signals = append([]ChanlunSignal(nil), report.Signals...)
+	copied.SignalMarkers = append([]SignalMarker(nil), report.SignalMarkers...)
+	return &copied
+}
+
+func (e *Engine) buildConfidenceHistogram(ctx *decision.Context) map[string]map[string]any {
+	if ctx == nil || e.StateStore == nil {
+		return nil
+	}
+	result := map[string]map[string]any{}
+	for _, signalType := range []string{SignalBuy1, SignalBuy2, SignalBuy3, SignalSell1, SignalSell2, SignalSell3} {
+		samples := e.StateStore.ConfidenceWindow(ctx.TraderID, signalType, 7*24*time.Hour)
+		if len(samples) == 0 {
+			continue
+		}
+		sort.Ints(samples)
+		result[signalType] = map[string]any{
+			"count":     len(samples),
+			"p25":       percentileInt(samples, 25),
+			"p50":       percentileInt(samples, 50),
+			"p75":       percentileInt(samples, 75),
+			"threshold": e.effectivePilotMinConfidence(ctx, signalType),
+		}
+	}
+	return result
+}
+
+func percentileInt(sorted []int, pct int) int {
+	if len(sorted) == 0 {
+		return 0
+	}
+	if pct <= 0 {
+		return sorted[0]
+	}
+	if pct >= 100 {
+		return sorted[len(sorted)-1]
+	}
+	idx := (len(sorted) - 1) * pct / 100
+	return sorted[idx]
+}
+
+func (e *Engine) buildSignalQualityBreakdown(traderID string) map[string]int {
+	result := map[string]int{}
+	if traderID == "" {
+		return result
+	}
+	e.mu.RLock()
+	reports := make([]*SignalReport, 0, len(e.latestSignals))
+	prefix := traderID + "|"
+	for key, report := range e.latestSignals {
+		if strings.HasPrefix(key, prefix) && report != nil {
+			reports = append(reports, report)
+		}
+	}
+	e.mu.RUnlock()
+	for _, report := range reports {
+		for _, signal := range report.Signals {
+			key := signal.SignalType
+			if key == "" {
+				key = "unknown"
+			}
+			result[key]++
+			if signal.Diagnostics.Metrics != nil {
+				if value, _ := signal.Diagnostics.Metrics["signal_invalid_at_birth"].(bool); value {
+					result["born_invalid"]++
+				}
+			}
+		}
+	}
+	return result
+}
+
+func (e *Engine) buildStrategyRiskDiagnostics(ctx *decision.Context, accountGate AccountSizeDecision) map[string]any {
+	out := map[string]any{
+		"active_mode":       e.activeRuntimeMode(),
+		"account_too_small": accountGate.AccountTooSmall,
+	}
+	if e.StateStore != nil && ctx != nil {
+		stats := e.StateStore.SuppressionStats(ctx.TraderID)
+		out["suppressions"] = map[string]any{
+			"total_active":       stats.TotalActive,
+			"by_reason":          stats.ByReason,
+			"oldest_age_candles": stats.OldestAgeCandles,
+			"permanent_skip":     stats.PermanentSkip,
+		}
+	}
+	if ctx != nil && ctx.FrequencyState != nil {
+		out["open_count_24h"] = ctx.FrequencyState.OpenCount24h
+		out["open_rejected_24h"] = ctx.FrequencyState.OpenRejected24h
+		out["signal_count_24h"] = ctx.FrequencyState.SignalCount24h
+		if !ctx.FrequencyState.LastOpenAt.IsZero() {
+			out["last_open_at"] = ctx.FrequencyState.LastOpenAt.Format(time.RFC3339)
+			out["inactivity_minutes"] = int(e.now().Sub(ctx.FrequencyState.LastOpenAt).Minutes())
+		} else {
+			out["inactivity_minutes"] = ctx.RuntimeMinutes
+		}
+		if !ctx.FrequencyState.LastCloseAt.IsZero() {
+			out["last_close_at"] = ctx.FrequencyState.LastCloseAt.Format(time.RFC3339)
+		}
+		if ctx.FrequencyState.OpenRejected24h >= 10 && ctx.FrequencyState.OpenCount24h == 0 {
+			out["warnings"] = map[string]bool{"runaway_rejection_loop": true}
+		}
+	}
+	if ctx != nil && ctx.FrequencyPolicy != nil && ctx.FrequencyPolicy.GateEffectivenessReportOnly {
+		out["gate_effectiveness"] = map[string]any{
+			"report_only":        true,
+			"would_reject_count": 0,
+		}
+	}
+	return out
 }
 
 func (e *Engine) LatestSignals(traderID, symbol string) (*SignalReport, bool) {
@@ -1571,7 +2558,11 @@ func (e *Engine) LatestSignals(traderID, symbol string) (*SignalReport, bool) {
 
 func (e *Engine) LatestSignalsWithOptions(traderID, symbol string, opts SignalReportOptions) (*SignalReport, bool) {
 	symbol = market.Normalize(symbol)
-	e.StateStore.CompactSignalMarkers(traderID, symbol)
+	var markers []SignalMarker
+	if e.StateStore != nil {
+		e.StateStore.CompactSignalMarkers(traderID, symbol)
+		markers = e.StateStore.RecentSignalMarkers(traderID, symbol, maxRecentSignalMarkers)
+	}
 	e.mu.RLock()
 	report, ok := e.latestSignals[traderID+"|"+symbol]
 	e.mu.RUnlock()
@@ -1580,7 +2571,7 @@ func (e *Engine) LatestSignalsWithOptions(traderID, symbol string, opts SignalRe
 	}
 	copied := *report
 	copied.Signals = append([]ChanlunSignal{}, report.Signals...)
-	copied.SignalMarkers = mergeSignalMarkers(e.StateStore.RecentSignalMarkers(traderID, symbol, maxRecentSignalMarkers), report.SignalMarkers)
+	copied.SignalMarkers = mergeSignalMarkers(markers, report.SignalMarkers)
 	applySignalReportOptions(&copied, opts)
 	return &copied, true
 }
@@ -1591,7 +2582,11 @@ func (e *Engine) EmptySignalReport(traderID, symbol string) *SignalReport {
 
 func (e *Engine) EmptySignalReportWithOptions(traderID, symbol string, opts SignalReportOptions) *SignalReport {
 	symbol = market.Normalize(symbol)
-	e.StateStore.CompactSignalMarkers(traderID, symbol)
+	var markers []SignalMarker
+	if e.StateStore != nil {
+		e.StateStore.CompactSignalMarkers(traderID, symbol)
+		markers = e.StateStore.RecentSignalMarkers(traderID, symbol, maxRecentSignalMarkers)
+	}
 	report := &SignalReport{
 		TraderID:           traderID,
 		Symbol:             symbol,
@@ -1603,7 +2598,7 @@ func (e *Engine) EmptySignalReportWithOptions(traderID, symbol string, opts Sign
 		ComponentTimeframe: e.Policy.Timeframes.Sub,
 		MicroTimeframe:     e.Policy.Timeframes.Micro,
 		Signals:            []ChanlunSignal{},
-		SignalMarkers:      e.StateStore.RecentSignalMarkers(traderID, symbol, maxRecentSignalMarkers),
+		SignalMarkers:      markers,
 		LatestDiagnostics: map[string]any{
 			"messages": []string{"暂无该标的的程序化策略信号"},
 		},
@@ -1819,7 +2814,17 @@ func (e *Engine) analyzeMainSignal(traderID, symbol string, data *market.Data, n
 		ADXTimeframe:      "1h",
 	})
 	var timeDiagnostics []string
+	filtered := signals[:0]
 	for i := range signals {
+		if e.Policy.DefectFixPackEnabled && signals[i].IsBornInvalid() {
+			if signals[i].Diagnostics.Metrics == nil {
+				signals[i].Diagnostics.Metrics = map[string]any{}
+			}
+			signals[i].Diagnostics.Metrics["signal_invalid_at_birth"] = true
+			e.StateStore.StoreConfidenceSample(traderID, market.Normalize(symbol), signals[i].SignalType, signals[i].Confidence, now)
+			timeDiagnostics = append(timeDiagnostics, fmt.Sprintf("%s %s 出生即无效，已丢弃", symbol, signals[i].SignalType))
+			continue
+		}
 		signalClose := signals[i].SignalCloseTime
 		if signalClose == 0 {
 			signalClose = signals[i].TriggerCloseTime
@@ -1834,10 +2839,13 @@ func (e *Engine) analyzeMainSignal(traderID, symbol string, data *market.Data, n
 			timeDiagnostics = append(timeDiagnostics, fmt.Sprintf("%s %s 时间锚点异常: decision_close_time早于signal_close_time", symbol, signals[i].SignalType))
 			signals[i].DecisionCloseTime = signalClose
 		}
+		e.StateStore.StoreConfidenceSample(traderID, market.Normalize(symbol), signals[i].SignalType, signals[i].Confidence, now)
+		filtered = append(filtered, signals[i])
 	}
+	signals = filtered
 	if len(signals) == 0 {
 		e.StateStore.SetLastAnalyzedClosedKline(traderID, symbol, tradeTF, lastClosed)
-		return nil, []string{fmt.Sprintf("%s 无买卖点信号", symbol)}
+		return nil, append([]string{fmt.Sprintf("%s 无买卖点信号", symbol)}, timeDiagnostics...)
 	}
 	e.StateStore.SetLastAnalyzedClosedKline(traderID, symbol, tradeTF, lastClosed)
 	diagnostics := []string{fmt.Sprintf("%s 识别到%d个信号", symbol, len(signals))}
@@ -1911,6 +2919,8 @@ func (e *Engine) signalToMainDecision(ctx *decision.Context, signal ChanlunSigna
 			"layer":                     layer,
 			"rule":                      signal.SignalType,
 			"signal_type":               signal.SignalType,
+			"entry_path":                signal.EntryPath,
+			"tier":                      signal.Tier,
 			"center_id":                 signal.CenterID,
 			"trigger_timeframe":         signal.TriggerTF,
 			"level":                     signal.Level,
@@ -1957,6 +2967,8 @@ func (e *Engine) signalToMainDecision(ctx *decision.Context, signal ChanlunSigna
 		ReferencePrice: signal.StructureTarget,
 		Details: map[string]any{
 			"center_id":                 signal.CenterID,
+			"entry_path":                signal.EntryPath,
+			"tier":                      signal.Tier,
 			"trigger_timeframe":         signal.TriggerTF,
 			"signal_close_time":         signalClose,
 			"decision_close_time":       decisionClose,
@@ -1987,6 +2999,12 @@ func (e *Engine) signalToMainDecision(ctx *decision.Context, signal ChanlunSigna
 			"preview_confirmed":         signal.PreviewConfirmed,
 		},
 	}
+	for _, key := range []string{"chase_ratio", "chase_ratio_atr", "entry_zone_low", "entry_zone_high"} {
+		if value, ok := signal.Diagnostics.Metrics[key]; ok {
+			d.StrategyMetadata[key] = value
+			d.Explanation.Details[key] = value
+		}
+	}
 	if action == "partial_close" {
 		d.ClosePercentage = e.Policy.Position.PartialClosePct
 	}
@@ -2015,6 +3033,12 @@ func ResolveProgrammaticSymbols(candidates []decision.CandidateCoin, positions [
 	base := map[string]StrategySymbol{}
 	for _, coin := range candidates {
 		symbol := market.Normalize(coin.Symbol)
+		if symbol == "" {
+			continue
+		}
+		if !coin.IncludedInPrompt && strings.TrimSpace(coin.FilterReason) != "" {
+			continue
+		}
 		base[symbol] = StrategySymbol{Symbol: symbol, Sources: append([]string(nil), coin.Sources...), Selected: true}
 	}
 	custom := map[string]bool{}
@@ -2023,6 +3047,9 @@ func ResolveProgrammaticSymbols(candidates []decision.CandidateCoin, positions [
 	}
 	core := map[string]bool{}
 	for _, symbol := range policy.SymbolPool.CoreSymbols {
+		core[market.Normalize(symbol)] = true
+	}
+	for _, symbol := range policy.CandidateGovernor.CoreSymbolsMustAppear {
 		core[market.Normalize(symbol)] = true
 	}
 	mode := policy.SymbolPool.Mode
@@ -2542,6 +3569,21 @@ func appendSource(values []string, source string) []string {
 	return append(values, source)
 }
 
+func tierForStrategySymbol(symbol StrategySymbol) string {
+	for _, source := range symbol.Sources {
+		switch strings.ToLower(strings.TrimSpace(source)) {
+		case "core":
+			return "core"
+		case "trend":
+			return "trend"
+		}
+	}
+	if symbol.HasPosition {
+		return "position"
+	}
+	return ""
+}
+
 func limitStrings(values []string, limit int) []string {
 	if limit <= 0 || len(values) <= limit {
 		return values
@@ -2598,6 +3640,52 @@ func openRejectionText(rejections []decision.OpenRejection) []string {
 		}
 	}
 	return result
+}
+
+func waitReasonSummary(diagnostics []string, rejections []decision.OpenRejection, decisions []decision.Decision) string {
+	hasWaitOnly := true
+	for _, d := range decisions {
+		if d.Action != "" && d.Action != "wait" {
+			hasWaitOnly = false
+			break
+		}
+	}
+	if !hasWaitOnly {
+		return ""
+	}
+	joined := strings.ToLower(strings.Join(diagnostics, " ; "))
+	for _, rejection := range rejections {
+		joined += " ; " + strings.ToLower(strings.Join(rejection.GateReasons, " "))
+		joined += " ; " + strings.ToLower(rejection.Reason)
+		if code, _ := rejection.GateDiagnostics["reason_code"].(string); code != "" {
+			joined += " ; " + strings.ToLower(code)
+		}
+	}
+	priorities := []struct {
+		code     string
+		patterns []string
+	}{
+		{"suppressed", []string{"suppressed_fast_skip", "已因", "同一结构已因"}},
+		{"permanent_skip", []string{"permanent_skip"}},
+		{"theoretical_rr_unreachable", []string{"theoretical_rr_unreachable"}},
+		{"invalid_structure", []string{"invalid_stop_take_profit_structure", "结构不合法", "signal_invalid_at_birth"}},
+		{"target_already_crossed", []string{"target_already_crossed", "越过止盈"}},
+		{"chase_too_high", []string{"chase", "追价"}},
+		{"structure_rr_too_low", []string{"structure_rr_below_threshold", "remaining_net_rr_too_low", "净rr"}},
+		{"pilot_below_threshold", []string{"pilot跳过", "置信度"}},
+		{"no_trigger", []string{"fresh entry trigger", "no_trigger", "等待"}},
+	}
+	for _, item := range priorities {
+		for _, pattern := range item.patterns {
+			if strings.Contains(joined, strings.ToLower(pattern)) {
+				return item.code
+			}
+		}
+	}
+	if strings.Contains(joined, "无买卖点") || strings.Contains(joined, "未发现可执行信号") {
+		return "no_signal"
+	}
+	return ""
 }
 
 func init() {

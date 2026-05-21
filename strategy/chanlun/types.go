@@ -14,6 +14,9 @@ const (
 	SignalSell1 = "sell1"
 	SignalSell2 = "sell2"
 	SignalSell3 = "sell3"
+
+	EntryPathDirectStructure    = "direct_structure"
+	EntryPathPreviewThenTrigger = "preview_then_trigger"
 )
 
 type Candle struct {
@@ -82,6 +85,8 @@ type ChanlunSignal struct {
 	Direction          string            `json:"direction"`
 	SignalType         string            `json:"signal_type"`
 	ActionHint         string            `json:"action_hint"`
+	EntryPath          string            `json:"entry_path,omitempty"`
+	Tier               string            `json:"tier,omitempty"`
 	AnalysisTF         string            `json:"analysis_timeframe"`
 	TriggerTF          string            `json:"trigger_timeframe"`
 	Level              string            `json:"level"`

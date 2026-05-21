@@ -70,9 +70,20 @@ type DynamicCandidatePoolConfig struct {
 
 // TradingFrequencyReportOnlyConfig 控制只观测、不实盘生效的频率优化诊断。
 type TradingFrequencyReportOnlyConfig struct {
-	HighADX     bool `json:"high_adx,omitempty"`
-	RRThreshold bool `json:"rr_threshold,omitempty"`
-	RollingGate bool `json:"rolling_gate,omitempty"`
+	HighADX           bool `json:"high_adx,omitempty"`
+	RRThreshold       bool `json:"rr_threshold,omitempty"`
+	RollingGate       bool `json:"rolling_gate,omitempty"`
+	GateEffectiveness bool `json:"gate_effectiveness,omitempty"`
+}
+
+type TradingFrequencyLoosenModeConfig struct {
+	Enabled                  *bool   `json:"enabled,omitempty"`
+	InactivityWindowMinutes  int     `json:"inactivity_window_minutes,omitempty"`
+	PilotConfidenceDrop      int     `json:"pilot_confidence_drop,omitempty"`
+	MinNetRRDelta            float64 `json:"min_net_rr_delta,omitempty"`
+	MaxChaseRatioBump        float64 `json:"max_chase_ratio_bump,omitempty"`
+	MaxDurationHours         int     `json:"max_duration_hours,omitempty"`
+	HardFloorPilotConfidence int     `json:"hard_floor_pilot_confidence,omitempty"`
 }
 
 // TradingFrequencyConfig 控制开仓频率灰度档位。
@@ -85,22 +96,35 @@ type TradingFrequencyConfig struct {
 	RollbackMinProfitFactor float64                          `json:"rollback_min_profit_factor,omitempty"`
 	RollbackMaxDrawdownPct  float64                          `json:"rollback_max_drawdown_pct,omitempty"`
 	ReportOnly              TradingFrequencyReportOnlyConfig `json:"report_only,omitempty"`
+	LoosenMode              TradingFrequencyLoosenModeConfig `json:"loosen_mode,omitempty"`
+}
+
+type TradingFrequencyLoosenModeProfile struct {
+	Enabled                  bool
+	InactivityWindowMinutes  int
+	PilotConfidenceDrop      int
+	MinNetRRDelta            float64
+	MaxChaseRatioBump        float64
+	MaxDurationHours         int
+	HardFloorPilotConfidence int
 }
 
 // TradingFrequencyProfile 是配置归一化后的运行时策略。
 type TradingFrequencyProfile struct {
-	Legacy                  bool
-	Mode                    string
-	EffectiveMode           string
-	AnalysisIntervalMinutes int
-	PromptCandidateLimit    int
-	DailyOpenLimit          int
-	RollbackWindowHours     int
-	RollbackMinProfitFactor float64
-	RollbackMaxDrawdownPct  float64
-	HighADXReportOnly       bool
-	RRReportOnly            bool
-	RollingGateReportOnly   bool
+	Legacy                      bool
+	Mode                        string
+	EffectiveMode               string
+	AnalysisIntervalMinutes     int
+	PromptCandidateLimit        int
+	DailyOpenLimit              int
+	RollbackWindowHours         int
+	RollbackMinProfitFactor     float64
+	RollbackMaxDrawdownPct      float64
+	HighADXReportOnly           bool
+	RRReportOnly                bool
+	RollingGateReportOnly       bool
+	GateEffectivenessReportOnly bool
+	LoosenMode                  TradingFrequencyLoosenModeProfile
 }
 
 // StrategyRiskConfig 控制 ATR/ADX/profile 风控灰度。
@@ -358,6 +382,7 @@ func (c *Config) NormalizeTradingFrequency() (TradingFrequencyProfile, error) {
 		RollbackWindowHours:     defaultRollbackWindowHours,
 		RollbackMinProfitFactor: defaultRollbackMinPF,
 		RollbackMaxDrawdownPct:  defaultRollbackDrawdownPct,
+		LoosenMode:              defaultTradingFrequencyLoosenMode(),
 	}
 
 	switch mode {
@@ -442,7 +467,71 @@ func (c *Config) NormalizeTradingFrequency() (TradingFrequencyProfile, error) {
 	if tf.ReportOnly.RollingGate {
 		profile.RollingGateReportOnly = true
 	}
+	if tf.ReportOnly.GateEffectiveness {
+		profile.GateEffectivenessReportOnly = true
+	}
+	loosenMode, err := normalizeTradingFrequencyLoosenMode(tf.LoosenMode)
+	if err != nil {
+		return TradingFrequencyProfile{}, err
+	}
+	profile.LoosenMode = loosenMode
 
+	return profile, nil
+}
+
+func defaultTradingFrequencyLoosenMode() TradingFrequencyLoosenModeProfile {
+	return TradingFrequencyLoosenModeProfile{
+		Enabled:                  true,
+		InactivityWindowMinutes:  720,
+		PilotConfidenceDrop:      10,
+		MinNetRRDelta:            -0.4,
+		MaxChaseRatioBump:        0.05,
+		MaxDurationHours:         24,
+		HardFloorPilotConfidence: 60,
+	}
+}
+
+func normalizeTradingFrequencyLoosenMode(cfg TradingFrequencyLoosenModeConfig) (TradingFrequencyLoosenModeProfile, error) {
+	profile := defaultTradingFrequencyLoosenMode()
+	if cfg.Enabled != nil {
+		profile.Enabled = *cfg.Enabled
+	}
+	if cfg.InactivityWindowMinutes > 0 {
+		profile.InactivityWindowMinutes = cfg.InactivityWindowMinutes
+	}
+	if profile.InactivityWindowMinutes < 60 || profile.InactivityWindowMinutes > 7*24*60 {
+		return TradingFrequencyLoosenModeProfile{}, fmt.Errorf("trading_frequency.loosen_mode.inactivity_window_minutes必须在60-10080之间: %d", profile.InactivityWindowMinutes)
+	}
+	if cfg.PilotConfidenceDrop > 0 {
+		profile.PilotConfidenceDrop = cfg.PilotConfidenceDrop
+	}
+	if profile.PilotConfidenceDrop < 0 || profile.PilotConfidenceDrop > 50 {
+		return TradingFrequencyLoosenModeProfile{}, fmt.Errorf("trading_frequency.loosen_mode.pilot_confidence_drop必须在0-50之间: %d", profile.PilotConfidenceDrop)
+	}
+	if cfg.MinNetRRDelta != 0 {
+		profile.MinNetRRDelta = cfg.MinNetRRDelta
+	}
+	if profile.MinNetRRDelta < -5 || profile.MinNetRRDelta > 5 {
+		return TradingFrequencyLoosenModeProfile{}, fmt.Errorf("trading_frequency.loosen_mode.min_net_rr_delta必须在-5到5之间: %.4f", profile.MinNetRRDelta)
+	}
+	if cfg.MaxChaseRatioBump != 0 {
+		profile.MaxChaseRatioBump = cfg.MaxChaseRatioBump
+	}
+	if profile.MaxChaseRatioBump < 0 || profile.MaxChaseRatioBump > 0.5 {
+		return TradingFrequencyLoosenModeProfile{}, fmt.Errorf("trading_frequency.loosen_mode.max_chase_ratio_bump必须在0-0.5之间: %.4f", profile.MaxChaseRatioBump)
+	}
+	if cfg.MaxDurationHours > 0 {
+		profile.MaxDurationHours = cfg.MaxDurationHours
+	}
+	if profile.MaxDurationHours < 1 || profile.MaxDurationHours > 168 {
+		return TradingFrequencyLoosenModeProfile{}, fmt.Errorf("trading_frequency.loosen_mode.max_duration_hours必须在1-168之间: %d", profile.MaxDurationHours)
+	}
+	if cfg.HardFloorPilotConfidence > 0 {
+		profile.HardFloorPilotConfidence = cfg.HardFloorPilotConfidence
+	}
+	if profile.HardFloorPilotConfidence < 1 || profile.HardFloorPilotConfidence > 100 {
+		return TradingFrequencyLoosenModeProfile{}, fmt.Errorf("trading_frequency.loosen_mode.hard_floor_pilot_confidence必须在1-100之间: %d", profile.HardFloorPilotConfidence)
+	}
 	return profile, nil
 }
 

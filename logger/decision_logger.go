@@ -15,12 +15,13 @@ import (
 
 // DecisionRecord 决策记录
 type DecisionRecord struct {
-	Timestamp           time.Time           `json:"timestamp"`       // 决策时间
-	SourcePath          string              `json:"-"`               // 离线读取时的源文件路径
-	CycleNumber         int                 `json:"cycle_number"`    // 周期编号
-	InputPrompt         string              `json:"input_prompt"`    // 发送给AI的输入prompt
-	CoTTrace            string              `json:"cot_trace"`       // AI思维链（输出）
-	DecisionJSON        string              `json:"decision_json"`   // 决策JSON
+	Timestamp           time.Time           `json:"timestamp"`     // 决策时间
+	SourcePath          string              `json:"-"`             // 离线读取时的源文件路径
+	CycleNumber         int                 `json:"cycle_number"`  // 周期编号
+	InputPrompt         string              `json:"input_prompt"`  // 发送给AI的输入prompt
+	CoTTrace            string              `json:"cot_trace"`     // AI思维链（输出）
+	DecisionJSON        string              `json:"decision_json"` // 决策JSON
+	WaitReasonSummary   string              `json:"wait_reason_summary,omitempty"`
 	AccountState        AccountSnapshot     `json:"account_state"`   // 账户状态快照
 	Positions           []PositionSnapshot  `json:"positions"`       // 持仓快照
 	CandidateCoins      []string            `json:"candidate_coins"` // 候选币种列表
@@ -55,21 +56,43 @@ type RiskStateSnapshot struct {
 	FrequencyPolicy          *FrequencyPolicySnapshot `json:"frequency_policy,omitempty"`
 	FrequencyState           *FrequencyStateSnapshot  `json:"frequency_state,omitempty"`
 	LossMode                 *LossModeSnapshot        `json:"loss_mode,omitempty"`
+	ActiveMode               string                   `json:"active_mode,omitempty"`
+	InactivityMinutes        int                      `json:"inactivity_minutes,omitempty"`
+	LastOpenAt               string                   `json:"last_open_at,omitempty"`
+	LastCloseAt              string                   `json:"last_close_at,omitempty"`
+	OpenCount24h             int                      `json:"open_count_24h,omitempty"`
+	OpenRejected24h          int                      `json:"open_rejected_24h,omitempty"`
+	SignalCount24h           int                      `json:"signal_count_24h,omitempty"`
+	GateEffectiveness        map[string]any           `json:"gate_effectiveness,omitempty"`
+	Suppressions             map[string]any           `json:"suppressions,omitempty"`
+	Warnings                 map[string]bool          `json:"warnings,omitempty"`
 }
 
 // FrequencyPolicySnapshot 是日志层的开仓频率策略快照，避免 logger 依赖 decision 包。
 type FrequencyPolicySnapshot struct {
-	Mode                    string  `json:"mode"`
-	EffectiveMode           string  `json:"effective_mode,omitempty"`
-	AnalysisIntervalMin     int     `json:"analysis_interval_min"`
-	PromptCandidateLimit    int     `json:"prompt_candidate_limit"`
-	DailyOpenLimit          int     `json:"daily_open_limit,omitempty"`
-	RollbackWindowHours     int     `json:"rollback_window_hours,omitempty"`
-	RollbackMinProfitFactor float64 `json:"rollback_min_profit_factor,omitempty"`
-	RollbackMaxDrawdownPct  float64 `json:"rollback_max_drawdown_pct,omitempty"`
-	HighADXReportOnly       bool    `json:"high_adx_report_only"`
-	RRReportOnly            bool    `json:"rr_report_only"`
-	RollingGateReportOnly   bool    `json:"rolling_gate_report_only"`
+	Mode                        string             `json:"mode"`
+	EffectiveMode               string             `json:"effective_mode,omitempty"`
+	AnalysisIntervalMin         int                `json:"analysis_interval_min"`
+	PromptCandidateLimit        int                `json:"prompt_candidate_limit"`
+	DailyOpenLimit              int                `json:"daily_open_limit,omitempty"`
+	RollbackWindowHours         int                `json:"rollback_window_hours,omitempty"`
+	RollbackMinProfitFactor     float64            `json:"rollback_min_profit_factor,omitempty"`
+	RollbackMaxDrawdownPct      float64            `json:"rollback_max_drawdown_pct,omitempty"`
+	HighADXReportOnly           bool               `json:"high_adx_report_only"`
+	RRReportOnly                bool               `json:"rr_report_only"`
+	RollingGateReportOnly       bool               `json:"rolling_gate_report_only"`
+	GateEffectivenessReportOnly bool               `json:"gate_effectiveness_report_only,omitempty"`
+	LoosenMode                  LoosenModeSnapshot `json:"loosen_mode,omitempty"`
+}
+
+type LoosenModeSnapshot struct {
+	Enabled                  bool    `json:"enabled"`
+	InactivityWindowMinutes  int     `json:"inactivity_window_minutes"`
+	PilotConfidenceDrop      int     `json:"pilot_confidence_drop"`
+	MinNetRRDelta            float64 `json:"min_net_rr_delta"`
+	MaxChaseRatioBump        float64 `json:"max_chase_ratio_bump"`
+	MaxDurationHours         int     `json:"max_duration_hours"`
+	HardFloorPilotConfidence int     `json:"hard_floor_pilot_confidence"`
 }
 
 // FrequencyStateSnapshot 是日志层的开仓频率运行时状态快照。
@@ -80,6 +103,10 @@ type FrequencyStateSnapshot struct {
 	Drawdown24hPct     float64 `json:"drawdown_24h_pct"`
 	AutoRollbackActive bool    `json:"auto_rollback_active"`
 	AutoRollbackReason string  `json:"auto_rollback_reason,omitempty"`
+	LastOpenAt         string  `json:"last_open_at,omitempty"`
+	LastCloseAt        string  `json:"last_close_at,omitempty"`
+	OpenRejected24h    int     `json:"open_rejected_24h,omitempty"`
+	SignalCount24h     int     `json:"signal_count_24h,omitempty"`
 }
 
 // LossModeSnapshot 是日志层的亏损模式状态快照，避免 logger 依赖 decision 包。
@@ -100,6 +127,8 @@ type AccountSnapshot struct {
 	TotalUnrealizedProfit float64 `json:"total_unrealized_profit"`
 	PositionCount         int     `json:"position_count"`
 	MarginUsedPct         float64 `json:"margin_used_pct"`
+	AccountTooSmall       bool    `json:"account_too_small,omitempty"`
+	TotalRealized24h      float64 `json:"total_realized_24h,omitempty"`
 }
 
 // PositionSnapshot 持仓快照
@@ -128,6 +157,7 @@ type CandidateSnapshot struct {
 	FilterReason     string   `json:"filter_reason,omitempty"`
 	IncludedInPrompt bool     `json:"included_in_prompt"`
 	Warnings         []string `json:"warnings,omitempty"`
+	Errors           []string `json:"errors,omitempty"`
 }
 
 // DecisionAction 决策动作
@@ -260,6 +290,15 @@ func (l *DecisionLogger) LogDecision(record *DecisionRecord) error {
 	// 写入文件
 	if err := ioutil.WriteFile(filepath, data, 0644); err != nil {
 		return fmt.Errorf("写入决策记录失败: %w", err)
+	}
+	if record.Timestamp.Hour() == 0 && record.Timestamp.Minute() >= 5 {
+		traderID := ""
+		if record.RiskState != nil {
+			traderID = record.RiskState.TraderID
+		}
+		if err := WriteDailySummary(traderID, record.Timestamp.AddDate(0, 0, -1), l.logDir); err != nil {
+			fmt.Printf("⚠ 写入daily summary失败: %v\n", err)
+		}
 	}
 
 	fmt.Printf("📝 决策记录已保存: %s\n", filename)

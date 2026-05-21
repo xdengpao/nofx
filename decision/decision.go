@@ -17,6 +17,9 @@ import (
 // ============================================================================
 
 // Context 交易上下文
+type QuoteSpreadProvider func(symbol string) (quoteMid float64, execMid float64, err error)
+
+// Context 交易上下文
 type Context struct {
 	CurrentTime              string                             `json:"current_time"`
 	TraderID                 string                             `json:"trader_id,omitempty"`
@@ -27,6 +30,7 @@ type Context struct {
 	Positions                []PositionInfo                     `json:"positions"`
 	CandidateCoins           []CandidateCoin                    `json:"candidate_coins"`
 	MarketDataMap            map[string]*market.Data            `json:"-"`
+	QuoteSpreadProvider      QuoteSpreadProvider                `json:"-"`
 	OITopDataMap             map[string]*OITopData              `json:"-"`
 	CorrelationMap           map[string]*CorrelationData        `json:"-"`
 	CircuitBreaker           *CircuitBreakerState               `json:"-"`

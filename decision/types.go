@@ -33,6 +33,7 @@ type AccountInfo struct {
 	AvailableBalance float64 `json:"available_balance"`
 	TotalPnL         float64 `json:"total_pnl"`
 	TotalPnLPct      float64 `json:"total_pnl_pct"`
+	TotalRealized24h float64 `json:"total_realized_24h,omitempty"`
 	MarginUsed       float64 `json:"margin_used"`
 	MarginUsedPct    float64 `json:"margin_used_pct"`
 	PositionCount    int     `json:"position_count"`
@@ -52,6 +53,7 @@ type CandidateCoin struct {
 	FilterReason     string   `json:"filter_reason,omitempty"`
 	IncludedInPrompt bool     `json:"included_in_prompt"`
 	Warnings         []string `json:"warnings,omitempty"`
+	Errors           []string `json:"errors,omitempty"`
 }
 
 // OITopData 持仓量增长Top数据
@@ -293,6 +295,7 @@ type FullDecision struct {
 	CoTTrace            string          `json:"cot_trace"`
 	Decisions           []Decision      `json:"decisions"`
 	Timestamp           time.Time       `json:"timestamp"`
+	WaitReasonSummary   string          `json:"wait_reason_summary,omitempty"`
 	AICallAttempted     bool            `json:"ai_call_attempted,omitempty"`
 	AICallSucceeded     bool            `json:"ai_call_succeeded,omitempty"`
 	AIFailureReason     string          `json:"ai_failure_reason,omitempty"`
@@ -343,27 +346,43 @@ type OpenFrequencySimulation struct {
 
 // FrequencyPolicy 是开仓频率相关的运行时策略。
 type FrequencyPolicy struct {
-	Mode                    string  `json:"mode"`
-	EffectiveMode           string  `json:"effective_mode,omitempty"`
-	AnalysisIntervalMin     int     `json:"analysis_interval_min"`
-	PromptCandidateLimit    int     `json:"prompt_candidate_limit"`
-	DailyOpenLimit          int     `json:"daily_open_limit,omitempty"`
-	RollbackWindowHours     int     `json:"rollback_window_hours,omitempty"`
-	RollbackMinProfitFactor float64 `json:"rollback_min_profit_factor,omitempty"`
-	RollbackMaxDrawdownPct  float64 `json:"rollback_max_drawdown_pct,omitempty"`
-	HighADXReportOnly       bool    `json:"high_adx_report_only"`
-	RRReportOnly            bool    `json:"rr_report_only"`
-	RollingGateReportOnly   bool    `json:"rolling_gate_report_only"`
+	Mode                        string           `json:"mode"`
+	EffectiveMode               string           `json:"effective_mode,omitempty"`
+	AnalysisIntervalMin         int              `json:"analysis_interval_min"`
+	PromptCandidateLimit        int              `json:"prompt_candidate_limit"`
+	DailyOpenLimit              int              `json:"daily_open_limit,omitempty"`
+	RollbackWindowHours         int              `json:"rollback_window_hours,omitempty"`
+	RollbackMinProfitFactor     float64          `json:"rollback_min_profit_factor,omitempty"`
+	RollbackMaxDrawdownPct      float64          `json:"rollback_max_drawdown_pct,omitempty"`
+	HighADXReportOnly           bool             `json:"high_adx_report_only"`
+	RRReportOnly                bool             `json:"rr_report_only"`
+	RollingGateReportOnly       bool             `json:"rolling_gate_report_only"`
+	LoosenMode                  LoosenModePolicy `json:"loosen_mode,omitempty"`
+	GateEffectivenessReportOnly bool             `json:"gate_effectiveness_report_only,omitempty"`
+}
+
+type LoosenModePolicy struct {
+	Enabled                  bool    `json:"enabled"`
+	InactivityWindowMinutes  int     `json:"inactivity_window_minutes"`
+	PilotConfidenceDrop      int     `json:"pilot_confidence_drop"`
+	MinNetRRDelta            float64 `json:"min_net_rr_delta"`
+	MaxChaseRatioBump        float64 `json:"max_chase_ratio_bump"`
+	MaxDurationHours         int     `json:"max_duration_hours"`
+	HardFloorPilotConfidence int     `json:"hard_floor_pilot_confidence"`
 }
 
 // FrequencyState 是开仓频率策略的可观测运行时状态。
 type FrequencyState struct {
-	OpenCount24h       int     `json:"open_count_24h"`
-	ClosedTrades24h    int     `json:"closed_trades_24h"`
-	ProfitFactor24h    float64 `json:"profit_factor_24h"`
-	Drawdown24hPct     float64 `json:"drawdown_24h_pct"`
-	AutoRollbackActive bool    `json:"auto_rollback_active"`
-	AutoRollbackReason string  `json:"auto_rollback_reason,omitempty"`
+	OpenCount24h       int       `json:"open_count_24h"`
+	ClosedTrades24h    int       `json:"closed_trades_24h"`
+	ProfitFactor24h    float64   `json:"profit_factor_24h"`
+	Drawdown24hPct     float64   `json:"drawdown_24h_pct"`
+	AutoRollbackActive bool      `json:"auto_rollback_active"`
+	AutoRollbackReason string    `json:"auto_rollback_reason,omitempty"`
+	LastOpenAt         time.Time `json:"last_open_at,omitempty"`
+	LastCloseAt        time.Time `json:"last_close_at,omitempty"`
+	OpenRejected24h    int       `json:"open_rejected_24h,omitempty"`
+	SignalCount24h     int       `json:"signal_count_24h,omitempty"`
 }
 
 // LossModeState 是去重后亏损模式的确定性风控状态。
@@ -421,27 +440,39 @@ type InstrumentProfile struct {
 
 // ProgrammaticStrategyPolicy 是程序化策略的运行时配置。
 type ProgrammaticStrategyPolicy struct {
-	DecisionMode       string
-	StrategyName       string
-	StrategyVersion    string
-	ConfigHash         string
-	AllowLong          bool
-	AllowShort         bool
-	EnabledSignals     []string
-	Timeframes         ProgrammaticTimeframesPolicy
-	HistoryDepth       ProgrammaticHistoryDepth
-	SymbolPool         ProgrammaticSymbolPoolPolicy
-	MovingAverage      ProgrammaticMAPolicy
-	Structure          ProgrammaticStructurePolicy
-	Divergence         ProgrammaticDivergencePolicy
-	ADX                ProgrammaticADXPolicy
-	Position           ProgrammaticPositionPolicy
-	PositionManagement ProgrammaticPositionManagementPolicy
-	TakeProfit         ProgrammaticTPPolicy
-	SignalFreshness    ProgrammaticSignalFreshnessPolicy
-	PreviewSignals     ProgrammaticPreviewSignalsPolicy
-	EntryTiming        ProgrammaticEntryTimingPolicy
-	State              ProgrammaticStatePolicy
+	DecisionMode                  string
+	StrategyName                  string
+	StrategyVersion               string
+	ConfigHash                    string
+	DefectFixPackEnabled          bool
+	SuppressionPermanentThreshold int
+	MaxPilotNotionalPct           float64
+	MinPilotNotionalUSD           float64
+	AllowLong                     bool
+	AllowShort                    bool
+	EnabledSignals                []string
+	Timeframes                    ProgrammaticTimeframesPolicy
+	HistoryDepth                  ProgrammaticHistoryDepth
+	SymbolPool                    ProgrammaticSymbolPoolPolicy
+	MovingAverage                 ProgrammaticMAPolicy
+	Structure                     ProgrammaticStructurePolicy
+	Divergence                    ProgrammaticDivergencePolicy
+	ADX                           ProgrammaticADXPolicy
+	Position                      ProgrammaticPositionPolicy
+	PositionManagement            ProgrammaticPositionManagementPolicy
+	TakeProfit                    ProgrammaticTPPolicy
+	SignalFreshness               ProgrammaticSignalFreshnessPolicy
+	PreviewSignals                ProgrammaticPreviewSignalsPolicy
+	EntryTiming                   ProgrammaticEntryTimingPolicy
+	CandidateGovernor             ProgrammaticCandidateGovernorPolicy
+	State                         ProgrammaticStatePolicy
+}
+
+type ProgrammaticCandidateGovernorPolicy struct {
+	Enabled               bool
+	AllowNonCryptoSymbols []string
+	MaxQuoteSpreadBps     float64
+	CoreSymbolsMustAppear []string
 }
 
 type ProgrammaticTimeframesPolicy struct {
@@ -576,13 +607,19 @@ type ProgrammaticPreviewSignalsPolicy struct {
 	AllowPilotOpen             bool
 	PilotRiskFraction          float64
 	PilotMinConfidence         int
+	PilotMinConfidenceBySignal map[string]int
+	PilotMinConfidenceUseP75   bool
+	P75Floor                   int
+	P75Ceiling                 int
 	RequireConfirmedUpgrade    bool
 }
 
 type ProgrammaticEntryTimingPolicy struct {
 	Enabled                        bool
 	DirectStructureOpen            bool
+	DirectStructureMinConfidence   int
 	DirectOpenMaxAgeCandles        int
+	MaxNoTriggerSubCandles         int
 	RequireFreshTrigger            bool
 	TriggerTimeframe               string
 	AllowedTriggerTypes            []string
@@ -594,10 +631,15 @@ type ProgrammaticEntryTimingPolicy struct {
 }
 
 type ProgrammaticEntryZonePolicy struct {
-	Mode              string
-	MaxChaseRatio     float64
-	MinRemainingNetRR float64
-	SymbolOverrides   map[string]ProgrammaticEntryZoneOverridePolicy
+	Mode                         string
+	MaxChaseRatio                float64
+	MinRemainingNetRR            float64
+	MaxChaseATRMultiplier        float64
+	FreshAgeChaseRelax           float64
+	SignalTypeMinRR              map[string]float64
+	TierOverrides                map[string]ProgrammaticEntryZoneOverridePolicy
+	SymbolOverrides              map[string]ProgrammaticEntryZoneOverridePolicy
+	TheoreticalRRUnreachableSkip bool
 }
 
 type ProgrammaticEntryZoneOverridePolicy struct {

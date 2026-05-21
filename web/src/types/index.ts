@@ -203,6 +203,8 @@ export interface DecisionRecord {
     total_unrealized_profit: number;
     position_count: number;
     margin_used_pct: number;
+    account_too_small?: boolean;
+    total_realized_24h?: number;
   };
   positions: Array<{
     symbol: string;
@@ -215,6 +217,21 @@ export interface DecisionRecord {
     liquidation_price: number;
   }>;
   candidate_coins: string[];
+  candidate_details?: Array<{
+    symbol: string;
+    sources?: string[];
+    score?: number;
+    tier?: string;
+    pool_score?: number;
+    pool_reasons?: string[];
+    market_state?: string;
+    state_confidence?: number;
+    data_quality?: string;
+    filter_reason?: string;
+    included_in_prompt?: boolean;
+    warnings?: string[];
+    errors?: string[];
+  }>;
   decisions: DecisionAction[];
   execution_log: string[];
   success: boolean;
@@ -231,7 +248,22 @@ export interface DecisionRecord {
     ai_backoff_until?: string;
     consecutive_ai_fails?: number;
     open_gate_reasons?: string[];
+    open_gate_diagnostics?: Array<Record<string, unknown>>;
+    frequency_policy?: Record<string, unknown>;
+    frequency_state?: Record<string, unknown>;
+    loss_mode?: Record<string, unknown>;
+    active_mode?: string;
+    inactivity_minutes?: number;
+    last_open_at?: string;
+    last_close_at?: string;
+    open_count_24h?: number;
+    open_rejected_24h?: number;
+    signal_count_24h?: number;
+    gate_effectiveness?: Record<string, unknown>;
+    suppressions?: Record<string, unknown>;
+    warnings?: Record<string, boolean>;
   };
+  wait_reason_summary?: string;
   decision_mode?: string;
   strategy_name?: string;
   strategy_version?: string;
@@ -269,6 +301,8 @@ export interface ChanlunSignal {
   direction: string;
   signal_type: string;
   action_hint: string;
+  entry_path?: string;
+  tier?: string;
   analysis_timeframe: string;
   trigger_timeframe: string;
   level: string;

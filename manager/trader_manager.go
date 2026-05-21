@@ -158,17 +158,27 @@ func decisionFrequencyPolicy(profile config.TradingFrequencyProfile) decision.Fr
 		interval = trader.DefaultAnalysisInterval
 	}
 	return decision.FrequencyPolicy{
-		Mode:                    mode,
-		EffectiveMode:           effectiveMode,
-		AnalysisIntervalMin:     interval,
-		PromptCandidateLimit:    profile.PromptCandidateLimit,
-		DailyOpenLimit:          profile.DailyOpenLimit,
-		RollbackWindowHours:     profile.RollbackWindowHours,
-		RollbackMinProfitFactor: profile.RollbackMinProfitFactor,
-		RollbackMaxDrawdownPct:  profile.RollbackMaxDrawdownPct,
-		HighADXReportOnly:       profile.HighADXReportOnly,
-		RRReportOnly:            profile.RRReportOnly,
-		RollingGateReportOnly:   profile.RollingGateReportOnly,
+		Mode:                        mode,
+		EffectiveMode:               effectiveMode,
+		AnalysisIntervalMin:         interval,
+		PromptCandidateLimit:        profile.PromptCandidateLimit,
+		DailyOpenLimit:              profile.DailyOpenLimit,
+		RollbackWindowHours:         profile.RollbackWindowHours,
+		RollbackMinProfitFactor:     profile.RollbackMinProfitFactor,
+		RollbackMaxDrawdownPct:      profile.RollbackMaxDrawdownPct,
+		HighADXReportOnly:           profile.HighADXReportOnly,
+		RRReportOnly:                profile.RRReportOnly,
+		RollingGateReportOnly:       profile.RollingGateReportOnly,
+		GateEffectivenessReportOnly: profile.GateEffectivenessReportOnly,
+		LoosenMode: decision.LoosenModePolicy{
+			Enabled:                  profile.LoosenMode.Enabled,
+			InactivityWindowMinutes:  profile.LoosenMode.InactivityWindowMinutes,
+			PilotConfidenceDrop:      profile.LoosenMode.PilotConfidenceDrop,
+			MinNetRRDelta:            profile.LoosenMode.MinNetRRDelta,
+			MaxChaseRatioBump:        profile.LoosenMode.MaxChaseRatioBump,
+			MaxDurationHours:         profile.LoosenMode.MaxDurationHours,
+			HardFloorPilotConfidence: profile.LoosenMode.HardFloorPilotConfidence,
+		},
 	}
 }
 
@@ -216,13 +226,17 @@ func decisionStrategyRiskPolicy(profile config.StrategyRiskProfile) decision.Str
 
 func decisionProgrammaticStrategyPolicy(profile config.ProgrammaticStrategyProfile) decision.ProgrammaticStrategyPolicy {
 	return decision.ProgrammaticStrategyPolicy{
-		DecisionMode:    profile.DecisionMode,
-		StrategyName:    profile.StrategyName,
-		StrategyVersion: profile.StrategyVersion,
-		ConfigHash:      profile.ConfigHash,
-		AllowLong:       profile.AllowLong,
-		AllowShort:      profile.AllowShort,
-		EnabledSignals:  append([]string(nil), profile.EnabledSignals...),
+		DecisionMode:                  profile.DecisionMode,
+		StrategyName:                  profile.StrategyName,
+		StrategyVersion:               profile.StrategyVersion,
+		ConfigHash:                    profile.ConfigHash,
+		DefectFixPackEnabled:          profile.DefectFixPackEnabled,
+		SuppressionPermanentThreshold: profile.SuppressionPermanentThreshold,
+		MaxPilotNotionalPct:           profile.MaxPilotNotionalPct,
+		MinPilotNotionalUSD:           profile.MinPilotNotionalUSD,
+		AllowLong:                     profile.AllowLong,
+		AllowShort:                    profile.AllowShort,
+		EnabledSignals:                append([]string(nil), profile.EnabledSignals...),
 		Timeframes: decision.ProgrammaticTimeframesPolicy{
 			Higher: profile.Timeframes.Higher,
 			Trade:  profile.Timeframes.Trade,
@@ -332,20 +346,31 @@ func decisionProgrammaticStrategyPolicy(profile config.ProgrammaticStrategyProfi
 			AllowPilotOpen:             profile.PreviewSignals.AllowPilotOpen,
 			PilotRiskFraction:          profile.PreviewSignals.PilotRiskFraction,
 			PilotMinConfidence:         profile.PreviewSignals.PilotMinConfidence,
+			PilotMinConfidenceBySignal: copyStringIntMap(profile.PreviewSignals.PilotMinConfidenceBySignal),
+			PilotMinConfidenceUseP75:   profile.PreviewSignals.PilotMinConfidenceUseP75,
+			P75Floor:                   profile.PreviewSignals.P75Floor,
+			P75Ceiling:                 profile.PreviewSignals.P75Ceiling,
 			RequireConfirmedUpgrade:    profile.PreviewSignals.RequireConfirmedUpgrade,
 		},
 		EntryTiming: decision.ProgrammaticEntryTimingPolicy{
-			Enabled:                 profile.EntryTiming.Enabled,
-			DirectStructureOpen:     profile.EntryTiming.DirectStructureOpen,
-			DirectOpenMaxAgeCandles: profile.EntryTiming.DirectOpenMaxAgeCandles,
-			RequireFreshTrigger:     profile.EntryTiming.RequireFreshTrigger,
-			TriggerTimeframe:        profile.EntryTiming.TriggerTimeframe,
-			AllowedTriggerTypes:     append([]string(nil), profile.EntryTiming.AllowedTriggerTypes...),
+			Enabled:                      profile.EntryTiming.Enabled,
+			DirectStructureOpen:          profile.EntryTiming.DirectStructureOpen,
+			DirectStructureMinConfidence: profile.EntryTiming.DirectStructureMinConfidence,
+			DirectOpenMaxAgeCandles:      profile.EntryTiming.DirectOpenMaxAgeCandles,
+			MaxNoTriggerSubCandles:       profile.EntryTiming.MaxNoTriggerSubCandles,
+			RequireFreshTrigger:          profile.EntryTiming.RequireFreshTrigger,
+			TriggerTimeframe:             profile.EntryTiming.TriggerTimeframe,
+			AllowedTriggerTypes:          append([]string(nil), profile.EntryTiming.AllowedTriggerTypes...),
 			EntryZone: decision.ProgrammaticEntryZonePolicy{
-				Mode:              profile.EntryTiming.EntryZone.Mode,
-				MaxChaseRatio:     profile.EntryTiming.EntryZone.MaxChaseRatio,
-				MinRemainingNetRR: profile.EntryTiming.EntryZone.MinRemainingNetRR,
-				SymbolOverrides:   copyEntryZoneOverrides(profile.EntryTiming.EntryZone.SymbolOverrides),
+				Mode:                         profile.EntryTiming.EntryZone.Mode,
+				MaxChaseRatio:                profile.EntryTiming.EntryZone.MaxChaseRatio,
+				MinRemainingNetRR:            profile.EntryTiming.EntryZone.MinRemainingNetRR,
+				MaxChaseATRMultiplier:        profile.EntryTiming.EntryZone.MaxChaseATRMultiplier,
+				FreshAgeChaseRelax:           profile.EntryTiming.EntryZone.FreshAgeChaseRelax,
+				SignalTypeMinRR:              copyStringFloatMap(profile.EntryTiming.EntryZone.SignalTypeMinRR),
+				TierOverrides:                copyEntryZoneOverrides(profile.EntryTiming.EntryZone.TierOverrides),
+				SymbolOverrides:              copyEntryZoneOverrides(profile.EntryTiming.EntryZone.SymbolOverrides),
+				TheoreticalRRUnreachableSkip: profile.EntryTiming.EntryZone.TheoreticalRRUnreachableSkip,
 			},
 			MaxTriggerAgeCandles: profile.EntryTiming.MaxTriggerAgeCandles,
 			MinTriggerConfidence: profile.EntryTiming.MinTriggerConfidence,
@@ -355,6 +380,12 @@ func decisionProgrammaticStrategyPolicy(profile config.ProgrammaticStrategyProfi
 				MinConfidence: profile.EntryTiming.Pilot.MinConfidence,
 			},
 			ContinuationAfterTargetCrossed: profile.EntryTiming.ContinuationAfterTargetCrossed,
+		},
+		CandidateGovernor: decision.ProgrammaticCandidateGovernorPolicy{
+			Enabled:               profile.CandidateGovernor.Enabled,
+			AllowNonCryptoSymbols: append([]string(nil), profile.CandidateGovernor.AllowNonCryptoSymbols...),
+			MaxQuoteSpreadBps:     profile.CandidateGovernor.MaxQuoteSpreadBps,
+			CoreSymbolsMustAppear: append([]string(nil), profile.CandidateGovernor.CoreSymbolsMustAppear...),
 		},
 		State: decision.ProgrammaticStatePolicy{
 			Path:      profile.State.Path,
@@ -368,6 +399,17 @@ func copyStringIntMap(values map[string]int) map[string]int {
 		return nil
 	}
 	out := make(map[string]int, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
+}
+
+func copyStringFloatMap(values map[string]float64) map[string]float64 {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(values))
 	for key, value := range values {
 		out[key] = value
 	}

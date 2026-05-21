@@ -29,6 +29,7 @@ type ProgrammaticStateFile struct {
 
 type ProgrammaticTraderState struct {
 	Symbols map[string]ProgrammaticSymbolState `json:"symbols"`
+	Loosen  LoosenState                        `json:"loosen,omitempty"`
 }
 
 type ProgrammaticSymbolState struct {
@@ -37,6 +38,8 @@ type ProgrammaticSymbolState struct {
 	ConfirmedSignals        map[string]StoredSignal              `json:"confirmed_signals,omitempty"`
 	ExecutedSignals         map[string]SignalExec                `json:"executed_signals,omitempty"`
 	SuppressedSignals       map[string]SignalSuppression         `json:"suppressed_signals,omitempty"`
+	LifecycleTerminations   map[string]LifecycleTermination      `json:"lifecycle_terminations,omitempty"`
+	ConfidenceSamples       []ConfidenceSample                   `json:"confidence_samples,omitempty"`
 	SignalLifecycles        map[string]SignalLifecycle           `json:"signal_lifecycles,omitempty"`
 	AddCountBySide          map[string]int                       `json:"add_count_by_side,omitempty"`
 	ShortTradeState         *ShortTradeState                     `json:"short_trade_state,omitempty"`
@@ -104,6 +107,35 @@ type SignalSuppression struct {
 	CurrentPrice      float64   `json:"current_price,omitempty"`
 	StopLoss          float64   `json:"stop_loss,omitempty"`
 	TakeProfit        float64   `json:"take_profit,omitempty"`
+	Severity          int       `json:"severity,omitempty"`
+	PermanentSkip     bool      `json:"permanent_skip,omitempty"`
+}
+
+type LifecycleTermination struct {
+	StructureKey string    `json:"structure_key"`
+	ReasonCode   string    `json:"reason_code"`
+	SignalID     string    `json:"signal_id,omitempty"`
+	TerminatedAt time.Time `json:"terminated_at"`
+	ExpiryAt     time.Time `json:"expiry_at,omitempty"`
+}
+
+type ConfidenceSample struct {
+	SignalType string    `json:"signal_type"`
+	Confidence int       `json:"confidence"`
+	At         time.Time `json:"at"`
+}
+
+type LoosenState struct {
+	Active    bool      `json:"active"`
+	EnteredAt time.Time `json:"entered_at,omitempty"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+}
+
+type SuppressionStats struct {
+	TotalActive      int            `json:"total_active"`
+	ByReason         map[string]int `json:"by_reason"`
+	OldestAgeCandles int            `json:"oldest_age_candles"`
+	PermanentSkip    int            `json:"permanent_skip"`
 }
 
 type SignalLifecycle struct {
@@ -195,6 +227,59 @@ func (s *StateStore) StoreConfirmedSignal(traderID, symbol string, signal Chanlu
 	}
 	state.ConfirmedSignals[signal.SignalID] = StoredSignal{Signal: signal, StoredAt: s.now(), Bootstrap: bootstrap}
 	s.setSymbolLocked(traderID, symbol, state)
+}
+
+func (s *StateStore) StoreConfidenceSample(traderID, symbol, signalType string, confidence int, at time.Time) {
+	if traderID == "" || symbol == "" || signalType == "" || confidence <= 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	if at.IsZero() {
+		at = s.now()
+	}
+	state.ConfidenceSamples = append(state.ConfidenceSamples, ConfidenceSample{
+		SignalType: strings.ToLower(strings.TrimSpace(signalType)),
+		Confidence: confidence,
+		At:         at,
+	})
+	cutoff := at.Add(-8 * 24 * time.Hour)
+	kept := state.ConfidenceSamples[:0]
+	for _, sample := range state.ConfidenceSamples {
+		if sample.At.IsZero() || !sample.At.Before(cutoff) {
+			kept = append(kept, sample)
+		}
+	}
+	state.ConfidenceSamples = kept
+	s.setSymbolLocked(traderID, symbol, state)
+}
+
+func (s *StateStore) ConfidenceWindow(traderID, signalType string, duration time.Duration) []int {
+	if traderID == "" || signalType == "" || duration <= 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	trader := s.data.Traders[traderID]
+	if len(trader.Symbols) == 0 {
+		return nil
+	}
+	cutoff := s.now().Add(-duration)
+	normalizedType := strings.ToLower(strings.TrimSpace(signalType))
+	var out []int
+	for _, state := range trader.Symbols {
+		for _, sample := range state.ConfidenceSamples {
+			if strings.ToLower(strings.TrimSpace(sample.SignalType)) != normalizedType {
+				continue
+			}
+			if !sample.At.IsZero() && sample.At.Before(cutoff) {
+				continue
+			}
+			out = append(out, sample.Confidence)
+		}
+	}
+	return out
 }
 
 func (s *StateStore) MarkExecuted(traderID, symbol, signalID, action string) bool {
@@ -332,6 +417,289 @@ func (s *StateStore) StoreStructureSuppression(traderID, symbol string, suppress
 	}
 	state.SuppressedSignals[key] = suppression
 	s.setSymbolLocked(traderID, symbol, state)
+}
+
+func (s *StateStore) FastSkipReason(traderID, symbol, structureKey string) (string, bool) {
+	if traderID == "" || symbol == "" || structureKey == "" {
+		return "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	if term, ok := state.LifecycleTerminations[structureKey]; ok {
+		if !term.ExpiryAt.IsZero() && !term.ExpiryAt.After(s.now()) {
+			delete(state.LifecycleTerminations, structureKey)
+			s.setSymbolLocked(traderID, symbol, state)
+			return "", false
+		}
+		reason := term.ReasonCode
+		if reason == "" {
+			reason = "lifecycle_terminated"
+		}
+		return reason, true
+	}
+	var latest SignalSuppression
+	found := false
+	for _, suppression := range state.SuppressedSignals {
+		if suppression.StructureKey != structureKey {
+			continue
+		}
+		if !found || suppression.LastSeenAt.After(latest.LastSeenAt) {
+			latest = suppression
+			found = true
+		}
+	}
+	if !found {
+		return "", false
+	}
+	reason := latest.ReasonCode
+	if latest.PermanentSkip {
+		reason = "permanent_skip"
+	}
+	if reason == "" {
+		reason = "suppressed"
+	}
+	return reason, true
+}
+
+func (s *StateStore) FastSkipSet(traderID string) map[string]string {
+	if traderID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	trader := s.data.Traders[traderID]
+	if len(trader.Symbols) == 0 {
+		return nil
+	}
+	now := s.now()
+	result := map[string]string{}
+	changed := false
+	for symbol, state := range trader.Symbols {
+		for structureKey, term := range state.LifecycleTerminations {
+			if !term.ExpiryAt.IsZero() && !term.ExpiryAt.After(now) {
+				delete(state.LifecycleTerminations, structureKey)
+				changed = true
+				continue
+			}
+			reason := term.ReasonCode
+			if reason == "" {
+				reason = "lifecycle_terminated"
+			}
+			result[structureKey] = reason
+		}
+		for _, suppression := range state.SuppressedSignals {
+			if suppression.StructureKey == "" {
+				continue
+			}
+			reason := suppression.ReasonCode
+			if suppression.PermanentSkip {
+				reason = "permanent_skip"
+			}
+			if reason == "" {
+				reason = "suppressed"
+			}
+			if _, exists := result[suppression.StructureKey]; !exists {
+				result[suppression.StructureKey] = reason
+			}
+		}
+		if changed {
+			trader.Symbols[symbol] = state
+		}
+	}
+	if changed {
+		s.data.Traders[traderID] = trader
+	}
+	return result
+}
+
+func (s *StateStore) TerminateLifecycle(traderID, symbol, structureKey, reasonCode, signalID string, expiry time.Time) {
+	if traderID == "" || symbol == "" || structureKey == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	if state.LifecycleTerminations == nil {
+		state.LifecycleTerminations = map[string]LifecycleTermination{}
+	}
+	state.LifecycleTerminations[structureKey] = LifecycleTermination{
+		StructureKey: structureKey,
+		ReasonCode:   reasonCode,
+		SignalID:     signalID,
+		TerminatedAt: s.now(),
+		ExpiryAt:     expiry,
+	}
+	s.setSymbolLocked(traderID, symbol, state)
+}
+
+func (s *StateStore) IsLifecycleTerminated(traderID, symbol, structureKey string) bool {
+	if traderID == "" || symbol == "" || structureKey == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	term, ok := state.LifecycleTerminations[structureKey]
+	if !ok {
+		return false
+	}
+	if !term.ExpiryAt.IsZero() && !term.ExpiryAt.After(s.now()) {
+		delete(state.LifecycleTerminations, structureKey)
+		s.setSymbolLocked(traderID, symbol, state)
+		return false
+	}
+	return true
+}
+
+func (s *StateStore) UpgradeSuppression(traderID, symbol, structureKey, newReason string) {
+	if traderID == "" || symbol == "" || structureKey == "" || newReason == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	for key, suppression := range state.SuppressedSignals {
+		if suppression.StructureKey != structureKey {
+			continue
+		}
+		suppression.ReasonCode = strings.ToLower(strings.TrimSpace(newReason))
+		if suppression.Severity < 1 {
+			suppression.Severity = 1
+		}
+		suppression.LastSeenAt = s.now()
+		suppression.SeenCount++
+		state.SuppressedSignals[key] = suppression
+	}
+	s.setSymbolLocked(traderID, symbol, state)
+}
+
+func (s *StateStore) MarkPermanentSkip(traderID, symbol, structureKey string) {
+	if traderID == "" || symbol == "" || structureKey == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	for key, suppression := range state.SuppressedSignals {
+		if suppression.StructureKey != structureKey {
+			continue
+		}
+		suppression.PermanentSkip = true
+		suppression.Severity = 2
+		suppression.LastSeenAt = s.now()
+		state.SuppressedSignals[key] = suppression
+	}
+	s.setSymbolLocked(traderID, symbol, state)
+}
+
+func (s *StateStore) GCExpiredSuppressions(now time.Time) {
+	if now.IsZero() {
+		now = s.now()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cutoff := now.Add(-8 * 24 * time.Hour)
+	for traderID, trader := range s.data.Traders {
+		for symbol, state := range trader.Symbols {
+			for structureKey, term := range state.LifecycleTerminations {
+				if !term.ExpiryAt.IsZero() && !term.ExpiryAt.After(now) {
+					delete(state.LifecycleTerminations, structureKey)
+				}
+			}
+			for key, suppression := range state.SuppressedSignals {
+				if suppression.PermanentSkip {
+					continue
+				}
+				lastSeen := suppression.LastSeenAt
+				if lastSeen.IsZero() {
+					lastSeen = suppression.SuppressedAt
+				}
+				if !lastSeen.IsZero() && lastSeen.Before(cutoff) {
+					delete(state.SuppressedSignals, key)
+				}
+			}
+			trader.Symbols[symbol] = state
+		}
+		s.data.Traders[traderID] = trader
+	}
+}
+
+func (s *StateStore) SuppressionStats(traderID string) SuppressionStats {
+	stats := SuppressionStats{ByReason: map[string]int{}}
+	if traderID == "" {
+		return stats
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	trader := s.data.Traders[traderID]
+	now := s.now()
+	for _, state := range trader.Symbols {
+		for _, suppression := range state.SuppressedSignals {
+			stats.TotalActive++
+			reason := suppression.ReasonCode
+			if reason == "" {
+				reason = "suppressed"
+			}
+			stats.ByReason[reason]++
+			if suppression.PermanentSkip {
+				stats.PermanentSkip++
+			}
+			started := suppression.SuppressedAt
+			if started.IsZero() {
+				started = suppression.LastSeenAt
+			}
+			if !started.IsZero() {
+				ageCandles := int(now.Sub(started) / time.Hour)
+				if ageCandles > stats.OldestAgeCandles {
+					stats.OldestAgeCandles = ageCandles
+				}
+			}
+		}
+	}
+	return stats
+}
+
+func (s *StateStore) LoosenState(traderID string) LoosenState {
+	if traderID == "" {
+		return LoosenState{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.data.Traders[traderID].Loosen
+}
+
+func (s *StateStore) SetLoosenState(traderID string, state LoosenState) {
+	if traderID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	trader := s.data.Traders[traderID]
+	if trader.Symbols == nil {
+		trader.Symbols = map[string]ProgrammaticSymbolState{}
+	}
+	trader.Loosen = state
+	s.data.Traders[traderID] = trader
+}
+
+func (s *StateStore) StructureSuppressionSeenCount(traderID, symbol, structureKey string) int {
+	if traderID == "" || symbol == "" || structureKey == "" {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.ensureSymbolLocked(traderID, symbol)
+	maxSeen := 0
+	for _, suppression := range state.SuppressedSignals {
+		if suppression.StructureKey != structureKey {
+			continue
+		}
+		if suppression.SeenCount > maxSeen {
+			maxSeen = suppression.SeenCount
+		}
+	}
+	return maxSeen
 }
 
 func signalSuppressionKey(signalID, action, reasonCode string) string {
@@ -852,6 +1220,9 @@ func (s *StateStore) ensureSymbolLocked(traderID, symbol string) ProgrammaticSym
 	}
 	if state.SuppressedSignals == nil {
 		state.SuppressedSignals = map[string]SignalSuppression{}
+	}
+	if state.LifecycleTerminations == nil {
+		state.LifecycleTerminations = map[string]LifecycleTermination{}
 	}
 	if state.SignalLifecycles == nil {
 		state.SignalLifecycles = map[string]SignalLifecycle{}

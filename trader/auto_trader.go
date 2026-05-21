@@ -477,6 +477,7 @@ func (at *AutoTrader) runCycle() error {
 		TotalUnrealizedProfit: ctx.Account.TotalPnL,
 		PositionCount:         ctx.Account.PositionCount,
 		MarginUsedPct:         ctx.Account.MarginUsedPct,
+		TotalRealized24h:      ctx.Account.TotalRealized24h,
 	}
 
 	// 保存持仓快照
@@ -514,6 +515,7 @@ func (at *AutoTrader) runCycle() error {
 		record.StrategyName = fullDecision.StrategyName
 		record.StrategyVersion = fullDecision.StrategyVersion
 		record.ConfigHash = fullDecision.ConfigHash
+		record.WaitReasonSummary = fullDecision.WaitReasonSummary
 		record.StrategyParams = copyAnyMap(fullDecision.StrategyParams)
 		record.StrategyDiagnostics = copyAnyMap(fullDecision.StrategyDiagnostics)
 		if len(fullDecision.Decisions) > 0 {
@@ -522,6 +524,7 @@ func (at *AutoTrader) runCycle() error {
 		}
 		at.appendOpenRejectionsToRecord(record, fullDecision.OpenRejections)
 		record.RiskState = at.buildRiskStateSnapshot(ctx, fullDecision.OpenRejections)
+		applyStrategyDiagnosticsToRecord(record)
 		at.fillCandidateSnapshots(record, ctx)
 		at.applyAICallState(fullDecision)
 	}
@@ -644,6 +647,61 @@ func copyAnyMap(source map[string]any) map[string]any {
 	return copied
 }
 
+func applyStrategyDiagnosticsToRecord(record *logger.DecisionRecord) {
+	if record == nil || len(record.StrategyDiagnostics) == 0 {
+		return
+	}
+	if accountState, ok := record.StrategyDiagnostics["account_state"].(map[string]any); ok {
+		record.AccountState.AccountTooSmall = actionRecordMetadataBool(accountState, "account_too_small")
+		record.AccountState.TotalRealized24h = actionRecordMetadataFloat(accountState, "total_realized_24h")
+	}
+	if record.RiskState == nil {
+		return
+	}
+	if riskState, ok := record.StrategyDiagnostics["risk_state"].(map[string]any); ok {
+		if value, _ := riskState["active_mode"].(string); value != "" {
+			record.RiskState.ActiveMode = value
+		}
+		if value := actionRecordMetadataFloat(riskState, "inactivity_minutes"); value > 0 {
+			record.RiskState.InactivityMinutes = int(value)
+		}
+		if value, _ := riskState["last_open_at"].(string); value != "" {
+			record.RiskState.LastOpenAt = value
+		}
+		if value, _ := riskState["last_close_at"].(string); value != "" {
+			record.RiskState.LastCloseAt = value
+		}
+		if value := actionRecordMetadataFloat(riskState, "open_count_24h"); value > 0 {
+			record.RiskState.OpenCount24h = int(value)
+		}
+		if value := actionRecordMetadataFloat(riskState, "open_rejected_24h"); value > 0 {
+			record.RiskState.OpenRejected24h = int(value)
+		}
+		if value := actionRecordMetadataFloat(riskState, "signal_count_24h"); value > 0 {
+			record.RiskState.SignalCount24h = int(value)
+		}
+		if value, ok := riskState["gate_effectiveness"].(map[string]any); ok {
+			record.RiskState.GateEffectiveness = copyAnyMap(value)
+		}
+		if value, ok := riskState["suppressions"].(map[string]any); ok {
+			record.RiskState.Suppressions = copyAnyMap(value)
+		}
+		if value, ok := riskState["warnings"].(map[string]bool); ok {
+			record.RiskState.Warnings = value
+		} else if value, ok := riskState["warnings"].(map[string]any); ok {
+			warnings := map[string]bool{}
+			for key, raw := range value {
+				if enabled, _ := raw.(bool); enabled {
+					warnings[key] = true
+				}
+			}
+			if len(warnings) > 0 {
+				record.RiskState.Warnings = warnings
+			}
+		}
+	}
+}
+
 func applyDecisionSizingToActionRecord(d *decision.Decision, actionRecord *logger.DecisionAction) {
 	if d == nil || actionRecord == nil {
 		return
@@ -732,6 +790,14 @@ func actionRecordMetadataFloat(values map[string]any, key string) float64 {
 	default:
 		return 0
 	}
+}
+
+func actionRecordMetadataBool(values map[string]any, key string) bool {
+	if len(values) == 0 {
+		return false
+	}
+	value, _ := values[key].(bool)
+	return value
 }
 
 func metadataStringValue(values map[string]any, key string) string {
@@ -861,6 +927,26 @@ func (at *AutoTrader) buildRiskStateSnapshot(ctx *decision.Context, rejections [
 		FrequencyState:           copyFrequencyStateSnapshot(ctx.FrequencyState),
 		LossMode:                 copyLossModeSnapshot(ctx.LossMode),
 	}
+	if ctx.FrequencyPolicy != nil {
+		snapshot.ActiveMode = firstNonEmpty(ctx.FrequencyPolicy.EffectiveMode, ctx.FrequencyPolicy.Mode)
+	}
+	if ctx.FrequencyState != nil {
+		snapshot.OpenCount24h = ctx.FrequencyState.OpenCount24h
+		snapshot.OpenRejected24h = ctx.FrequencyState.OpenRejected24h
+		snapshot.SignalCount24h = ctx.FrequencyState.SignalCount24h
+		if !ctx.FrequencyState.LastOpenAt.IsZero() {
+			snapshot.LastOpenAt = ctx.FrequencyState.LastOpenAt.Format(time.RFC3339)
+			snapshot.InactivityMinutes = int(time.Since(ctx.FrequencyState.LastOpenAt).Minutes())
+		} else if ctx.RuntimeMinutes > 0 {
+			snapshot.InactivityMinutes = ctx.RuntimeMinutes
+		}
+		if !ctx.FrequencyState.LastCloseAt.IsZero() {
+			snapshot.LastCloseAt = ctx.FrequencyState.LastCloseAt.Format(time.RFC3339)
+		}
+	}
+	if snapshot.OpenRejected24h >= 10 && snapshot.OpenCount24h == 0 {
+		snapshot.Warnings = map[string]bool{"runaway_rejection_loop": true}
+	}
 	if !ctx.AIBackoffUntil.IsZero() {
 		snapshot.AIBackoffUntil = ctx.AIBackoffUntil.Format(time.RFC3339)
 	}
@@ -904,17 +990,27 @@ func copyFrequencyPolicySnapshot(policy *decision.FrequencyPolicy) *logger.Frequ
 		return nil
 	}
 	return &logger.FrequencyPolicySnapshot{
-		Mode:                    policy.Mode,
-		EffectiveMode:           policy.EffectiveMode,
-		AnalysisIntervalMin:     policy.AnalysisIntervalMin,
-		PromptCandidateLimit:    policy.PromptCandidateLimit,
-		DailyOpenLimit:          policy.DailyOpenLimit,
-		RollbackWindowHours:     policy.RollbackWindowHours,
-		RollbackMinProfitFactor: policy.RollbackMinProfitFactor,
-		RollbackMaxDrawdownPct:  policy.RollbackMaxDrawdownPct,
-		HighADXReportOnly:       policy.HighADXReportOnly,
-		RRReportOnly:            policy.RRReportOnly,
-		RollingGateReportOnly:   policy.RollingGateReportOnly,
+		Mode:                        policy.Mode,
+		EffectiveMode:               policy.EffectiveMode,
+		AnalysisIntervalMin:         policy.AnalysisIntervalMin,
+		PromptCandidateLimit:        policy.PromptCandidateLimit,
+		DailyOpenLimit:              policy.DailyOpenLimit,
+		RollbackWindowHours:         policy.RollbackWindowHours,
+		RollbackMinProfitFactor:     policy.RollbackMinProfitFactor,
+		RollbackMaxDrawdownPct:      policy.RollbackMaxDrawdownPct,
+		HighADXReportOnly:           policy.HighADXReportOnly,
+		RRReportOnly:                policy.RRReportOnly,
+		RollingGateReportOnly:       policy.RollingGateReportOnly,
+		GateEffectivenessReportOnly: policy.GateEffectivenessReportOnly,
+		LoosenMode: logger.LoosenModeSnapshot{
+			Enabled:                  policy.LoosenMode.Enabled,
+			InactivityWindowMinutes:  policy.LoosenMode.InactivityWindowMinutes,
+			PilotConfidenceDrop:      policy.LoosenMode.PilotConfidenceDrop,
+			MinNetRRDelta:            policy.LoosenMode.MinNetRRDelta,
+			MaxChaseRatioBump:        policy.LoosenMode.MaxChaseRatioBump,
+			MaxDurationHours:         policy.LoosenMode.MaxDurationHours,
+			HardFloorPilotConfidence: policy.LoosenMode.HardFloorPilotConfidence,
+		},
 	}
 }
 
@@ -922,14 +1018,23 @@ func copyFrequencyStateSnapshot(state *decision.FrequencyState) *logger.Frequenc
 	if state == nil {
 		return nil
 	}
-	return &logger.FrequencyStateSnapshot{
+	snapshot := &logger.FrequencyStateSnapshot{
 		OpenCount24h:       state.OpenCount24h,
 		ClosedTrades24h:    state.ClosedTrades24h,
 		ProfitFactor24h:    state.ProfitFactor24h,
 		Drawdown24hPct:     state.Drawdown24hPct,
 		AutoRollbackActive: state.AutoRollbackActive,
 		AutoRollbackReason: state.AutoRollbackReason,
+		OpenRejected24h:    state.OpenRejected24h,
+		SignalCount24h:     state.SignalCount24h,
 	}
+	if !state.LastOpenAt.IsZero() {
+		snapshot.LastOpenAt = state.LastOpenAt.Format(time.RFC3339)
+	}
+	if !state.LastCloseAt.IsZero() {
+		snapshot.LastCloseAt = state.LastCloseAt.Format(time.RFC3339)
+	}
+	return snapshot
 }
 
 func copyLossModeSnapshot(state *decision.LossModeState) *logger.LossModeSnapshot {
@@ -982,6 +1087,7 @@ func (at *AutoTrader) fillCandidateSnapshots(record *logger.DecisionRecord, ctx 
 			FilterReason:     coin.FilterReason,
 			IncludedInPrompt: coin.IncludedInPrompt,
 			Warnings:         append([]string(nil), coin.Warnings...),
+			Errors:           append([]string(nil), coin.Errors...),
 		})
 	}
 }
@@ -1183,6 +1289,7 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	}
 	frequencyRecords := at.loadRecentDecisionRecords(500)
 	frequencyState := at.buildFrequencyState(frequencyRecords, totalEquity)
+	totalRealized24h := totalRealizedPnLSince(frequencyRecords, time.Now().Add(-24*time.Hour))
 	frequencyPolicy := at.effectiveFrequencyPolicy(frequencyState)
 
 	// 4. 获取候选币种池（动态候选池优先，失败时回退 AI500 + OI Top）
@@ -1284,20 +1391,58 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 			AvailableBalance: availableBalance,
 			TotalPnL:         totalPnL,
 			TotalPnLPct:      totalPnLPct,
+			TotalRealized24h: totalRealized24h,
 			MarginUsed:       totalMarginUsed,
 			MarginUsedPct:    marginUsedPct,
 			PositionCount:    len(positionInfos),
 		},
-		Positions:        positionInfos,
-		CandidateCoins:   candidateCoins,
-		Performance:      performance, // 添加历史表现分析
-		PerformanceGates: performanceGates,
-		ExecutionQuality: executionQuality,
+		Positions:           positionInfos,
+		CandidateCoins:      candidateCoins,
+		QuoteSpreadProvider: at.quoteSpreadProvider(),
+		Performance:         performance, // 添加历史表现分析
+		PerformanceGates:    performanceGates,
+		ExecutionQuality:    executionQuality,
 	}
 	// 注入全局熔断状态，确保每个周期的 Context 包含当前熔断状态
 	ctx.CircuitBreaker = decision.GetCircuitBreakerState()
 
 	return ctx, nil
+}
+
+func (at *AutoTrader) quoteSpreadProvider() decision.QuoteSpreadProvider {
+	if at == nil || at.trader == nil {
+		return nil
+	}
+	return func(symbol string) (float64, float64, error) {
+		quoteMid := 0.0
+		if data, err := market.Get(symbol); err == nil && data != nil {
+			quoteMid = data.CurrentPrice
+			if quoteMid <= 0 {
+				quoteMid = latestCloseFromMarketData(data)
+			}
+		}
+		execMid, err := at.trader.GetMarketPrice(symbol)
+		if err != nil {
+			return quoteMid, 0, err
+		}
+		if quoteMid <= 0 {
+			quoteMid = execMid
+		}
+		return quoteMid, execMid, nil
+	}
+}
+
+func latestCloseFromMarketData(data *market.Data) float64 {
+	if data == nil {
+		return 0
+	}
+	for _, timeframe := range []string{"3m", "15m", "1h", "4h"} {
+		klines := data.Klines[timeframe]
+		if len(klines) > 0 && klines[len(klines)-1].Close > 0 {
+			return klines[len(klines)-1].Close
+		}
+	}
+	return 0
 }
 
 func (at *AutoTrader) loadRecentDecisionRecords(limit int) []*logger.DecisionRecord {
@@ -1329,6 +1474,10 @@ func (at *AutoTrader) buildFrequencyState(records []*logger.DecisionRecord, acco
 		ClosedTrades24h: stats.ClosedTrades,
 		ProfitFactor24h: stats.ProfitFactor,
 	}
+	state.LastOpenAt = lastSuccessfulOpenAt(records)
+	state.LastCloseAt = lastCloseAt(records)
+	state.OpenRejected24h = countOpenRejected(records, since)
+	state.SignalCount24h = countSignals24h(records, since)
 	if accountEquity > 0 {
 		state.Drawdown24hPct = stats.MaxDrawdownUSD / accountEquity * 100
 	}
@@ -1353,6 +1502,96 @@ func (at *AutoTrader) buildFrequencyState(records []*logger.DecisionRecord, acco
 		}
 	}
 	return state
+}
+
+func lastSuccessfulOpenAt(records []*logger.DecisionRecord) time.Time {
+	var latest time.Time
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		for _, action := range record.Decisions {
+			if !isOpenActionName(action.Action) || !action.Success {
+				continue
+			}
+			actionTime := action.Timestamp
+			if actionTime.IsZero() {
+				actionTime = record.Timestamp
+			}
+			if latest.IsZero() || actionTime.After(latest) {
+				latest = actionTime
+			}
+		}
+	}
+	return latest
+}
+
+func lastCloseAt(records []*logger.DecisionRecord) time.Time {
+	var latest time.Time
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		for _, action := range record.Decisions {
+			if !strings.HasPrefix(action.Action, "close_") && action.Action != "partial_close" {
+				continue
+			}
+			actionTime := action.Timestamp
+			if actionTime.IsZero() {
+				actionTime = record.Timestamp
+			}
+			if latest.IsZero() || actionTime.After(latest) {
+				latest = actionTime
+			}
+		}
+	}
+	return latest
+}
+
+func countOpenRejected(records []*logger.DecisionRecord, since time.Time) int {
+	count := 0
+	for _, record := range records {
+		if record == nil || (!since.IsZero() && record.Timestamp.Before(since)) {
+			continue
+		}
+		for _, action := range record.Decisions {
+			if action.Action == "open_rejected" {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func countSignals24h(records []*logger.DecisionRecord, since time.Time) int {
+	count := 0
+	for _, record := range records {
+		if record == nil || (!since.IsZero() && record.Timestamp.Before(since)) {
+			continue
+		}
+		if diag, ok := record.StrategyDiagnostics["per_candidate"].([]any); ok {
+			count += len(diag)
+			continue
+		}
+		count += len(record.CandidateDetails)
+	}
+	return count
+}
+
+func totalRealizedPnLSince(records []*logger.DecisionRecord, since time.Time) float64 {
+	events, _ := logger.BuildTradeEvents(records)
+	total := 0.0
+	for _, event := range events {
+		if !since.IsZero() && event.CloseTime.Before(since) {
+			continue
+		}
+		total += event.PnL
+	}
+	return total
+}
+
+func isOpenActionName(action string) bool {
+	return action == "open_long" || action == "open_short" || action == "add_long" || action == "add_short"
 }
 
 func (at *AutoTrader) effectiveFrequencyPolicy(state decision.FrequencyState) decision.FrequencyPolicy {

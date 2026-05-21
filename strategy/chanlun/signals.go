@@ -188,6 +188,20 @@ func buildSignal(input SignalInput, signalType, direction string, segment Segmen
 	return signal
 }
 
+func (s ChanlunSignal) IsBornInvalid() bool {
+	if s.Price <= 0 || s.StopLoss <= 0 || s.TakeProfit <= 0 {
+		return true
+	}
+	switch s.Direction {
+	case SideLong:
+		return !(s.StopLoss < s.Price && s.Price < s.TakeProfit)
+	case SideShort:
+		return !(s.StopLoss > s.Price && s.Price > s.TakeProfit)
+	default:
+		return true
+	}
+}
+
 func calculateSignalConfidence(input SignalInput, signalType, direction string, div DivergenceResult) (int, map[string]any) {
 	score := baseSignalConfidence(signalType)
 	metrics := map[string]any{

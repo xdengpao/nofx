@@ -209,6 +209,45 @@ func TestNormalizeTradingFrequency_DefaultBlockDerivesBalanced(t *testing.T) {
 	if !profile.HighADXReportOnly || !profile.RRReportOnly || !profile.RollingGateReportOnly {
 		t.Fatalf("balanced应默认开启report-only: %+v", profile)
 	}
+	if !profile.LoosenMode.Enabled || profile.LoosenMode.InactivityWindowMinutes != 720 ||
+		profile.LoosenMode.HardFloorPilotConfidence != 60 {
+		t.Fatalf("loosen mode默认值错误: %+v", profile.LoosenMode)
+	}
+}
+
+func TestNormalizeTradingFrequency_LoosenModeOverrides(t *testing.T) {
+	cfg := validConfig()
+	cfg.DynamicCandidatePool.ApplyDefaults()
+	disabled := false
+	cfg.TradingFrequency = &TradingFrequencyConfig{
+		Mode: TradingFrequencyModeBalanced,
+		ReportOnly: TradingFrequencyReportOnlyConfig{
+			GateEffectiveness: true,
+		},
+		LoosenMode: TradingFrequencyLoosenModeConfig{
+			Enabled:                  &disabled,
+			InactivityWindowMinutes:  180,
+			PilotConfidenceDrop:      5,
+			MinNetRRDelta:            -0.2,
+			MaxChaseRatioBump:        0.03,
+			MaxDurationHours:         12,
+			HardFloorPilotConfidence: 55,
+		},
+	}
+
+	profile, err := cfg.NormalizeTradingFrequency()
+	if err != nil {
+		t.Fatalf("loosen mode override不应失败: %v", err)
+	}
+	if !profile.GateEffectivenessReportOnly || profile.LoosenMode.Enabled ||
+		profile.LoosenMode.InactivityWindowMinutes != 180 ||
+		profile.LoosenMode.PilotConfidenceDrop != 5 ||
+		profile.LoosenMode.MinNetRRDelta != -0.2 ||
+		profile.LoosenMode.MaxChaseRatioBump != 0.03 ||
+		profile.LoosenMode.MaxDurationHours != 12 ||
+		profile.LoosenMode.HardFloorPilotConfidence != 55 {
+		t.Fatalf("loosen mode override未生效: %+v", profile)
+	}
 }
 
 func TestNormalizeTradingFrequency_ActiveDefaultsAndOverrides(t *testing.T) {
@@ -242,6 +281,7 @@ func TestNormalizeTradingFrequency_InvalidValues(t *testing.T) {
 		{name: "low interval", tf: TradingFrequencyConfig{Mode: TradingFrequencyModeBalanced, AnalysisIntervalMinutes: 3}},
 		{name: "low prompt", tf: TradingFrequencyConfig{Mode: TradingFrequencyModeBalanced, PromptCandidateLimit: 7}},
 		{name: "high prompt", tf: TradingFrequencyConfig{Mode: TradingFrequencyModeBalanced, PromptCandidateLimit: 99}},
+		{name: "bad loosen inactivity", tf: TradingFrequencyConfig{Mode: TradingFrequencyModeBalanced, LoosenMode: TradingFrequencyLoosenModeConfig{InactivityWindowMinutes: 10}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -334,12 +374,12 @@ func TestNormalizeProgrammaticStrategies_ProgrammaticDefaults(t *testing.T) {
 	}
 	if profile.PreviewSignals.WatchAfterClosedComponents != 2 || profile.PreviewSignals.PilotAfterClosedComponents != 3 ||
 		profile.PreviewSignals.AllowPilotOpen || profile.PreviewSignals.PilotRiskFraction != 0.3 ||
-		profile.PreviewSignals.PilotMinConfidence != 90 || !profile.PreviewSignals.RequireConfirmedUpgrade {
+		profile.PreviewSignals.PilotMinConfidence != 70 || !profile.PreviewSignals.RequireConfirmedUpgrade {
 		t.Fatalf("preview signals默认策略错误: %+v", profile.PreviewSignals)
 	}
-	if !profile.EntryTiming.Enabled || profile.EntryTiming.DirectStructureOpen || !profile.EntryTiming.RequireFreshTrigger ||
+	if !profile.EntryTiming.Enabled || !profile.EntryTiming.DirectStructureOpen || !profile.EntryTiming.RequireFreshTrigger ||
 		profile.EntryTiming.DirectOpenMaxAgeCandles != 0 || profile.EntryTiming.TriggerTimeframe != "15m" ||
-		profile.EntryTiming.EntryZone.MinRemainingNetRR != profile.TakeProfit.MinNetRR ||
+		profile.EntryTiming.EntryZone.MinRemainingNetRR != 2.0 ||
 		len(profile.EntryTiming.EntryZone.SymbolOverrides) != 0 ||
 		profile.EntryTiming.ContinuationAfterTargetCrossed != "disabled" {
 		t.Fatalf("entry timing默认策略错误: %+v", profile.EntryTiming)
@@ -355,6 +395,85 @@ func TestNormalizeProgrammaticStrategies_ProgrammaticDefaults(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("programmatic模式不应要求AI key: %v", err)
+	}
+}
+
+func TestNormalizeProgrammaticStrategies_DefectFixPackRollbackDefaults(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].DecisionMode = DecisionModeProgrammatic
+	disabled := false
+	cfg.Traders[0].ProgrammaticStrategy.DefectFixPackEnabled = &disabled
+
+	profiles, err := cfg.NormalizeProgrammaticStrategies()
+	if err != nil {
+		t.Fatalf("关闭defect fix pack不应失败: %v", err)
+	}
+	profile := profiles["trader1"]
+	if profile.DefectFixPackEnabled {
+		t.Fatal("defect_fix_pack_enabled=false应保留")
+	}
+	if profile.PreviewSignals.PilotMinConfidence != 90 || profile.PreviewSignals.PilotMinConfidenceUseP75 {
+		t.Fatalf("关闭fix pack后preview默认值应回退旧策略: %+v", profile.PreviewSignals)
+	}
+	if profile.EntryTiming.DirectStructureOpen || profile.EntryTiming.Pilot.MinConfidence != 90 ||
+		profile.EntryTiming.EntryZone.MinRemainingNetRR != 2.5 {
+		t.Fatalf("关闭fix pack后entry默认值应回退旧策略: %+v", profile.EntryTiming)
+	}
+}
+
+func TestNormalizeProgrammaticStrategies_PilotConfidenceConflictRequiresExplicitConfig(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].DecisionMode = DecisionModeProgrammatic
+	cfg.Traders[0].ProgrammaticStrategy.PreviewSignals.PilotMinConfidence = 80
+	cfg.Traders[0].ProgrammaticStrategy.PreviewSignals.PilotMinConfidenceConfigured = true
+	cfg.Traders[0].ProgrammaticStrategy.EntryTiming.Pilot.MinConfidence = 90
+
+	if _, err := cfg.NormalizeProgrammaticStrategies(); err != nil {
+		t.Fatalf("entry_timing.pilot.min_confidence未显式配置时不应冲突: %v", err)
+	}
+
+	cfg.Traders[0].ProgrammaticStrategy.EntryTiming.Pilot.MinConfidenceConfigured = true
+	if _, err := cfg.NormalizeProgrammaticStrategies(); err == nil {
+		t.Fatal("两个pilot confidence都显式配置且不一致时应报错")
+	}
+}
+
+func TestNormalizeProgrammaticStrategies_SignalTypeMinRRWildcard(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].DecisionMode = DecisionModeProgrammatic
+	cfg.Traders[0].ProgrammaticStrategy.EntryTiming.EntryZone.SignalTypeMinRR = map[string]float64{
+		"sell*@1h": 1.7,
+		"*@15m":    1.5,
+	}
+
+	profiles, err := cfg.NormalizeProgrammaticStrategies()
+	if err != nil {
+		t.Fatalf("signal_type_min_rr wildcard key应被接受: %v", err)
+	}
+	values := profiles["trader1"].EntryTiming.EntryZone.SignalTypeMinRR
+	if values["sell*@1h"] != 1.7 || values["*@15m"] != 1.5 {
+		t.Fatalf("wildcard RR配置未保留: %+v", values)
+	}
+}
+
+func TestNormalizeProgrammaticStrategies_CandidateGovernor(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].DecisionMode = DecisionModeProgrammatic
+	cfg.Traders[0].ProgrammaticStrategy.CandidateGovernor = ProgrammaticCandidateGovernorConfig{
+		AllowNonCryptoSymbols: []string{"xauusdt"},
+		MaxQuoteSpreadBps:     15,
+		CoreSymbolsMustAppear: []string{"ethusdc"},
+	}
+
+	profiles, err := cfg.NormalizeProgrammaticStrategies()
+	if err != nil {
+		t.Fatalf("candidate governor合法配置不应失败: %v", err)
+	}
+	governor := profiles["trader1"].CandidateGovernor
+	if !governor.Enabled || governor.MaxQuoteSpreadBps != 15 ||
+		len(governor.AllowNonCryptoSymbols) != 1 || governor.AllowNonCryptoSymbols[0] != "XAUUSDT" ||
+		len(governor.CoreSymbolsMustAppear) != 1 || governor.CoreSymbolsMustAppear[0] != "ETHUSDC" {
+		t.Fatalf("candidate governor归一化错误: %+v", governor)
 	}
 }
 
@@ -402,7 +521,7 @@ func TestNormalizeProgrammaticStrategies_SignalFreshnessPreviewOverridesAndHash(
 		Pilot: ProgrammaticEntryPilotConfig{
 			Enabled:       true,
 			RiskFraction:  0.2,
-			MinConfidence: 93,
+			MinConfidence: 92,
 		},
 		ContinuationAfterTargetCrossed: "report_only",
 	}
@@ -423,7 +542,7 @@ func TestNormalizeProgrammaticStrategies_SignalFreshnessPreviewOverridesAndHash(
 	if !profile.EntryTiming.DirectStructureOpen || profile.EntryTiming.DirectOpenMaxAgeCandles != 1 ||
 		profile.EntryTiming.RequireFreshTrigger || profile.EntryTiming.EntryZone.MaxChaseRatio != 0.25 ||
 		profile.EntryTiming.EntryZone.MinRemainingNetRR != 3.2 || !profile.EntryTiming.Pilot.Enabled ||
-		profile.EntryTiming.Pilot.RiskFraction != 0.2 || profile.EntryTiming.Pilot.MinConfidence != 93 ||
+		profile.EntryTiming.Pilot.RiskFraction != 0.2 || profile.EntryTiming.Pilot.MinConfidence != 92 ||
 		profile.EntryTiming.ContinuationAfterTargetCrossed != "report_only" {
 		t.Fatalf("entry timing override未生效: %+v", profile.EntryTiming)
 	}

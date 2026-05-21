@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"regexp"
 	"sort"
 	"strings"
@@ -19,28 +20,40 @@ const (
 	defaultProgrammaticStatePath       = "data/programmatic_strategy_state.json"
 )
 
-var programmaticSymbolPattern = regexp.MustCompile(`^[A-Z0-9]{2,30}USDT$`)
+var programmaticSymbolPattern = regexp.MustCompile(`^[A-Z0-9]{2,30}(USDT|USDC)$`)
 
 type ProgrammaticStrategyConfig struct {
-	StrategyName       string                               `json:"strategy_name,omitempty"`
-	StrategyVersion    string                               `json:"strategy_version,omitempty"`
-	AllowLong          *bool                                `json:"allow_long,omitempty"`
-	AllowShort         *bool                                `json:"allow_short,omitempty"`
-	EnabledSignals     []string                             `json:"enabled_signals,omitempty"`
-	Timeframes         ProgrammaticTimeframesConfig         `json:"timeframes,omitempty"`
-	HistoryDepth       ProgrammaticHistoryDepth             `json:"history_depth,omitempty"`
-	SymbolPool         ProgrammaticSymbolPoolConfig         `json:"symbol_pool,omitempty"`
-	MovingAverage      ProgrammaticMAConfig                 `json:"moving_average,omitempty"`
-	Structure          ProgrammaticStructureConfig          `json:"structure,omitempty"`
-	Divergence         ProgrammaticDivergenceConfig         `json:"divergence,omitempty"`
-	ADX                ProgrammaticADXConfig                `json:"adx,omitempty"`
-	Position           ProgrammaticPositionConfig           `json:"position,omitempty"`
-	PositionManagement ProgrammaticPositionManagementConfig `json:"position_management,omitempty"`
-	TakeProfit         ProgrammaticTPConfig                 `json:"take_profit,omitempty"`
-	SignalFreshness    ProgrammaticSignalFreshnessConfig    `json:"signal_freshness,omitempty"`
-	PreviewSignals     ProgrammaticPreviewSignalsConfig     `json:"preview_signals,omitempty"`
-	EntryTiming        ProgrammaticEntryTimingConfig        `json:"entry_timing,omitempty"`
-	State              ProgrammaticStateConfig              `json:"state,omitempty"`
+	StrategyName                  string                               `json:"strategy_name,omitempty"`
+	StrategyVersion               string                               `json:"strategy_version,omitempty"`
+	DefectFixPackEnabled          *bool                                `json:"defect_fix_pack_enabled,omitempty"`
+	SuppressionPermanentThreshold int                                  `json:"suppression_permanent_threshold,omitempty"`
+	MaxPilotNotionalPct           float64                              `json:"max_pilot_notional_pct,omitempty"`
+	MinPilotNotionalUSD           float64                              `json:"min_pilot_notional_usd,omitempty"`
+	AllowLong                     *bool                                `json:"allow_long,omitempty"`
+	AllowShort                    *bool                                `json:"allow_short,omitempty"`
+	EnabledSignals                []string                             `json:"enabled_signals,omitempty"`
+	Timeframes                    ProgrammaticTimeframesConfig         `json:"timeframes,omitempty"`
+	HistoryDepth                  ProgrammaticHistoryDepth             `json:"history_depth,omitempty"`
+	SymbolPool                    ProgrammaticSymbolPoolConfig         `json:"symbol_pool,omitempty"`
+	MovingAverage                 ProgrammaticMAConfig                 `json:"moving_average,omitempty"`
+	Structure                     ProgrammaticStructureConfig          `json:"structure,omitempty"`
+	Divergence                    ProgrammaticDivergenceConfig         `json:"divergence,omitempty"`
+	ADX                           ProgrammaticADXConfig                `json:"adx,omitempty"`
+	Position                      ProgrammaticPositionConfig           `json:"position,omitempty"`
+	PositionManagement            ProgrammaticPositionManagementConfig `json:"position_management,omitempty"`
+	TakeProfit                    ProgrammaticTPConfig                 `json:"take_profit,omitempty"`
+	SignalFreshness               ProgrammaticSignalFreshnessConfig    `json:"signal_freshness,omitempty"`
+	PreviewSignals                ProgrammaticPreviewSignalsConfig     `json:"preview_signals,omitempty"`
+	EntryTiming                   ProgrammaticEntryTimingConfig        `json:"entry_timing,omitempty"`
+	CandidateGovernor             ProgrammaticCandidateGovernorConfig  `json:"candidate_governor,omitempty"`
+	State                         ProgrammaticStateConfig              `json:"state,omitempty"`
+}
+
+type ProgrammaticCandidateGovernorConfig struct {
+	Enabled               *bool    `json:"enabled,omitempty"`
+	AllowNonCryptoSymbols []string `json:"allow_non_crypto_symbols,omitempty"`
+	MaxQuoteSpreadBps     float64  `json:"max_quote_spread_bps,omitempty"`
+	CoreSymbolsMustAppear []string `json:"core_symbols_must_appear,omitempty"`
 }
 
 type ProgrammaticTimeframesConfig struct {
@@ -163,21 +176,46 @@ type ProgrammaticSignalFreshnessConfig struct {
 }
 
 type ProgrammaticPreviewSignalsConfig struct {
-	Enabled                    *bool   `json:"enabled,omitempty"`
-	ComponentTimeframe         string  `json:"component_timeframe,omitempty"`
-	TradeTimeframe             string  `json:"trade_timeframe,omitempty"`
-	WatchAfterClosedComponents int     `json:"watch_after_closed_components,omitempty"`
-	PilotAfterClosedComponents int     `json:"pilot_after_closed_components,omitempty"`
-	AllowPilotOpen             bool    `json:"allow_pilot_open,omitempty"`
-	PilotRiskFraction          float64 `json:"pilot_risk_fraction,omitempty"`
-	PilotMinConfidence         int     `json:"pilot_min_confidence,omitempty"`
-	RequireConfirmedUpgrade    *bool   `json:"require_confirmed_upgrade,omitempty"`
+	Enabled                      *bool          `json:"enabled,omitempty"`
+	ComponentTimeframe           string         `json:"component_timeframe,omitempty"`
+	TradeTimeframe               string         `json:"trade_timeframe,omitempty"`
+	WatchAfterClosedComponents   int            `json:"watch_after_closed_components,omitempty"`
+	PilotAfterClosedComponents   int            `json:"pilot_after_closed_components,omitempty"`
+	AllowPilotOpen               bool           `json:"allow_pilot_open,omitempty"`
+	PilotRiskFraction            float64        `json:"pilot_risk_fraction,omitempty"`
+	PilotMinConfidence           int            `json:"pilot_min_confidence,omitempty"`
+	PilotMinConfidenceConfigured bool           `json:"-"`
+	PilotMinConfidenceBySignal   map[string]int `json:"pilot_min_confidence_by_signal_type,omitempty"`
+	PilotMinConfidenceUseP75     *bool          `json:"pilot_min_confidence_use_p75,omitempty"`
+	P75Floor                     int            `json:"pilot_min_confidence_p75_floor,omitempty"`
+	P75Ceiling                   int            `json:"pilot_min_confidence_p75_ceiling,omitempty"`
+	RequireConfirmedUpgrade      *bool          `json:"require_confirmed_upgrade,omitempty"`
+}
+
+func (c *ProgrammaticPreviewSignalsConfig) UnmarshalJSON(data []byte) error {
+	type alias ProgrammaticPreviewSignalsConfig
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var out alias
+	if err := json.Unmarshal(data, &out); err != nil {
+		return err
+	}
+	if _, ok := raw["pilot_min_confidence"]; ok {
+		out.PilotMinConfidenceConfigured = true
+	}
+	*c = ProgrammaticPreviewSignalsConfig(out)
+	return nil
 }
 
 type ProgrammaticEntryTimingConfig struct {
 	Enabled                        *bool                        `json:"enabled,omitempty"`
 	DirectStructureOpen            bool                         `json:"direct_structure_open,omitempty"`
+	DirectStructureOpenConfigured  bool                         `json:"-"`
+	DirectStructureMinConfidence   int                          `json:"direct_structure_min_confidence,omitempty"`
 	DirectOpenMaxAgeCandles        int                          `json:"direct_open_max_age_candles,omitempty"`
+	MaxNoTriggerSubCandles         int                          `json:"max_no_trigger_sub_candles,omitempty"`
 	RequireFreshTrigger            *bool                        `json:"require_fresh_trigger,omitempty"`
 	TriggerTimeframe               string                       `json:"trigger_timeframe,omitempty"`
 	AllowedTriggerTypes            []string                     `json:"allowed_trigger_types,omitempty"`
@@ -188,11 +226,33 @@ type ProgrammaticEntryTimingConfig struct {
 	ContinuationAfterTargetCrossed string                       `json:"continuation_after_target_crossed,omitempty"`
 }
 
+func (c *ProgrammaticEntryTimingConfig) UnmarshalJSON(data []byte) error {
+	type alias ProgrammaticEntryTimingConfig
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var out alias
+	if err := json.Unmarshal(data, &out); err != nil {
+		return err
+	}
+	if _, ok := raw["direct_structure_open"]; ok {
+		out.DirectStructureOpenConfigured = true
+	}
+	*c = ProgrammaticEntryTimingConfig(out)
+	return nil
+}
+
 type ProgrammaticEntryZoneConfig struct {
-	Mode              string                                         `json:"mode,omitempty"`
-	MaxChaseRatio     float64                                        `json:"max_chase_ratio,omitempty"`
-	MinRemainingNetRR float64                                        `json:"min_remaining_net_rr,omitempty"`
-	SymbolOverrides   map[string]ProgrammaticEntryZoneOverrideConfig `json:"symbol_overrides,omitempty"`
+	Mode                         string                                         `json:"mode,omitempty"`
+	MaxChaseRatio                float64                                        `json:"max_chase_ratio,omitempty"`
+	MinRemainingNetRR            float64                                        `json:"min_remaining_net_rr,omitempty"`
+	MaxChaseATRMultiplier        float64                                        `json:"max_chase_atr_multiplier,omitempty"`
+	FreshAgeChaseRelax           float64                                        `json:"fresh_age_chase_relax,omitempty"`
+	SignalTypeMinRR              map[string]float64                             `json:"signal_type_min_rr,omitempty"`
+	TierOverrides                map[string]ProgrammaticEntryZoneOverrideConfig `json:"tier_overrides,omitempty"`
+	SymbolOverrides              map[string]ProgrammaticEntryZoneOverrideConfig `json:"symbol_overrides,omitempty"`
+	TheoreticalRRUnreachableSkip *bool                                          `json:"theoretical_rr_unreachable_skip,omitempty"`
 }
 
 type ProgrammaticEntryZoneOverrideConfig struct {
@@ -201,9 +261,27 @@ type ProgrammaticEntryZoneOverrideConfig struct {
 }
 
 type ProgrammaticEntryPilotConfig struct {
-	Enabled       bool    `json:"enabled,omitempty"`
-	RiskFraction  float64 `json:"risk_fraction,omitempty"`
-	MinConfidence int     `json:"min_confidence,omitempty"`
+	Enabled                 bool    `json:"enabled,omitempty"`
+	RiskFraction            float64 `json:"risk_fraction,omitempty"`
+	MinConfidence           int     `json:"min_confidence,omitempty"`
+	MinConfidenceConfigured bool    `json:"-"`
+}
+
+func (c *ProgrammaticEntryPilotConfig) UnmarshalJSON(data []byte) error {
+	type alias ProgrammaticEntryPilotConfig
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var out alias
+	if err := json.Unmarshal(data, &out); err != nil {
+		return err
+	}
+	if _, ok := raw["min_confidence"]; ok {
+		out.MinConfidenceConfigured = true
+	}
+	*c = ProgrammaticEntryPilotConfig(out)
+	return nil
 }
 
 type ProgrammaticStateConfig struct {
@@ -212,27 +290,39 @@ type ProgrammaticStateConfig struct {
 }
 
 type ProgrammaticStrategyProfile struct {
-	DecisionMode       string
-	StrategyName       string
-	StrategyVersion    string
-	ConfigHash         string
-	AllowLong          bool
-	AllowShort         bool
-	EnabledSignals     []string
-	Timeframes         ProgrammaticTimeframesProfile
-	HistoryDepth       ProgrammaticHistoryDepth
-	SymbolPool         ProgrammaticSymbolPoolProfile
-	MovingAverage      ProgrammaticMAProfile
-	Structure          ProgrammaticStructureProfile
-	Divergence         ProgrammaticDivergenceProfile
-	ADX                ProgrammaticADXProfile
-	Position           ProgrammaticPositionProfile
-	PositionManagement ProgrammaticPositionManagementProfile
-	TakeProfit         ProgrammaticTPProfile
-	SignalFreshness    ProgrammaticSignalFreshnessProfile
-	PreviewSignals     ProgrammaticPreviewSignalsProfile
-	EntryTiming        ProgrammaticEntryTimingProfile
-	State              ProgrammaticStateProfile
+	DecisionMode                  string
+	StrategyName                  string
+	StrategyVersion               string
+	ConfigHash                    string
+	DefectFixPackEnabled          bool
+	SuppressionPermanentThreshold int
+	MaxPilotNotionalPct           float64
+	MinPilotNotionalUSD           float64
+	AllowLong                     bool
+	AllowShort                    bool
+	EnabledSignals                []string
+	Timeframes                    ProgrammaticTimeframesProfile
+	HistoryDepth                  ProgrammaticHistoryDepth
+	SymbolPool                    ProgrammaticSymbolPoolProfile
+	MovingAverage                 ProgrammaticMAProfile
+	Structure                     ProgrammaticStructureProfile
+	Divergence                    ProgrammaticDivergenceProfile
+	ADX                           ProgrammaticADXProfile
+	Position                      ProgrammaticPositionProfile
+	PositionManagement            ProgrammaticPositionManagementProfile
+	TakeProfit                    ProgrammaticTPProfile
+	SignalFreshness               ProgrammaticSignalFreshnessProfile
+	PreviewSignals                ProgrammaticPreviewSignalsProfile
+	EntryTiming                   ProgrammaticEntryTimingProfile
+	CandidateGovernor             ProgrammaticCandidateGovernorProfile
+	State                         ProgrammaticStateProfile
+}
+
+type ProgrammaticCandidateGovernorProfile struct {
+	Enabled               bool
+	AllowNonCryptoSymbols []string
+	MaxQuoteSpreadBps     float64
+	CoreSymbolsMustAppear []string
 }
 
 type ProgrammaticTimeframesProfile struct {
@@ -360,13 +450,19 @@ type ProgrammaticPreviewSignalsProfile struct {
 	AllowPilotOpen             bool
 	PilotRiskFraction          float64
 	PilotMinConfidence         int
+	PilotMinConfidenceBySignal map[string]int
+	PilotMinConfidenceUseP75   bool
+	P75Floor                   int
+	P75Ceiling                 int
 	RequireConfirmedUpgrade    bool
 }
 
 type ProgrammaticEntryTimingProfile struct {
 	Enabled                        bool
 	DirectStructureOpen            bool
+	DirectStructureMinConfidence   int
 	DirectOpenMaxAgeCandles        int
+	MaxNoTriggerSubCandles         int
 	RequireFreshTrigger            bool
 	TriggerTimeframe               string
 	AllowedTriggerTypes            []string
@@ -378,10 +474,15 @@ type ProgrammaticEntryTimingProfile struct {
 }
 
 type ProgrammaticEntryZoneProfile struct {
-	Mode              string
-	MaxChaseRatio     float64
-	MinRemainingNetRR float64
-	SymbolOverrides   map[string]ProgrammaticEntryZoneOverrideProfile
+	Mode                         string
+	MaxChaseRatio                float64
+	MinRemainingNetRR            float64
+	MaxChaseATRMultiplier        float64
+	FreshAgeChaseRelax           float64
+	SignalTypeMinRR              map[string]float64
+	TierOverrides                map[string]ProgrammaticEntryZoneOverrideProfile
+	SymbolOverrides              map[string]ProgrammaticEntryZoneOverrideProfile
+	TheoreticalRRUnreachableSkip bool
 }
 
 type ProgrammaticEntryZoneOverrideProfile struct {
@@ -438,6 +539,37 @@ func normalizeDecisionMode(mode string) (string, error) {
 }
 
 func normalizeProgrammaticStrategyConfig(cfg ProgrammaticStrategyConfig) (ProgrammaticStrategyProfile, error) {
+	defectFixPackEnabled := true
+	if cfg.DefectFixPackEnabled != nil {
+		defectFixPackEnabled = *cfg.DefectFixPackEnabled
+	}
+	suppressionPermanentThreshold := cfg.SuppressionPermanentThreshold
+	if suppressionPermanentThreshold <= 0 {
+		suppressionPermanentThreshold = 5
+	}
+	if suppressionPermanentThreshold < 1 || suppressionPermanentThreshold > 100 {
+		return ProgrammaticStrategyProfile{}, fmt.Errorf("suppression_permanent_threshold必须在1-100之间: %d", suppressionPermanentThreshold)
+	}
+	maxPilotNotionalPct := cfg.MaxPilotNotionalPct
+	if maxPilotNotionalPct <= 0 {
+		maxPilotNotionalPct = 0.6
+	}
+	if maxPilotNotionalPct <= 0 || maxPilotNotionalPct > 1 {
+		return ProgrammaticStrategyProfile{}, fmt.Errorf("max_pilot_notional_pct必须在0-1之间: %.4f", maxPilotNotionalPct)
+	}
+	minPilotNotionalUSD := cfg.MinPilotNotionalUSD
+	if minPilotNotionalUSD <= 0 {
+		minPilotNotionalUSD = 30
+	}
+	if minPilotNotionalUSD < 1 || minPilotNotionalUSD > 10000 {
+		return ProgrammaticStrategyProfile{}, fmt.Errorf("min_pilot_notional_usd必须在1-10000之间: %.4f", minPilotNotionalUSD)
+	}
+	if cfg.PreviewSignals.PilotMinConfidenceConfigured && cfg.EntryTiming.Pilot.MinConfidenceConfigured &&
+		cfg.PreviewSignals.PilotMinConfidence > 0 && cfg.EntryTiming.Pilot.MinConfidence > 0 &&
+		cfg.PreviewSignals.PilotMinConfidence != cfg.EntryTiming.Pilot.MinConfidence {
+		return ProgrammaticStrategyProfile{}, fmt.Errorf("pilot_min_confidence 配置冲突: preview_signals=%d entry_timing.pilot=%d", cfg.PreviewSignals.PilotMinConfidence, cfg.EntryTiming.Pilot.MinConfidence)
+	}
+
 	allowLong := true
 	if cfg.AllowLong != nil {
 		allowLong = *cfg.AllowLong
@@ -504,11 +636,15 @@ func normalizeProgrammaticStrategyConfig(cfg ProgrammaticStrategyConfig) (Progra
 	if err != nil {
 		return ProgrammaticStrategyProfile{}, err
 	}
-	preview, err := normalizeProgrammaticPreviewSignals(cfg.PreviewSignals, timeframes)
+	preview, err := normalizeProgrammaticPreviewSignals(cfg.PreviewSignals, timeframes, defectFixPackEnabled)
 	if err != nil {
 		return ProgrammaticStrategyProfile{}, err
 	}
-	entryTiming, err := normalizeProgrammaticEntryTiming(cfg.EntryTiming, timeframes, tp.MinNetRR)
+	entryTiming, err := normalizeProgrammaticEntryTiming(cfg.EntryTiming, timeframes, tp.MinNetRR, defectFixPackEnabled)
+	if err != nil {
+		return ProgrammaticStrategyProfile{}, err
+	}
+	candidateGovernor, err := normalizeProgrammaticCandidateGovernor(cfg.CandidateGovernor, symbolPool)
 	if err != nil {
 		return ProgrammaticStrategyProfile{}, err
 	}
@@ -530,17 +666,21 @@ func normalizeProgrammaticStrategyConfig(cfg ProgrammaticStrategyConfig) (Progra
 	}
 
 	return ProgrammaticStrategyProfile{
-		StrategyName:    strategyName,
-		StrategyVersion: strategyVersion,
-		AllowLong:       allowLong,
-		AllowShort:      allowShort,
-		EnabledSignals:  signals,
-		Timeframes:      timeframes,
-		HistoryDepth:    historyDepth,
-		SymbolPool:      symbolPool,
-		MovingAverage:   ma,
-		Structure:       structure,
-		Divergence:      divergence,
+		StrategyName:                  strategyName,
+		StrategyVersion:               strategyVersion,
+		DefectFixPackEnabled:          defectFixPackEnabled,
+		SuppressionPermanentThreshold: suppressionPermanentThreshold,
+		MaxPilotNotionalPct:           maxPilotNotionalPct,
+		MinPilotNotionalUSD:           minPilotNotionalUSD,
+		AllowLong:                     allowLong,
+		AllowShort:                    allowShort,
+		EnabledSignals:                signals,
+		Timeframes:                    timeframes,
+		HistoryDepth:                  historyDepth,
+		SymbolPool:                    symbolPool,
+		MovingAverage:                 ma,
+		Structure:                     structure,
+		Divergence:                    divergence,
 		ADX: ProgrammaticADXProfile{
 			Period:         adxPeriod,
 			MinADX:         minADX,
@@ -552,6 +692,7 @@ func normalizeProgrammaticStrategyConfig(cfg ProgrammaticStrategyConfig) (Progra
 		SignalFreshness:    freshness,
 		PreviewSignals:     preview,
 		EntryTiming:        entryTiming,
+		CandidateGovernor:  candidateGovernor,
 		State: ProgrammaticStateProfile{
 			Path:      statePath,
 			Bootstrap: cfg.State.Bootstrap,
@@ -639,6 +780,50 @@ func normalizeProgrammaticSymbolPool(cfg ProgrammaticSymbolPoolConfig) (Programm
 		return ProgrammaticSymbolPoolProfile{}, err
 	}
 	return ProgrammaticSymbolPoolProfile{Mode: mode, Symbols: symbols, CoreSymbols: coreSymbols}, nil
+}
+
+func normalizeProgrammaticCandidateGovernor(cfg ProgrammaticCandidateGovernorConfig, symbolPool ProgrammaticSymbolPoolProfile) (ProgrammaticCandidateGovernorProfile, error) {
+	enabled := true
+	if cfg.Enabled != nil {
+		enabled = *cfg.Enabled
+	}
+	maxSpread := cfg.MaxQuoteSpreadBps
+	if maxSpread <= 0 {
+		maxSpread = 20
+	}
+	if maxSpread < 0 || maxSpread > 10000 {
+		return ProgrammaticCandidateGovernorProfile{}, fmt.Errorf("candidate_governor.max_quote_spread_bps必须在0-10000之间: %.4f", maxSpread)
+	}
+	allowNonCrypto := make([]string, 0, len(cfg.AllowNonCryptoSymbols))
+	seenAllow := map[string]bool{}
+	for _, raw := range cfg.AllowNonCryptoSymbols {
+		symbol := normalizeProgrammaticSymbol(raw)
+		if symbol == "" || !programmaticSymbolPattern.MatchString(symbol) {
+			return ProgrammaticCandidateGovernorProfile{}, fmt.Errorf("candidate_governor.allow_non_crypto_symbols包含无效symbol: %q", raw)
+		}
+		if !seenAllow[symbol] {
+			seenAllow[symbol] = true
+			allowNonCrypto = append(allowNonCrypto, symbol)
+		}
+	}
+	coreRaw := cfg.CoreSymbolsMustAppear
+	if len(coreRaw) == 0 {
+		coreRaw = symbolPool.CoreSymbols
+	}
+	if len(coreRaw) == 0 {
+		coreRaw = []string{"BTCUSDT", "ETHUSDT"}
+	}
+	core, err := normalizeSymbolList(coreRaw, "candidate_governor.core_symbols_must_appear")
+	if err != nil {
+		return ProgrammaticCandidateGovernorProfile{}, err
+	}
+	sort.Strings(allowNonCrypto)
+	return ProgrammaticCandidateGovernorProfile{
+		Enabled:               enabled,
+		AllowNonCryptoSymbols: allowNonCrypto,
+		MaxQuoteSpreadBps:     maxSpread,
+		CoreSymbolsMustAppear: core,
+	}, nil
 }
 
 func normalizeProgrammaticMA(cfg ProgrammaticMAConfig) (ProgrammaticMAProfile, error) {
@@ -1111,7 +1296,26 @@ func normalizeSignalAgeOverrides(values map[string]int, fallback, maxAllowed int
 	return result, nil
 }
 
-func normalizeProgrammaticPreviewSignals(cfg ProgrammaticPreviewSignalsConfig, timeframes ProgrammaticTimeframesProfile) (ProgrammaticPreviewSignalsProfile, error) {
+func normalizePilotConfidenceOverrides(values map[string]int) (map[string]int, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	allowed := map[string]bool{"buy1": true, "buy2": true, "buy3": true, "sell1": true, "sell2": true, "sell3": true}
+	result := make(map[string]int, len(values))
+	for key, value := range values {
+		signalType := strings.ToLower(strings.TrimSpace(key))
+		if !allowed[signalType] {
+			return nil, fmt.Errorf("preview_signals.pilot_min_confidence_by_signal_type包含不支持的信号类型: %q", key)
+		}
+		if value < 1 || value > 100 {
+			return nil, fmt.Errorf("preview_signals.pilot_min_confidence_by_signal_type.%s必须在1-100之间: %d", signalType, value)
+		}
+		result[signalType] = value
+	}
+	return result, nil
+}
+
+func normalizeProgrammaticPreviewSignals(cfg ProgrammaticPreviewSignalsConfig, timeframes ProgrammaticTimeframesProfile, defectFixPackEnabled bool) (ProgrammaticPreviewSignalsProfile, error) {
 	enabled := true
 	if cfg.Enabled != nil {
 		enabled = *cfg.Enabled
@@ -1148,12 +1352,41 @@ func normalizeProgrammaticPreviewSignals(cfg ProgrammaticPreviewSignalsConfig, t
 	if pilotRisk <= 0 || pilotRisk > 1 {
 		return ProgrammaticPreviewSignalsProfile{}, fmt.Errorf("preview_signals.pilot_risk_fraction必须在0-1之间: %.4f", pilotRisk)
 	}
+	if pilotRisk > 0.4 {
+		log.Printf("⚠️ preview_signals.pilot_risk_fraction=%.2f 偏高，建议≤0.40", pilotRisk)
+	}
 	pilotConfidence := cfg.PilotMinConfidence
 	if pilotConfidence <= 0 {
-		pilotConfidence = 90
+		if defectFixPackEnabled {
+			pilotConfidence = 70
+		} else {
+			pilotConfidence = 90
+		}
 	}
 	if pilotConfidence < 1 || pilotConfidence > 100 {
 		return ProgrammaticPreviewSignalsProfile{}, fmt.Errorf("preview_signals.pilot_min_confidence必须在1-100之间: %d", pilotConfidence)
+	}
+	pilotBySignal, err := normalizePilotConfidenceOverrides(cfg.PilotMinConfidenceBySignal)
+	if err != nil {
+		return ProgrammaticPreviewSignalsProfile{}, err
+	}
+	useP75 := defectFixPackEnabled
+	if cfg.PilotMinConfidenceUseP75 != nil {
+		useP75 = *cfg.PilotMinConfidenceUseP75
+	}
+	p75Floor := cfg.P75Floor
+	if p75Floor <= 0 {
+		p75Floor = 65
+	}
+	p75Ceiling := cfg.P75Ceiling
+	if p75Ceiling <= 0 {
+		p75Ceiling = 85
+	}
+	if p75Floor < 1 || p75Floor > 100 {
+		return ProgrammaticPreviewSignalsProfile{}, fmt.Errorf("preview_signals.pilot_min_confidence_p75_floor必须在1-100之间: %d", p75Floor)
+	}
+	if p75Ceiling < p75Floor || p75Ceiling > 100 {
+		return ProgrammaticPreviewSignalsProfile{}, fmt.Errorf("preview_signals.pilot_min_confidence_p75_ceiling必须在floor和100之间: %d", p75Ceiling)
 	}
 	requireUpgrade := true
 	if cfg.RequireConfirmedUpgrade != nil {
@@ -1168,11 +1401,15 @@ func normalizeProgrammaticPreviewSignals(cfg ProgrammaticPreviewSignalsConfig, t
 		AllowPilotOpen:             cfg.AllowPilotOpen,
 		PilotRiskFraction:          pilotRisk,
 		PilotMinConfidence:         pilotConfidence,
+		PilotMinConfidenceBySignal: pilotBySignal,
+		PilotMinConfidenceUseP75:   useP75,
+		P75Floor:                   p75Floor,
+		P75Ceiling:                 p75Ceiling,
 		RequireConfirmedUpgrade:    requireUpgrade,
 	}, nil
 }
 
-func normalizeProgrammaticEntryTiming(cfg ProgrammaticEntryTimingConfig, timeframes ProgrammaticTimeframesProfile, fallbackMinRR float64) (ProgrammaticEntryTimingProfile, error) {
+func normalizeProgrammaticEntryTiming(cfg ProgrammaticEntryTimingConfig, timeframes ProgrammaticTimeframesProfile, fallbackMinRR float64, defectFixPackEnabled bool) (ProgrammaticEntryTimingProfile, error) {
 	enabled := true
 	if cfg.Enabled != nil {
 		enabled = *cfg.Enabled
@@ -1192,13 +1429,31 @@ func normalizeProgrammaticEntryTiming(cfg ProgrammaticEntryTimingConfig, timefra
 	if directAge < 0 || directAge > 16 {
 		return ProgrammaticEntryTimingProfile{}, fmt.Errorf("entry_timing.direct_open_max_age_candles必须在0-16之间: %d", directAge)
 	}
+	directOpen := defectFixPackEnabled
+	if cfg.DirectStructureOpenConfigured || cfg.DirectStructureOpen {
+		directOpen = cfg.DirectStructureOpen
+	}
+	directMinConfidence := cfg.DirectStructureMinConfidence
+	if directMinConfidence <= 0 {
+		directMinConfidence = 70
+	}
+	if directMinConfidence < 1 || directMinConfidence > 100 {
+		return ProgrammaticEntryTimingProfile{}, fmt.Errorf("entry_timing.direct_structure_min_confidence必须在1-100之间: %d", directMinConfidence)
+	}
 	allowed, err := normalizeEntryTriggerTypes(cfg.AllowedTriggerTypes)
 	if err != nil {
 		return ProgrammaticEntryTimingProfile{}, err
 	}
-	entryZone, err := normalizeProgrammaticEntryZone(cfg.EntryZone, fallbackMinRR)
+	entryZone, err := normalizeProgrammaticEntryZone(cfg.EntryZone, fallbackMinRR, defectFixPackEnabled)
 	if err != nil {
 		return ProgrammaticEntryTimingProfile{}, err
+	}
+	maxNoTriggerSubCandles := cfg.MaxNoTriggerSubCandles
+	if maxNoTriggerSubCandles <= 0 {
+		maxNoTriggerSubCandles = 3
+	}
+	if maxNoTriggerSubCandles < 1 || maxNoTriggerSubCandles > 16 {
+		return ProgrammaticEntryTimingProfile{}, fmt.Errorf("entry_timing.max_no_trigger_sub_candles必须在1-16之间: %d", maxNoTriggerSubCandles)
 	}
 	maxTriggerAge := cfg.MaxTriggerAgeCandles
 	if maxTriggerAge <= 0 {
@@ -1211,7 +1466,7 @@ func normalizeProgrammaticEntryTiming(cfg ProgrammaticEntryTimingConfig, timefra
 	if minConfidence < 0 || minConfidence > 100 {
 		return ProgrammaticEntryTimingProfile{}, fmt.Errorf("entry_timing.min_trigger_confidence必须在0-100之间: %d", minConfidence)
 	}
-	pilot, err := normalizeProgrammaticEntryPilot(cfg.Pilot)
+	pilot, err := normalizeProgrammaticEntryPilot(cfg.Pilot, defectFixPackEnabled)
 	if err != nil {
 		return ProgrammaticEntryTimingProfile{}, err
 	}
@@ -1226,8 +1481,10 @@ func normalizeProgrammaticEntryTiming(cfg ProgrammaticEntryTimingConfig, timefra
 	}
 	return ProgrammaticEntryTimingProfile{
 		Enabled:                        enabled,
-		DirectStructureOpen:            cfg.DirectStructureOpen,
+		DirectStructureOpen:            directOpen,
+		DirectStructureMinConfidence:   directMinConfidence,
 		DirectOpenMaxAgeCandles:        directAge,
+		MaxNoTriggerSubCandles:         maxNoTriggerSubCandles,
 		RequireFreshTrigger:            requireFreshTrigger,
 		TriggerTimeframe:               triggerTF,
 		AllowedTriggerTypes:            allowed,
@@ -1267,7 +1524,7 @@ func normalizeEntryTriggerTypes(values []string) ([]string, error) {
 	return result, nil
 }
 
-func normalizeProgrammaticEntryZone(cfg ProgrammaticEntryZoneConfig, fallbackMinRR float64) (ProgrammaticEntryZoneProfile, error) {
+func normalizeProgrammaticEntryZone(cfg ProgrammaticEntryZoneConfig, fallbackMinRR float64, defectFixPackEnabled bool) (ProgrammaticEntryZoneProfile, error) {
 	mode := strings.TrimSpace(strings.ToLower(cfg.Mode))
 	if mode == "" {
 		mode = "structure_range"
@@ -1286,7 +1543,11 @@ func normalizeProgrammaticEntryZone(cfg ProgrammaticEntryZoneConfig, fallbackMin
 	}
 	minRR := cfg.MinRemainingNetRR
 	if minRR <= 0 {
-		minRR = fallbackMinRR
+		if defectFixPackEnabled {
+			minRR = 2.0
+		} else {
+			minRR = fallbackMinRR
+		}
 	}
 	if minRR <= 0 {
 		minRR = defaultStrategyMinNetRR
@@ -1294,38 +1555,78 @@ func normalizeProgrammaticEntryZone(cfg ProgrammaticEntryZoneConfig, fallbackMin
 	if minRR < 1 {
 		return ProgrammaticEntryZoneProfile{}, fmt.Errorf("entry_timing.entry_zone.min_remaining_net_rr不能低于1: %.4f", minRR)
 	}
+	maxChaseATR := cfg.MaxChaseATRMultiplier
+	if maxChaseATR <= 0 {
+		maxChaseATR = 0.6
+	}
+	if maxChaseATR < 0 || maxChaseATR > 10 {
+		return ProgrammaticEntryZoneProfile{}, fmt.Errorf("entry_timing.entry_zone.max_chase_atr_multiplier必须在0-10之间: %.4f", maxChaseATR)
+	}
+	freshRelax := cfg.FreshAgeChaseRelax
+	if freshRelax <= 0 {
+		freshRelax = 0.10
+	}
+	if freshRelax < 0 || freshRelax > 1 {
+		return ProgrammaticEntryZoneProfile{}, fmt.Errorf("entry_timing.entry_zone.fresh_age_chase_relax必须在0-1之间: %.4f", freshRelax)
+	}
+	signalTypeRR, err := normalizeSignalTypeMinRR(cfg.SignalTypeMinRR, defectFixPackEnabled)
+	if err != nil {
+		return ProgrammaticEntryZoneProfile{}, err
+	}
+	tierOverrides, err := normalizeProgrammaticEntryZoneOverridesWithOptions(cfg.TierOverrides, "entry_timing.entry_zone.tier_overrides", false)
+	if err != nil {
+		return ProgrammaticEntryZoneProfile{}, err
+	}
 	overrides, err := normalizeProgrammaticEntryZoneOverrides(cfg.SymbolOverrides)
 	if err != nil {
 		return ProgrammaticEntryZoneProfile{}, err
 	}
+	theoreticalSkip := defectFixPackEnabled
+	if cfg.TheoreticalRRUnreachableSkip != nil {
+		theoreticalSkip = *cfg.TheoreticalRRUnreachableSkip
+	}
 	return ProgrammaticEntryZoneProfile{
-		Mode:              mode,
-		MaxChaseRatio:     maxChase,
-		MinRemainingNetRR: minRR,
-		SymbolOverrides:   overrides,
+		Mode:                         mode,
+		MaxChaseRatio:                maxChase,
+		MinRemainingNetRR:            minRR,
+		MaxChaseATRMultiplier:        maxChaseATR,
+		FreshAgeChaseRelax:           freshRelax,
+		SignalTypeMinRR:              signalTypeRR,
+		TierOverrides:                tierOverrides,
+		SymbolOverrides:              overrides,
+		TheoreticalRRUnreachableSkip: theoreticalSkip,
 	}, nil
 }
 
 func normalizeProgrammaticEntryZoneOverrides(values map[string]ProgrammaticEntryZoneOverrideConfig) (map[string]ProgrammaticEntryZoneOverrideProfile, error) {
+	return normalizeProgrammaticEntryZoneOverridesWithOptions(values, "entry_timing.entry_zone.symbol_overrides", true)
+}
+
+func normalizeProgrammaticEntryZoneOverridesWithOptions(values map[string]ProgrammaticEntryZoneOverrideConfig, field string, requireSymbol bool) (map[string]ProgrammaticEntryZoneOverrideProfile, error) {
 	if len(values) == 0 {
 		return nil, nil
 	}
 	result := make(map[string]ProgrammaticEntryZoneOverrideProfile, len(values))
-	for rawSymbol, override := range values {
-		symbol := normalizeProgrammaticSymbol(rawSymbol)
-		if symbol == "" || !programmaticSymbolPattern.MatchString(symbol) {
-			return nil, fmt.Errorf("entry_timing.entry_zone.symbol_overrides包含无效symbol: %q", rawSymbol)
+	for rawKey, override := range values {
+		key := strings.ToLower(strings.TrimSpace(rawKey))
+		if requireSymbol {
+			key = normalizeProgrammaticSymbol(rawKey)
+			if key == "" || !programmaticSymbolPattern.MatchString(key) {
+				return nil, fmt.Errorf("%s包含无效symbol: %q", field, rawKey)
+			}
+		} else if key == "" {
+			return nil, fmt.Errorf("%s包含空key", field)
 		}
-		if _, exists := result[symbol]; exists {
-			return nil, fmt.Errorf("entry_timing.entry_zone.symbol_overrides重复symbol: %s", symbol)
+		if _, exists := result[key]; exists {
+			return nil, fmt.Errorf("%s重复key: %s", field, key)
 		}
 		if override.MaxChaseRatio < 0 || override.MaxChaseRatio > 1 {
-			return nil, fmt.Errorf("entry_timing.entry_zone.symbol_overrides[%s].max_chase_ratio必须在0-1之间: %.4f", symbol, override.MaxChaseRatio)
+			return nil, fmt.Errorf("%s[%s].max_chase_ratio必须在0-1之间: %.4f", field, key, override.MaxChaseRatio)
 		}
 		if override.MinRemainingNetRR > 0 && override.MinRemainingNetRR < 1 {
-			return nil, fmt.Errorf("entry_timing.entry_zone.symbol_overrides[%s].min_remaining_net_rr不能低于1: %.4f", symbol, override.MinRemainingNetRR)
+			return nil, fmt.Errorf("%s[%s].min_remaining_net_rr不能低于1: %.4f", field, key, override.MinRemainingNetRR)
 		}
-		result[symbol] = ProgrammaticEntryZoneOverrideProfile{
+		result[key] = ProgrammaticEntryZoneOverrideProfile{
 			MaxChaseRatio:     override.MaxChaseRatio,
 			MinRemainingNetRR: override.MinRemainingNetRR,
 		}
@@ -1333,7 +1634,71 @@ func normalizeProgrammaticEntryZoneOverrides(values map[string]ProgrammaticEntry
 	return result, nil
 }
 
-func normalizeProgrammaticEntryPilot(cfg ProgrammaticEntryPilotConfig) (ProgrammaticEntryPilotProfile, error) {
+func normalizeSignalTypeMinRR(values map[string]float64, defectFixPackEnabled bool) (map[string]float64, error) {
+	result := map[string]float64{}
+	if defectFixPackEnabled {
+		result["buy1@1h"] = 2.0
+		result["sell1@1h"] = 2.0
+		result["buy2@1h"] = 1.6
+		result["sell2@1h"] = 1.6
+		result["buy3@1h"] = 1.4
+		result["sell3@1h"] = 1.4
+		result["buy1"] = 2.0
+		result["sell1"] = 2.0
+		result["buy2"] = 1.6
+		result["sell2"] = 1.6
+		result["buy3"] = 1.4
+		result["sell3"] = 1.4
+	}
+	if len(values) == 0 {
+		if len(result) == 0 {
+			return nil, nil
+		}
+		return result, nil
+	}
+	for rawKey, value := range values {
+		key := strings.ToLower(strings.TrimSpace(rawKey))
+		if key == "" {
+			return nil, fmt.Errorf("entry_timing.entry_zone.signal_type_min_rr包含空key")
+		}
+		if !isValidSignalTypeMinRRKey(key) {
+			return nil, fmt.Errorf("entry_timing.entry_zone.signal_type_min_rr包含不支持的key: %q", rawKey)
+		}
+		if value < 1 || value > 20 {
+			return nil, fmt.Errorf("entry_timing.entry_zone.signal_type_min_rr[%s]必须在1-20之间: %.4f", key, value)
+		}
+		result[key] = value
+	}
+	return result, nil
+}
+
+func isValidSignalTypeMinRRKey(key string) bool {
+	if strings.HasSuffix(key, "@1h") || strings.HasSuffix(key, "@15m") || strings.HasSuffix(key, "@4h") {
+		parts := strings.Split(key, "@")
+		return len(parts) == 2 && isValidProgrammaticSignalTypePattern(parts[0])
+	}
+	return isValidProgrammaticSignalTypePattern(key)
+}
+
+func isValidProgrammaticSignalType(signalType string) bool {
+	switch signalType {
+	case "buy1", "buy2", "buy3", "sell1", "sell2", "sell3":
+		return true
+	default:
+		return false
+	}
+}
+
+func isValidProgrammaticSignalTypePattern(signalType string) bool {
+	switch signalType {
+	case "*", "buy*", "sell*":
+		return true
+	default:
+		return isValidProgrammaticSignalType(signalType)
+	}
+}
+
+func normalizeProgrammaticEntryPilot(cfg ProgrammaticEntryPilotConfig, defectFixPackEnabled bool) (ProgrammaticEntryPilotProfile, error) {
 	risk := cfg.RiskFraction
 	if risk <= 0 {
 		risk = 0.3
@@ -1341,9 +1706,16 @@ func normalizeProgrammaticEntryPilot(cfg ProgrammaticEntryPilotConfig) (Programm
 	if risk <= 0 || risk > 1 {
 		return ProgrammaticEntryPilotProfile{}, fmt.Errorf("entry_timing.pilot.risk_fraction必须在0-1之间: %.4f", risk)
 	}
+	if risk > 0.4 {
+		log.Printf("⚠️ entry_timing.pilot.risk_fraction=%.2f 偏高，建议≤0.40", risk)
+	}
 	confidence := cfg.MinConfidence
 	if confidence <= 0 {
-		confidence = 90
+		if defectFixPackEnabled {
+			confidence = 70
+		} else {
+			confidence = 90
+		}
 	}
 	if confidence < 1 || confidence > 100 {
 		return ProgrammaticEntryPilotProfile{}, fmt.Errorf("entry_timing.pilot.min_confidence必须在1-100之间: %d", confidence)
@@ -1397,7 +1769,7 @@ func normalizeProgrammaticSymbol(value string) string {
 	symbol = strings.ReplaceAll(symbol, "/", "")
 	symbol = strings.ReplaceAll(symbol, "-", "")
 	symbol = strings.ReplaceAll(symbol, "_", "")
-	if symbol != "" && !strings.HasSuffix(symbol, "USDT") {
+	if symbol != "" && !strings.HasSuffix(symbol, "USDT") && !strings.HasSuffix(symbol, "USDC") {
 		symbol += "USDT"
 	}
 	return symbol

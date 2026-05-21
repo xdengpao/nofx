@@ -113,7 +113,7 @@ func TestEntryTimingPullbackRetestResumeBuildsValidOpenCandidate(t *testing.T) {
 	engine := testFreshnessEngine(t)
 	base := time.Date(2026, 5, 18, 5, 59, 59, 0, time.UTC).UnixMilli()
 	tradeClose := base + int64(2*time.Hour/time.Millisecond)
-	signal := testSignal(SignalBuy2, SideLong, base, tradeClose, 90, 150, 100)
+	signal := testSignal(SignalBuy2, SideLong, base, tradeClose, 85, 160, 100)
 	ctx, data := testGuardContext(105)
 	data.Klines = map[string][]market.Kline{
 		"1h": {{
@@ -181,7 +181,7 @@ func TestEntryTimingSymbolOverridesLoosenBlueChipThresholds(t *testing.T) {
 		t.Fatalf("无override的SOL仍应按2.5 RR拒绝: %+v", rejection)
 	}
 
-	chaseSignal := testSignal(SignalBuy2, SideLong, base, base, 136, 236, 100)
+	chaseSignal := testSignal(SignalBuy2, SideLong, base, base, 1, 500, 100)
 	chaseSignal.Symbol = "BTCUSDT"
 	chaseWindow := engine.evaluateStructureEntryWindow(ctx, chaseSignal, &market.Data{Symbol: "BTCUSDT", CurrentPrice: 137})
 	if !chaseWindow.Valid {

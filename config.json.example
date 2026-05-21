@@ -52,6 +52,10 @@
       "programmatic_strategy": {
         "strategy_name": "chanlun_programmatic",
         "strategy_version": "v1",
+        "defect_fix_pack_enabled": true,
+        "suppression_permanent_threshold": 5,
+        "max_pilot_notional_pct": 0.6,
+        "min_pilot_notional_usd": 30,
         "allow_long": true,
         "allow_short": true,
         "enabled_signals": ["buy1", "buy2", "buy3", "sell1", "sell2", "sell3"],
@@ -152,18 +156,48 @@
           "pilot_after_closed_components": 3,
           "allow_pilot_open": true,
           "pilot_risk_fraction": 0.3,
-          "pilot_min_confidence": 90,
+          "pilot_min_confidence": 70,
+          "pilot_min_confidence_by_signal_type": {
+            "buy1": 70,
+            "sell1": 70,
+            "buy2": 70,
+            "sell2": 70,
+            "buy3": 75,
+            "sell3": 75
+          },
+          "pilot_min_confidence_use_p75": true,
+          "pilot_min_confidence_p75_floor": 65,
+          "pilot_min_confidence_p75_ceiling": 85,
           "require_confirmed_upgrade": true
         },
         "entry_timing": {
           "enabled": true,
-          "direct_structure_open": false,
+          "direct_structure_open": true,
+          "direct_structure_min_confidence": 70,
+          "max_no_trigger_sub_candles": 3,
           "require_fresh_trigger": true,
           "trigger_timeframe": "15m",
           "allowed_trigger_types": ["preview_2x15m_watchlist", "preview_3x15m_pilot", "pullback_retest_resume"],
           "entry_zone": {
             "max_chase_ratio": 0.35,
-            "min_remaining_net_rr": 2.5,
+            "max_chase_atr_multiplier": 0.6,
+            "fresh_age_chase_relax": 0.1,
+            "min_remaining_net_rr": 2.0,
+            "signal_type_min_rr": {
+              "buy1@1h": 2.0,
+              "sell1@1h": 2.0,
+              "buy2@1h": 1.6,
+              "sell2@1h": 1.6,
+              "buy3@1h": 1.4,
+              "sell3@1h": 1.4
+            },
+            "tier_overrides": {
+              "core": {
+                "max_chase_ratio": 0.5,
+                "min_remaining_net_rr": 1.6
+              }
+            },
+            "theoretical_rr_unreachable_skip": true,
             "symbol_overrides": {
               "BTCUSDT": {
                 "max_chase_ratio": 0.4,
@@ -182,9 +216,15 @@
           "pilot": {
             "enabled": true,
             "risk_fraction": 0.3,
-            "min_confidence": 90
+            "min_confidence": 70
           },
           "continuation_after_target_crossed": "disabled"
+        },
+        "candidate_governor": {
+          "enabled": true,
+          "allow_non_crypto_symbols": [],
+          "max_quote_spread_bps": 20,
+          "core_symbols_must_appear": ["BTCUSDT", "ETHUSDT"]
         },
         "state": {
           "path": "data/programmatic_strategy_state.json",
@@ -246,7 +286,22 @@
   },
   "trading_frequency": {
     // 推荐首次上线使用 balanced：AI新机会分析间隔12分钟，prompt候选10个，高ADX/RR/rolling放宽仅report-only。
-    "mode": "balanced"
+    "mode": "balanced",
+    "report_only": {
+      "high_adx": false,
+      "rr_threshold": false,
+      "rolling_gate": false,
+      "gate_effectiveness": true
+    },
+    "loosen_mode": {
+      "enabled": true,
+      "inactivity_window_minutes": 720,
+      "pilot_confidence_drop": 10,
+      "min_net_rr_delta": -0.4,
+      "max_chase_ratio_bump": 0.05,
+      "max_duration_hours": 24,
+      "hard_floor_pilot_confidence": 60
+    }
 
     // 可选 safe：
     // "mode": "safe"
