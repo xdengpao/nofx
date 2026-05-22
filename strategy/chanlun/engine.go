@@ -135,6 +135,9 @@ func normalizeRuntimePreviewSignals(policy decision.ProgrammaticPreviewSignalsPo
 	if policy.PilotRiskFraction <= 0 {
 		policy.PilotRiskFraction = 0.3
 	}
+	if defectFixPackEnabled && policy.PilotMinConfidence > 70 {
+		policy.PilotMinConfidence = 70
+	}
 	if policy.PilotMinConfidence <= 0 {
 		if defectFixPackEnabled {
 			policy.PilotMinConfidence = 70
@@ -147,6 +150,9 @@ func normalizeRuntimePreviewSignals(policy decision.ProgrammaticPreviewSignalsPo
 	}
 	if policy.P75Ceiling <= 0 {
 		policy.P75Ceiling = 85
+	}
+	if defectFixPackEnabled {
+		policy.PilotMinConfidenceUseP75 = true
 	}
 	if uninitialized {
 		policy.Enabled = true
@@ -169,6 +175,9 @@ func normalizeRuntimeEntryTiming(policy decision.ProgrammaticEntryTimingPolicy, 
 		policy.RequireFreshTrigger = true
 		policy.DirectStructureOpen = defectFixPackEnabled
 	}
+	if defectFixPackEnabled {
+		policy.DirectStructureOpen = true
+	}
 	if policy.DirectStructureMinConfidence <= 0 {
 		policy.DirectStructureMinConfidence = 70
 	}
@@ -186,6 +195,9 @@ func normalizeRuntimeEntryTiming(policy decision.ProgrammaticEntryTimingPolicy, 
 	}
 	if policy.EntryZone.MaxChaseRatio <= 0 {
 		policy.EntryZone.MaxChaseRatio = 0.35
+	}
+	if defectFixPackEnabled && policy.EntryZone.MinRemainingNetRR > 2.0 {
+		policy.EntryZone.MinRemainingNetRR = 2.0
 	}
 	if policy.EntryZone.MinRemainingNetRR <= 0 {
 		if defectFixPackEnabled {
@@ -392,6 +404,9 @@ func (e *Engine) evaluateMainSignals(ctx *decision.Context, universe []StrategyS
 	noNewClosedCount := 0
 	skipSet := e.fastSkipSuppressed(ctx)
 	for _, symbol := range universe {
+		if e.Policy.DefectFixPackEnabled && e.isGovernorFiltered(ctx, symbol.Symbol) {
+			continue
+		}
 		data := ctx.MarketDataMap[symbol.Symbol]
 		if data == nil || len(data.Klines) == 0 {
 			diagnostics = append(diagnostics, fmt.Sprintf("%s 数据不足", symbol.Symbol))
@@ -3690,4 +3705,17 @@ func waitReasonSummary(diagnostics []string, rejections []decision.OpenRejection
 
 func init() {
 	log.SetFlags(log.Flags())
+}
+
+func (e *Engine) isGovernorFiltered(ctx *decision.Context, symbol string) bool {
+	if ctx == nil {
+		return false
+	}
+	normalized := market.Normalize(symbol)
+	for _, coin := range ctx.CandidateCoins {
+		if market.Normalize(coin.Symbol) == normalized {
+			return coin.FilterReason != ""
+		}
+	}
+	return false
 }
