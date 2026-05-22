@@ -14,6 +14,7 @@ import (
 const (
 	DecisionModeAI           = "ai"
 	DecisionModeProgrammatic = "programmatic"
+	DecisionModeChanlunV2    = "chanlun_v2"
 
 	defaultProgrammaticStrategyName    = "chanlun_programmatic"
 	defaultProgrammaticStrategyVersion = "v1"
@@ -531,10 +532,10 @@ func normalizeDecisionMode(mode string) (string, error) {
 		return DecisionModeAI, nil
 	}
 	switch mode {
-	case DecisionModeAI, DecisionModeProgrammatic:
+	case DecisionModeAI, DecisionModeProgrammatic, DecisionModeChanlunV2:
 		return mode, nil
 	default:
-		return "", fmt.Errorf("decision_mode必须是 ai 或 programmatic: %q", mode)
+		return "", fmt.Errorf("decision_mode必须是 ai、programmatic 或 chanlun_v2: %q", mode)
 	}
 }
 

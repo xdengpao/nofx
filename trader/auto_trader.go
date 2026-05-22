@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"nofx/config"
 	"nofx/decision"
 	"nofx/logger"
 	"nofx/market"
@@ -15,6 +16,11 @@ import (
 	"strings"
 	"time"
 )
+
+// ChanlunV2EngineInterface 缠论 v2 引擎接口，由 strategy/chanlunv2 包实现
+type ChanlunV2EngineInterface interface {
+	GetFullDecision(ctx *decision.Context) (*decision.FullDecision, error)
+}
 
 // AutoTraderConfig 自动交易配置（简化版 - AI全权决策）
 type AutoTraderConfig struct {
@@ -74,6 +80,7 @@ type AutoTraderConfig struct {
 	FrequencyPolicy            decision.FrequencyPolicy
 	StrategyRiskPolicy         decision.StrategyRiskPolicy
 	ProgrammaticStrategyPolicy decision.ProgrammaticStrategyPolicy
+	ChanlunV2StrategyConfig    config.ChanlunV2StrategyConfig
 }
 
 const (
@@ -127,6 +134,7 @@ type AutoTrader struct {
 	trader                Trader // 使用Trader接口（支持多平台）
 	mcpClient             *mcp.Client
 	programmaticEngine    *chanlun.Engine
+	chanlunV2Engine       ChanlunV2EngineInterface
 	decisionLogger        *logger.DecisionLogger // 决策日志记录器
 	initialBalance        float64
 	dailyPnL              float64
@@ -222,6 +230,9 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 			config.Name,
 			programmaticEngine.Policy.StrategyName,
 			programmaticEngine.Policy.StrategyVersion)
+	} else if config.DecisionMode == "chanlun_v2" {
+		log.Printf("🧮 [%s] 使用缠论V2策略 (Rust引擎，待初始化)", config.Name)
+		// chanlunV2Engine 将在 strategy/chanlunv2 包实现后注入
 	} else {
 		mcpClient = mcp.New()
 		// 初始化AI
@@ -623,6 +634,12 @@ func (at *AutoTrader) getFullDecision(ctx *decision.Context) (*decision.FullDeci
 			return nil, fmt.Errorf("程序化策略引擎未初始化")
 		}
 		return at.programmaticEngine.GetFullDecision(ctx)
+	}
+	if at.config.DecisionMode == "chanlun_v2" {
+		if at.chanlunV2Engine == nil {
+			return nil, fmt.Errorf("缠论V2策略引擎未初始化")
+		}
+		return at.chanlunV2Engine.GetFullDecision(ctx)
 	}
 	return decision.GetFullDecision(ctx, at.mcpClient)
 }

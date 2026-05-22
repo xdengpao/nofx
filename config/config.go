@@ -13,8 +13,9 @@ type TraderConfig struct {
 	Name                 string                     `json:"name"`
 	Enabled              bool                       `json:"enabled"`                 // 是否启用该trader
 	AIModel              string                     `json:"ai_model"`                // "qwen" or "deepseek"
-	DecisionMode         string                     `json:"decision_mode,omitempty"` // ai or programmatic
+	DecisionMode         string                     `json:"decision_mode,omitempty"` // ai or programmatic or chanlun_v2
 	ProgrammaticStrategy ProgrammaticStrategyConfig `json:"programmatic_strategy,omitempty"`
+	ChanlunV2Strategy    ChanlunV2StrategyConfig    `json:"chanlun_v2_strategy,omitempty"`
 
 	// 交易平台选择（二选一）
 	Exchange string `json:"exchange"` // "binance" or "hyperliquid"
@@ -50,6 +51,19 @@ type TraderConfig struct {
 type LeverageConfig struct {
 	BTCETHLeverage  int `json:"btc_eth_leverage"` // BTC和ETH的杠杆倍数（主账户建议5-50，子账户≤5）
 	AltcoinLeverage int `json:"altcoin_leverage"` // 山寨币的杠杆倍数（主账户建议5-20，子账户≤5）
+}
+
+// ChanlunV2StrategyConfig 基于 Rust 缠论库的 v2 策略配置
+type ChanlunV2StrategyConfig struct {
+	Timeframes   map[string]string `json:"timeframes,omitempty"`    // higher/trade/sub/micro → 4h/1h/15m/3m
+	HistoryDepth map[string]int    `json:"history_depth,omitempty"` // timeframe → kline count (700-1000)
+	Structure    map[string]any    `json:"structure,omitempty"`
+	Divergence   map[string]any    `json:"divergence,omitempty"`
+	Signals      map[string]any    `json:"signals,omitempty"`
+	Recursive    map[string]any    `json:"recursive,omitempty"`
+	MultiLevel   map[string]any    `json:"multi_level,omitempty"`
+	Position     map[string]any    `json:"position,omitempty"`
+	Risk         map[string]any    `json:"risk,omitempty"`
 }
 
 // DynamicCandidatePoolConfig 动态候选池配置。
@@ -874,6 +888,10 @@ func (c *Config) Validate() error {
 		if mode == DecisionModeProgrammatic {
 			if trader.AIModel != "" && trader.AIModel != "qwen" && trader.AIModel != "deepseek" && trader.AIModel != "custom" {
 				return fmt.Errorf("trader[%d]: programmatic模式下ai_model如配置必须是 'qwen', 'deepseek' 或 'custom'", i)
+			}
+		} else if mode == DecisionModeChanlunV2 {
+			if trader.AIModel != "" && trader.AIModel != "qwen" && trader.AIModel != "deepseek" && trader.AIModel != "custom" {
+				return fmt.Errorf("trader[%d]: chanlun_v2模式下ai_model如配置必须是 'qwen', 'deepseek' 或 'custom'", i)
 			}
 		} else if trader.AIModel != "qwen" && trader.AIModel != "deepseek" && trader.AIModel != "custom" {
 			return fmt.Errorf("trader[%d]: ai_model必须是 'qwen', 'deepseek' 或 'custom'", i)

@@ -279,6 +279,9 @@ func setupTraderManager(cfg *config.Config) (*manager.TraderManager, error) {
 		if mode == config.DecisionModeProgrammatic {
 			modelLabel = "PROGRAMMATIC"
 		}
+		if mode == config.DecisionModeChanlunV2 {
+			modelLabel = "CHANLUN_V2"
+		}
 		log.Printf("📦 [%d/%d] 初始化 %s (%s模式)...",
 			i+1, len(cfg.Traders), traderCfg.Name, modelLabel)
 
@@ -344,6 +347,9 @@ func printContestants(cfg *config.Config) {
 		modeLabel := strings.ToUpper(traderCfg.AIModel)
 		if traderCfg.DecisionMode == config.DecisionModeProgrammatic {
 			modeLabel = "PROGRAMMATIC"
+		}
+		if traderCfg.DecisionMode == config.DecisionModeChanlunV2 {
+			modeLabel = "CHANLUN_V2"
 		}
 		fmt.Printf("  %s %s (%s @ %s) - 初始资金: %.0f USDT\n",
 			icon,
