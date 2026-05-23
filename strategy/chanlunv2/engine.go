@@ -42,6 +42,16 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 	e.setUniverse(ctx.TraderID, universe)
 	symbols := strategySymbolNames(universe)
 
+	prep, err := decision.PrepareCycleContext(ctx, decision.CyclePreparationOptions{
+		MarketSymbols:           symbols,
+		MarketHistoryDepth:      e.marketHistoryDepth(timeframes),
+		ClosedKlinesOnly:        true,
+		AllowRiskReducingOnHalt: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	var allDecisions []decision.Decision
 	var diagnostics []string
 
@@ -84,17 +94,32 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 	}
 	allDecisions = append(posDecisions, allDecisions...)
 
+	rawDecisions := append([]decision.Decision(nil), allDecisions...)
+	openRejections := []decision.OpenRejection{}
+	allDecisions, openRejections = e.validateChanlunV2Decisions(ctx, allDecisions, prep)
+	e.markRejectedOpenMarkers(ctx, rawDecisions, allDecisions, openRejections)
+
 	if len(allDecisions) == 0 {
+		reason := "缠论V2策略未发现可执行信号"
+		if len(openRejections) > 0 {
+			reason = "缠论V2开仓信号已全部被风控过滤: " + strings.Join(chanlunV2OpenRejectionReasons(openRejections), "; ")
+		}
 		allDecisions = []decision.Decision{{
 			Symbol:    "ALL",
 			Action:    "wait",
-			Reasoning: "缠论V2策略未发现可执行信号",
+			Reasoning: reason,
 		}}
 	}
 
 	summary := "缠论V2策略周期完成"
 	if len(diagnostics) > 0 {
 		summary += ": " + strings.Join(diagnostics, "; ")
+	}
+	if prep != nil && prep.RiskIncreaseBlocked && strings.TrimSpace(prep.StopReason) != "" {
+		summary += "; 风险增加已阻断: " + prep.StopReason
+	}
+	if len(openRejections) > 0 {
+		summary += "; 风控拒绝 " + strings.Join(chanlunV2OpenRejectionReasons(openRejections), "; ")
 	}
 
 	return &decision.FullDecision{
@@ -105,10 +130,12 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		StrategyName:    "chanlun_v2",
 		StrategyVersion: "v0.1",
 		ConfigHash:      e.configHash,
+		OpenRejections:  openRejections,
 		StrategyDiagnostics: map[string]any{
-			"messages":   diagnostics,
-			"timeframes": timeframes,
-			"symbols":    symbols,
+			"messages":        diagnostics,
+			"timeframes":      timeframes,
+			"symbols":         symbols,
+			"open_rejections": chanlunV2OpenRejectionReasons(openRejections),
 		},
 	}, nil
 }
@@ -337,6 +364,72 @@ func (e *Engine) managePositions(ctx *decision.Context, timeframes map[string]st
 		}
 	}
 	return decisions
+}
+
+func (e *Engine) validateChanlunV2Decisions(ctx *decision.Context, decisions []decision.Decision, prep *decision.CyclePreparation) ([]decision.Decision, []decision.OpenRejection) {
+	if len(decisions) == 0 {
+		return decisions, nil
+	}
+
+	riskReducing := make([]decision.Decision, 0, len(decisions))
+	openLike := make([]decision.Decision, 0, len(decisions))
+	for _, d := range decisions {
+		if decision.IsOpenLikeAction(d.Action) {
+			openLike = append(openLike, d)
+			continue
+		}
+		riskReducing = append(riskReducing, d)
+	}
+	if len(openLike) == 0 {
+		return decisions, nil
+	}
+
+	if prep != nil && prep.RiskIncreaseBlocked {
+		rejections := make([]decision.OpenRejection, 0, len(openLike))
+		reason := strings.TrimSpace(prep.StopReason)
+		if reason == "" {
+			reason = "风险增加已阻断"
+		}
+		for _, d := range openLike {
+			rejections = append(rejections, decision.NewOpenRejectionFromDecision(d, fmt.Sprintf("%s %s 被拒绝: %s", d.Symbol, d.Action, reason)))
+		}
+		return riskReducing, rejections
+	}
+
+	validOpenLike, rejections := decision.ValidateStrategyDecisions(ctx, openLike, decision.StrategyValidationOptions{
+		Source: "chanlun_v2",
+	})
+	valid := append(riskReducing, validOpenLike...)
+	return valid, rejections
+}
+
+func (e *Engine) marketHistoryDepth(timeframes map[string]string) map[string]int {
+	depth := map[string]int{}
+	for _, tf := range timeframes {
+		if tf != "" {
+			depth[tf] = 240
+		}
+	}
+	for tf, d := range e.Config.HistoryDepth {
+		if tf != "" && d > 0 {
+			depth[tf] = d
+		}
+	}
+	return depth
+}
+
+func chanlunV2OpenRejectionReasons(rejections []decision.OpenRejection) []string {
+	reasons := make([]string, 0, len(rejections))
+	for _, rejection := range rejections {
+		reason := strings.TrimSpace(rejection.Reason)
+		if reason == "" {
+			reason = strings.Join(rejection.GateReasons, "; ")
+		}
+		if reason != "" {
+			reasons = append(reasons, reason)
+		}
+	}
+	return reasons
 }
 
 func (e *Engine) resolveTimeframes() map[string]string {

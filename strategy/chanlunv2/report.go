@@ -112,6 +112,65 @@ func (e *Engine) appendDecisionMarker(traderID string, d decision.Decision) {
 	e.latestSignals[key] = report
 }
 
+func (e *Engine) markRejectedOpenMarkers(ctx *decision.Context, candidates, valid []decision.Decision, rejections []decision.OpenRejection) {
+	if ctx == nil || len(rejections) == 0 {
+		return
+	}
+	validIDs := map[string]bool{}
+	for _, d := range valid {
+		if d.SignalID != "" {
+			validIDs[d.SignalID] = true
+		}
+	}
+	reasonBySignalID := map[string]string{}
+	reasonBySymbolAction := map[string]string{}
+	for _, rejection := range rejections {
+		reason := strings.TrimSpace(rejection.Reason)
+		if reason == "" {
+			reason = strings.Join(rejection.GateReasons, "; ")
+		}
+		if rejection.SignalID != "" {
+			reasonBySignalID[rejection.SignalID] = reason
+		}
+		reasonBySymbolAction[market.Normalize(rejection.Symbol)+"|"+rejection.Action] = reason
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, d := range candidates {
+		if !decision.IsOpenLikeAction(d.Action) || d.SignalID == "" || validIDs[d.SignalID] {
+			continue
+		}
+		reason := reasonBySignalID[d.SignalID]
+		if reason == "" {
+			reason = reasonBySymbolAction[market.Normalize(d.Symbol)+"|"+d.Action]
+		}
+		if reason == "" {
+			reason = "缠论V2开仓信号被验证层拒绝"
+		}
+		key := ctx.TraderID + "|" + market.Normalize(d.Symbol)
+		report := e.latestSignals[key]
+		if report == nil {
+			continue
+		}
+		for i := range report.SignalMarkers {
+			if report.SignalMarkers[i].SignalID != d.SignalID {
+				continue
+			}
+			report.SignalMarkers[i].Status = "rejected"
+			report.SignalMarkers[i].Reason = reason
+			report.SignalMarkers[i].FinalAction = d.Action
+			report.SignalMarkers[i].TradeIntent = d.Action
+		}
+		if report.LatestDiagnostics == nil {
+			report.LatestDiagnostics = map[string]any{}
+		}
+		report.LatestDiagnostics["open_rejection"] = reason
+		report.MarkerSummary = buildChanlunV2MarkerSummary(report.SignalMarkers, report.SignalMarkers)
+		e.latestSignals[key] = report
+	}
+}
+
 func (e *Engine) baseSignalReport(traderID, symbol string) *chanlun.SignalReport {
 	timeframes := e.resolveTimeframes()
 	return &chanlun.SignalReport{
