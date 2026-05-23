@@ -13,21 +13,39 @@ import (
 
 // Engine 缠论V2策略引擎
 type Engine struct {
-	Config         config.ChanlunV2StrategyConfig
-	mu             sync.RWMutex
-	latestSignals  map[string]*chanlunSignalReport
-	symbolUniverse map[string][]chanlunStrategySymbol
-	configHash     string
+	Config            config.ChanlunV2StrategyConfig
+	mu                sync.RWMutex
+	latestSignals     map[string]*chanlunSignalReport
+	symbolUniverse    map[string][]chanlunStrategySymbol
+	staleSuppressions map[string]chanlunV2StaleSuppression
+	configHash        string
+}
+
+type chanlunV2StaleSuppression struct {
+	TraderID            string
+	Symbol              string
+	SignalID            string
+	ReasonCode          string
+	FreshnessState      string
+	SignalCloseTime     int64
+	DecisionCloseTime   int64
+	EvaluationCloseTime int64
+	FirstSeenAt         int64
+	LastSeenAt          int64
+	SuppressedCount     int
+	LastReason          string
+	DedupeKeys          map[string]bool
 }
 
 // NewEngine 创建缠论V2引擎
 func NewEngine(cfg config.ChanlunV2StrategyConfig) (*Engine, error) {
 	cfg = config.NormalizeChanlunV2StrategyConfig(cfg)
 	return &Engine{
-		Config:         cfg,
-		latestSignals:  map[string]*chanlunSignalReport{},
-		symbolUniverse: map[string][]chanlunStrategySymbol{},
-		configHash:     hashChanlunV2Config(cfg),
+		Config:            cfg,
+		latestSignals:     map[string]*chanlunSignalReport{},
+		symbolUniverse:    map[string][]chanlunStrategySymbol{},
+		staleSuppressions: map[string]chanlunV2StaleSuppression{},
+		configHash:        hashChanlunV2Config(cfg),
 	}, nil
 }
 
@@ -96,7 +114,7 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 	allDecisions = append(posDecisions, allDecisions...)
 
 	rawDecisions := append([]decision.Decision(nil), allDecisions...)
-	allDecisions, freshnessRejections := e.applyChanlunV2FreshnessGuard(ctx, allDecisions, timeframes)
+	allDecisions, freshnessRejections, freshnessSuppressed := e.applyChanlunV2FreshnessGuard(ctx, allDecisions, timeframes)
 	allDecisions, validationRejections := e.validateChanlunV2Decisions(ctx, allDecisions, prep)
 	openRejections := append(freshnessRejections, validationRejections...)
 	e.markRejectedOpenMarkers(ctx, rawDecisions, allDecisions, openRejections)
@@ -105,6 +123,8 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		reason := "缠论V2策略未发现可执行信号"
 		if len(openRejections) > 0 {
 			reason = "缠论V2开仓信号已全部被过滤: " + strings.Join(chanlunV2OpenRejectionReasons(openRejections), "; ")
+		} else if len(freshnessSuppressed) > 0 {
+			reason = "缠论V2重复过期信号已静默: " + strings.Join(freshnessSuppressed, "; ")
 		}
 		allDecisions = []decision.Decision{{
 			Symbol:    "ALL",
@@ -122,6 +142,9 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 	}
 	if len(freshnessRejections) > 0 {
 		summary += "; 信号新鲜度拒绝 " + strings.Join(chanlunV2OpenRejectionReasons(freshnessRejections), "; ")
+	}
+	if len(freshnessSuppressed) > 0 {
+		summary += "; 重复过期信号已静默 " + strings.Join(freshnessSuppressed, "; ")
 	}
 	if len(validationRejections) > 0 {
 		summary += "; 风控/open gate拒绝 " + strings.Join(chanlunV2OpenRejectionReasons(validationRejections), "; ")
@@ -142,6 +165,7 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 			"symbols":               symbols,
 			"open_rejections":       chanlunV2OpenRejectionReasons(openRejections),
 			"freshness_rejections":  chanlunV2OpenRejectionReasons(freshnessRejections),
+			"freshness_suppressed":  append([]string(nil), freshnessSuppressed...),
 			"validation_rejections": chanlunV2OpenRejectionReasons(validationRejections),
 		},
 	}, nil
@@ -404,17 +428,18 @@ func (e *Engine) managePositions(ctx *decision.Context, timeframes map[string]st
 	return decisions
 }
 
-func (e *Engine) applyChanlunV2FreshnessGuard(ctx *decision.Context, decisions []decision.Decision, timeframes map[string]string) ([]decision.Decision, []decision.OpenRejection) {
+func (e *Engine) applyChanlunV2FreshnessGuard(ctx *decision.Context, decisions []decision.Decision, timeframes map[string]string) ([]decision.Decision, []decision.OpenRejection, []string) {
 	if len(decisions) == 0 {
-		return decisions, nil
+		return decisions, nil, nil
 	}
 	policy := config.NormalizeChanlunV2SignalFreshness(e.Config.SignalFreshness)
 	if policy.Enabled != nil && !*policy.Enabled {
-		return decisions, nil
+		return decisions, nil, nil
 	}
 	tradeTF := firstNonEmptyString(timeframes["trade"], "1h")
 	out := make([]decision.Decision, 0, len(decisions))
 	var rejections []decision.OpenRejection
+	var suppressed []string
 	for _, d := range decisions {
 		if !decision.IsOpenLikeAction(d.Action) {
 			out = append(out, d)
@@ -448,6 +473,13 @@ func (e *Engine) applyChanlunV2FreshnessGuard(ctx *decision.Context, decisions [
 		d.StrategyMetadata["current_price"] = currentPrice
 		d.StrategyMetadata["min_remaining_net_rr"] = minRR
 
+		if isSuppressed, diagnostic := e.suppressKnownTerminalFreshnessSignal(ctx, d, signalClose, decisionClose); isSuppressed {
+			if diagnostic != "" {
+				suppressed = append(suppressed, diagnostic)
+			}
+			continue
+		}
+
 		reject := func(state, reasonCode, reason string, extra map[string]any) {
 			d.StrategyMetadata["freshness_state"] = state
 			d.StrategyMetadata["guard_reason_code"] = reasonCode
@@ -475,6 +507,14 @@ func (e *Engine) applyChanlunV2FreshnessGuard(ctx *decision.Context, decisions [
 			}
 			for key, value := range extra {
 				rejection.GateDiagnostics[key] = value
+			}
+			if terminalChanlunV2FreshnessReason(reasonCode) {
+				if isSuppressed, diagnostic := e.rememberOrSuppressTerminalFreshnessRejection(ctx, d, reasonCode, state, signalClose, decisionClose, reason); isSuppressed {
+					if diagnostic != "" {
+						suppressed = append(suppressed, diagnostic)
+					}
+					return
+				}
 			}
 			rejections = append(rejections, rejection)
 		}
@@ -517,7 +557,126 @@ func (e *Engine) applyChanlunV2FreshnessGuard(ctx *decision.Context, decisions [
 		}
 		out = append(out, d)
 	}
-	return out, rejections
+	return out, rejections, suppressed
+}
+
+func terminalChanlunV2FreshnessReason(reasonCode string) bool {
+	switch strings.ToLower(strings.TrimSpace(reasonCode)) {
+	case "freshness_gate.signal_expired", "freshness_gate.target_crossed", "freshness_gate.rr_invalid":
+		return true
+	default:
+		return false
+	}
+}
+
+func chanlunV2StaleLifecycleKey(traderID, symbol, signalID string) string {
+	return strings.Join([]string{
+		strings.TrimSpace(traderID),
+		market.Normalize(symbol),
+		strings.TrimSpace(signalID),
+	}, "|")
+}
+
+func chanlunV2StaleDedupeKey(traderID, symbol, signalID, reasonCode string, evaluationCloseTime int64) string {
+	return strings.Join([]string{
+		strings.TrimSpace(traderID),
+		market.Normalize(symbol),
+		strings.TrimSpace(signalID),
+		strings.TrimSpace(reasonCode),
+		fmt.Sprintf("%d", evaluationCloseTime),
+	}, "|")
+}
+
+func (e *Engine) rememberOrSuppressTerminalFreshnessRejection(ctx *decision.Context, d decision.Decision, reasonCode, freshnessState string, signalClose, decisionClose int64, reason string) (bool, string) {
+	if e == nil || !terminalChanlunV2FreshnessReason(reasonCode) || strings.TrimSpace(d.SignalID) == "" {
+		return false, ""
+	}
+	traderID := ""
+	if ctx != nil {
+		traderID = ctx.TraderID
+	}
+	symbol := market.Normalize(d.Symbol)
+	evaluationClose := firstPositiveInt64(metadataInt64(d.StrategyMetadata, "evaluation_close_time"), decisionClose)
+	lifecycleKey := chanlunV2StaleLifecycleKey(traderID, symbol, d.SignalID)
+	dedupeKey := chanlunV2StaleDedupeKey(traderID, symbol, d.SignalID, reasonCode, evaluationClose)
+	now := time.Now().UnixMilli()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.staleSuppressions == nil {
+		e.staleSuppressions = map[string]chanlunV2StaleSuppression{}
+	}
+	record, exists := e.staleSuppressions[lifecycleKey]
+	if exists {
+		record.LastSeenAt = now
+		record.SuppressedCount++
+		record.LastReason = firstNonEmptyString(reason, record.LastReason)
+		if record.DedupeKeys == nil {
+			record.DedupeKeys = map[string]bool{}
+		}
+		record.DedupeKeys[dedupeKey] = true
+		e.staleSuppressions[lifecycleKey] = record
+		label := firstNonEmptyString(d.SignalType, d.Action, "signal")
+		return true, fmt.Sprintf("%s %s 重复过期信号已静默: %s 已静默%d次", symbol, label, firstNonEmptyString(reasonCode, record.ReasonCode), record.SuppressedCount)
+	}
+	e.staleSuppressions[lifecycleKey] = chanlunV2StaleSuppression{
+		TraderID:            traderID,
+		Symbol:              symbol,
+		SignalID:            d.SignalID,
+		ReasonCode:          reasonCode,
+		FreshnessState:      freshnessState,
+		SignalCloseTime:     signalClose,
+		DecisionCloseTime:   decisionClose,
+		EvaluationCloseTime: evaluationClose,
+		FirstSeenAt:         now,
+		LastSeenAt:          now,
+		LastReason:          reason,
+		DedupeKeys:          map[string]bool{dedupeKey: true},
+	}
+	return false, ""
+}
+
+func (e *Engine) suppressKnownTerminalFreshnessSignal(ctx *decision.Context, d decision.Decision, signalClose, decisionClose int64) (bool, string) {
+	if e == nil || strings.TrimSpace(d.SignalID) == "" {
+		return false, ""
+	}
+	traderID := ""
+	if ctx != nil {
+		traderID = ctx.TraderID
+	}
+	symbol := market.Normalize(d.Symbol)
+	lifecycleKey := chanlunV2StaleLifecycleKey(traderID, symbol, d.SignalID)
+	evaluationClose := firstPositiveInt64(metadataInt64(d.StrategyMetadata, "evaluation_close_time"), decisionClose)
+	now := time.Now().UnixMilli()
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if len(e.staleSuppressions) == 0 {
+		return false, ""
+	}
+	record, exists := e.staleSuppressions[lifecycleKey]
+	if !exists {
+		return false, ""
+	}
+	record.LastSeenAt = now
+	record.SuppressedCount++
+	if record.DedupeKeys == nil {
+		record.DedupeKeys = map[string]bool{}
+	}
+	record.DedupeKeys[chanlunV2StaleDedupeKey(traderID, symbol, d.SignalID, record.ReasonCode, evaluationClose)] = true
+	if signalClose > 0 {
+		record.SignalCloseTime = signalClose
+	}
+	if decisionClose > 0 {
+		record.DecisionCloseTime = decisionClose
+	}
+	if evaluationClose > 0 {
+		record.EvaluationCloseTime = evaluationClose
+	}
+	e.staleSuppressions[lifecycleKey] = record
+
+	label := firstNonEmptyString(d.SignalType, d.Action, "signal")
+	return true, fmt.Sprintf("%s %s 重复过期信号已静默: %s 已静默%d次", symbol, label, firstNonEmptyString(record.ReasonCode, "freshness_gate.terminal"), record.SuppressedCount)
 }
 
 func (e *Engine) validateChanlunV2Decisions(ctx *decision.Context, decisions []decision.Decision, prep *decision.CyclePreparation) ([]decision.Decision, []decision.OpenRejection) {

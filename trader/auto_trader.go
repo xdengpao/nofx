@@ -986,9 +986,45 @@ func (at *AutoTrader) appendOpenRejectionsToRecord(record *logger.DecisionRecord
 			StaleReason:         rejection.StaleReason,
 			StrategyMetadata:    copyAnyMap(rejection.StrategyMetadata),
 		})
+		rejectionLabel := "开仓门控拒绝"
+		if isFreshnessOpenRejection(rejection) {
+			rejectionLabel = "信号新鲜度拒绝"
+		}
 		record.ExecutionLog = append(record.ExecutionLog,
-			fmt.Sprintf("⚠ %s %s 被开仓门控拒绝: %s", rejection.Symbol, rejection.Action, reason))
+			fmt.Sprintf("⚠ %s %s 被%s: %s", rejection.Symbol, rejection.Action, rejectionLabel, reason))
 	}
+}
+
+func isFreshnessOpenRejection(rejection decision.OpenRejection) bool {
+	if strings.EqualFold(openRejectionDiagnosticString(rejection.GateDiagnostics, "source"), "freshness_gate") {
+		return true
+	}
+	for _, reason := range rejection.GateReasons {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(reason)), "freshness_gate.") {
+			return true
+		}
+	}
+	for _, key := range []string{"guard_reason_code", "reason_code"} {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(openRejectionDiagnosticString(rejection.GateDiagnostics, key))), "freshness_gate.") {
+			return true
+		}
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(openRejectionDiagnosticString(rejection.StrategyMetadata, key))), "freshness_gate.") {
+			return true
+		}
+	}
+	return false
+}
+
+func openRejectionDiagnosticString(values map[string]any, key string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	value, ok := values[key]
+	if !ok {
+		return ""
+	}
+	text, _ := value.(string)
+	return text
 }
 
 func (at *AutoTrader) buildRiskStateSnapshot(ctx *decision.Context, rejections []decision.OpenRejection) *logger.RiskStateSnapshot {

@@ -3,6 +3,7 @@ package trader
 import (
 	"nofx/decision"
 	"nofx/logger"
+	"strings"
 	"testing"
 	"time"
 )
@@ -53,5 +54,8 @@ func TestAppendOpenRejectionsToRecordPreservesFreshnessTiming(t *testing.T) {
 	}
 	if action.FreshnessState != "expired" || action.AgeCandles != 3 || action.StaleReason != "信号已过期" {
 		t.Fatalf("拒绝动作应保留freshness元数据: %+v", action)
+	}
+	if len(record.ExecutionLog) != 1 || !strings.Contains(record.ExecutionLog[0], "信号新鲜度拒绝") || strings.Contains(record.ExecutionLog[0], "开仓门控拒绝") {
+		t.Fatalf("freshness拒绝应使用专用文案: %+v", record.ExecutionLog)
 	}
 }

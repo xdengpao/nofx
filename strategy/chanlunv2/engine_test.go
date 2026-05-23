@@ -210,9 +210,12 @@ func TestApplyChanlunV2FreshnessGuardFreshAndAged(t *testing.T) {
 	fresh := chanlunV2DecisionFixture(engine, ctx, "BNBUSDT", "buy2", "open_long", signalClose, signalClose, 90, 95, 120)
 	aged := chanlunV2DecisionFixture(engine, ctx, "BNBUSDT", "buy2", "open_long", signalClose, signalClose+int64(2*time.Hour/time.Millisecond), 90, 95, 120)
 
-	valid, rejections := engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{fresh, aged}, map[string]string{"trade": "1h"})
+	valid, rejections, suppressed := engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{fresh, aged}, map[string]string{"trade": "1h"})
 	if len(rejections) != 0 || len(valid) != 2 {
 		t.Fatalf("fresh/soft-aged信号不应直接拒绝: valid=%+v rejections=%+v", valid, rejections)
+	}
+	if len(suppressed) != 0 {
+		t.Fatalf("fresh/soft-aged信号不应被静默: %+v", suppressed)
 	}
 	if state := metadataString(valid[0].StrategyMetadata, "freshness_state"); state != "fresh" {
 		t.Fatalf("首个信号应为fresh: %s", state)
@@ -234,15 +237,71 @@ func TestApplyChanlunV2FreshnessGuardRejectsExpired(t *testing.T) {
 	ctx.MarketDataMap["BNBUSDT"] = chanlunV2ValidationMarketData("BNBUSDT", 100)
 	signalClose := int64(1710000000000)
 	expired := chanlunV2DecisionFixture(engine, ctx, "BNBUSDT", "buy2", "open_long", signalClose, signalClose+int64(3*time.Hour/time.Millisecond), 90, 95, 120)
-	valid, rejections := engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{expired}, map[string]string{"trade": "1h"})
+	valid, rejections, suppressed := engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{expired}, map[string]string{"trade": "1h"})
 	if len(valid) != 0 || len(rejections) != 1 {
 		t.Fatalf("hard-expired信号应被freshness gate拒绝: valid=%+v rejections=%+v", valid, rejections)
+	}
+	if len(suppressed) != 0 {
+		t.Fatalf("首次过期拒绝不应被静默: %+v", suppressed)
 	}
 	if rejections[0].FreshnessState != "expired" || rejections[0].AgeCandles != 3 {
 		t.Fatalf("拒绝元数据不符合预期: %+v", rejections[0])
 	}
 	if len(rejections[0].GateReasons) != 1 || rejections[0].GateReasons[0] != "freshness_gate.signal_expired" {
 		t.Fatalf("应使用freshness_gate原因码: %+v", rejections[0].GateReasons)
+	}
+}
+
+func TestApplyChanlunV2FreshnessGuardSuppressesRepeatedTerminalStaleSignal(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	ctx.MarketDataMap["BNBUSDT"] = chanlunV2ValidationMarketData("BNBUSDT", 100)
+	signalClose := int64(1710000000000)
+	decisionClose := signalClose + int64(3*time.Hour/time.Millisecond)
+	expired := chanlunV2DecisionFixture(engine, ctx, "BNBUSDT", "buy2", "open_long", signalClose, decisionClose, 90, 95, 120)
+
+	valid, rejections, suppressed := engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{expired}, map[string]string{"trade": "1h"})
+	if len(valid) != 0 || len(rejections) != 1 || len(suppressed) != 0 {
+		t.Fatalf("首次终态过期应记录拒绝: valid=%+v rejections=%+v suppressed=%+v", valid, rejections, suppressed)
+	}
+
+	valid, rejections, suppressed = engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{expired}, map[string]string{"trade": "1h"})
+	if len(valid) != 0 || len(rejections) != 0 || len(suppressed) != 1 {
+		t.Fatalf("重复终态过期应静默: valid=%+v rejections=%+v suppressed=%+v", valid, rejections, suppressed)
+	}
+	if !strings.Contains(suppressed[0], "重复过期信号已静默") || !strings.Contains(suppressed[0], "freshness_gate.signal_expired") {
+		t.Fatalf("静默诊断应说明原因: %+v", suppressed)
+	}
+
+	newSignal := chanlunV2DecisionFixture(engine, ctx, "BNBUSDT", "buy2", "open_long", signalClose+int64(time.Hour/time.Millisecond), decisionClose+int64(time.Hour/time.Millisecond), 90, 95, 120)
+	valid, rejections, suppressed = engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{newSignal}, map[string]string{"trade": "1h"})
+	if len(valid) != 0 || len(rejections) != 1 || len(suppressed) != 0 {
+		t.Fatalf("新signal_id应重新评估并记录首次拒绝: valid=%+v rejections=%+v suppressed=%+v", valid, rejections, suppressed)
+	}
+}
+
+func TestApplyChanlunV2FreshnessGuardSuppressesTerminalLifecycleBeforeReevaluation(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	ctx.MarketDataMap["BNBUSDT"] = chanlunV2ValidationMarketData("BNBUSDT", 121)
+	signalClose := int64(1710000000000)
+	crossed := chanlunV2DecisionFixture(engine, ctx, "BNBUSDT", "buy2", "open_long", signalClose, signalClose, 90, 95, 120)
+
+	valid, rejections, suppressed := engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{crossed}, map[string]string{"trade": "1h"})
+	if len(valid) != 0 || len(rejections) != 1 || rejections[0].FreshnessState != "target_crossed" || len(suppressed) != 0 {
+		t.Fatalf("首次目标穿越应记录终态拒绝: valid=%+v rejections=%+v suppressed=%+v", valid, rejections, suppressed)
+	}
+
+	ctx.MarketDataMap["BNBUSDT"] = chanlunV2ValidationMarketData("BNBUSDT", 100)
+	valid, rejections, suppressed = engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{crossed}, map[string]string{"trade": "1h"})
+	if len(valid) != 0 || len(rejections) != 0 || len(suppressed) != 1 {
+		t.Fatalf("同一signal_id终态后即使价格回落也应静默: valid=%+v rejections=%+v suppressed=%+v", valid, rejections, suppressed)
 	}
 }
 
@@ -255,21 +314,23 @@ func TestApplyChanlunV2FreshnessGuardRejectsTargetCrossedAndRRInvalid(t *testing
 	ctx.MarketDataMap["BNBUSDT"] = chanlunV2ValidationMarketData("BNBUSDT", 121)
 	signalClose := int64(1710000000000)
 	crossed := chanlunV2DecisionFixture(engine, ctx, "BNBUSDT", "buy2", "open_long", signalClose, signalClose, 90, 95, 120)
-	_, rejections := engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{crossed}, map[string]string{"trade": "1h"})
+	_, rejections, _ := engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{crossed}, map[string]string{"trade": "1h"})
 	if len(rejections) != 1 || rejections[0].FreshnessState != "target_crossed" {
 		t.Fatalf("目标穿越应被拒绝: %+v", rejections)
 	}
 
 	ctx.MarketDataMap["BNBUSDT"] = chanlunV2ValidationMarketData("BNBUSDT", 119)
-	rrInvalid := chanlunV2DecisionFixture(engine, ctx, "BNBUSDT", "buy2", "open_long", signalClose, signalClose, 90, 95, 120)
-	_, rejections = engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{rrInvalid}, map[string]string{"trade": "1h"})
+	rrInvalidSignalClose := signalClose + int64(time.Hour/time.Millisecond)
+	rrInvalid := chanlunV2DecisionFixture(engine, ctx, "BNBUSDT", "buy2", "open_long", rrInvalidSignalClose, rrInvalidSignalClose, 90, 95, 120)
+	_, rejections, _ = engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{rrInvalid}, map[string]string{"trade": "1h"})
 	if len(rejections) != 1 || rejections[0].FreshnessState != "rr_invalid" {
 		t.Fatalf("剩余RR不足应被拒绝: %+v", rejections)
 	}
 
 	ctx.MarketDataMap["BNBUSDT"] = chanlunV2ValidationMarketData("BNBUSDT", 79)
-	shortCrossed := chanlunV2DecisionFixture(engine, ctx, "BNBUSDT", "sell2", "open_short", signalClose, signalClose, 90, 105, 80)
-	_, rejections = engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{shortCrossed}, map[string]string{"trade": "1h"})
+	shortCrossedSignalClose := signalClose + int64(2*time.Hour/time.Millisecond)
+	shortCrossed := chanlunV2DecisionFixture(engine, ctx, "BNBUSDT", "sell2", "open_short", shortCrossedSignalClose, shortCrossedSignalClose, 90, 105, 80)
+	_, rejections, _ = engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{shortCrossed}, map[string]string{"trade": "1h"})
 	if len(rejections) != 1 || rejections[0].FreshnessState != "target_crossed" {
 		t.Fatalf("空单目标穿越应被拒绝: %+v", rejections)
 	}
@@ -288,7 +349,7 @@ func TestMarkRejectedOpenMarkersMovesMarkerToDecisionClose(t *testing.T) {
 	mr := &multiLevelResult{LastClosedByLevel: map[string]int64{"trade": evaluationClose}}
 	engine.setLatestReport(ctx.TraderID, "BNBUSDT", mr, []Signal{sig}, nil)
 	d := engine.signalToDecision(ctx, "BNBUSDT", sig, "1h", evaluationClose)
-	valid, rejections := engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{d}, map[string]string{"trade": "1h"})
+	valid, rejections, _ := engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{d}, map[string]string{"trade": "1h"})
 	if len(valid) != 0 || len(rejections) != 1 {
 		t.Fatalf("应构造一个过期拒绝: valid=%+v rejections=%+v", valid, rejections)
 	}
@@ -322,7 +383,7 @@ func TestSetLatestReportPreservesRejectedLifecycleMarker(t *testing.T) {
 	mr := &multiLevelResult{LastClosedByLevel: map[string]int64{"trade": evaluationClose}}
 	engine.setLatestReport(ctx.TraderID, "BNBUSDT", mr, []Signal{sig}, nil)
 	d := engine.signalToDecision(ctx, "BNBUSDT", sig, "1h", evaluationClose)
-	_, rejections := engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{d}, map[string]string{"trade": "1h"})
+	_, rejections, _ := engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{d}, map[string]string{"trade": "1h"})
 	engine.markRejectedOpenMarkers(ctx, []decision.Decision{d}, nil, rejections)
 
 	engine.setLatestReport(ctx.TraderID, "BNBUSDT", mr, []Signal{sig}, nil)
