@@ -35,16 +35,10 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 
 	// 对每个标的进行多级别分析
 	for _, symbol := range symbols {
-		data := ctx.MarketDataMap[symbol]
-		if data == nil {
-			diagnostics = append(diagnostics, fmt.Sprintf("%s 数据不足", symbol))
-			continue
-		}
-
-		// 多级别分析
-		multiResult := e.analyzeMultiLevel(symbol, data, timeframes)
+		// 直接获取 K 线数据（不依赖 ctx.MarketDataMap）
+		multiResult := e.analyzeSymbol(symbol, timeframes)
 		if multiResult == nil {
-			diagnostics = append(diagnostics, fmt.Sprintf("%s 多级别分析无结果", symbol))
+			diagnostics = append(diagnostics, fmt.Sprintf("%s 数据不足", symbol))
 			continue
 		}
 
@@ -108,6 +102,35 @@ func (e *Engine) analyzeMultiLevel(symbol string, data *market.Data, timeframes 
 	for level, tf := range timeframes {
 		klines, ok := data.Klines[tf]
 		if !ok || len(klines) < 30 {
+			continue
+		}
+		input := e.buildInput(klines, tf)
+		output, err := AnalyzeKlines(input)
+		if err != nil {
+			log.Printf("[chanlun_v2] %s %s 分析失败: %v", symbol, tf, err)
+			continue
+		}
+		if output.Result != nil {
+			result.Results[level] = output.Result
+		}
+	}
+
+	if len(result.Results) == 0 {
+		return nil
+	}
+	return result
+}
+
+func (e *Engine) analyzeSymbol(symbol string, timeframes map[string]string) *multiLevelResult {
+	result := &multiLevelResult{Symbol: symbol, Results: map[string]*AnalysisResult{}}
+
+	for level, tf := range timeframes {
+		depth := 240
+		if d, ok := e.Config.HistoryDepth[tf]; ok && d > 0 {
+			depth = d
+		}
+		klines, err := market.GetKlines(symbol, tf, depth, true)
+		if err != nil || len(klines) < 30 {
 			continue
 		}
 		input := e.buildInput(klines, tf)
@@ -232,11 +255,7 @@ func (e *Engine) managePositions(ctx *decision.Context, timeframes map[string]st
 	}
 	var decisions []decision.Decision
 	for _, pos := range ctx.Positions {
-		data := ctx.MarketDataMap[pos.Symbol]
-		if data == nil {
-			continue
-		}
-		mr := e.analyzeMultiLevel(pos.Symbol, data, timeframes)
+		mr := e.analyzeSymbol(pos.Symbol, timeframes)
 		if mr == nil {
 			continue
 		}
