@@ -7,17 +7,27 @@ import (
 	"nofx/decision"
 	"nofx/market"
 	"strings"
+	"sync"
 	"time"
 )
 
 // Engine 缠论V2策略引擎
 type Engine struct {
-	Config config.ChanlunV2StrategyConfig
+	Config         config.ChanlunV2StrategyConfig
+	mu             sync.RWMutex
+	latestSignals  map[string]*chanlunSignalReport
+	symbolUniverse map[string][]chanlunStrategySymbol
+	configHash     string
 }
 
 // NewEngine 创建缠论V2引擎
 func NewEngine(cfg config.ChanlunV2StrategyConfig) (*Engine, error) {
-	return &Engine{Config: cfg}, nil
+	return &Engine{
+		Config:         cfg,
+		latestSignals:  map[string]*chanlunSignalReport{},
+		symbolUniverse: map[string][]chanlunStrategySymbol{},
+		configHash:     hashChanlunV2Config(cfg),
+	}, nil
 }
 
 // GetFullDecision 实现 ChanlunV2EngineInterface
@@ -28,30 +38,38 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 	now := time.Now()
 
 	timeframes := e.resolveTimeframes()
-	symbols := e.resolveSymbols(ctx)
+	universe := e.resolveSymbolUniverse(ctx)
+	e.setUniverse(ctx.TraderID, universe)
+	symbols := strategySymbolNames(universe)
 
 	var allDecisions []decision.Decision
 	var diagnostics []string
 
 	// 对每个标的进行多级别分析
 	for _, symbol := range symbols {
+		symbolDiagnostics := []string{}
 		// 直接获取 K 线数据（不依赖 ctx.MarketDataMap）
 		multiResult := e.analyzeSymbol(symbol, timeframes)
 		if multiResult == nil {
-			diagnostics = append(diagnostics, fmt.Sprintf("%s 数据不足", symbol))
+			symbolDiagnostics = append(symbolDiagnostics, fmt.Sprintf("%s 数据不足", symbol))
+			diagnostics = append(diagnostics, symbolDiagnostics...)
+			e.setLatestReport(ctx.TraderID, symbol, nil, nil, symbolDiagnostics)
 			continue
 		}
 
 		// 级别联立产出信号
 		signals := e.multiLevelJudgment(multiResult, timeframes)
 		if len(signals) == 0 {
-			diagnostics = append(diagnostics, fmt.Sprintf("%s 无买卖点信号", symbol))
+			symbolDiagnostics = append(symbolDiagnostics, fmt.Sprintf("%s 无买卖点信号", symbol))
+			diagnostics = append(diagnostics, symbolDiagnostics...)
+			e.setLatestReport(ctx.TraderID, symbol, multiResult, nil, symbolDiagnostics)
 			continue
 		}
+		e.setLatestReport(ctx.TraderID, symbol, multiResult, signals, symbolDiagnostics)
 
 		// 信号转 Decision
 		for _, sig := range signals {
-			d := e.signalToDecision(ctx, symbol, sig)
+			d := e.signalToDecision(ctx, symbol, sig, timeframes["trade"])
 			if d.Action != "" {
 				allDecisions = append(allDecisions, d)
 				diagnostics = append(diagnostics, fmt.Sprintf("%s %s 置信度%d", symbol, sig.SignalType, sig.Confidence))
@@ -61,6 +79,9 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 
 	// 持仓管理
 	posDecisions := e.managePositions(ctx, timeframes)
+	for _, d := range posDecisions {
+		e.appendDecisionMarker(ctx.TraderID, d)
+	}
 	allDecisions = append(posDecisions, allDecisions...)
 
 	if len(allDecisions) == 0 {
@@ -83,6 +104,7 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		DecisionMode:    "chanlun_v2",
 		StrategyName:    "chanlun_v2",
 		StrategyVersion: "v0.1",
+		ConfigHash:      e.configHash,
 		StrategyDiagnostics: map[string]any{
 			"messages":   diagnostics,
 			"timeframes": timeframes,
@@ -221,7 +243,7 @@ func (e *Engine) multiLevelJudgment(mr *multiLevelResult, timeframes map[string]
 	return filtered
 }
 
-func (e *Engine) signalToDecision(ctx *decision.Context, symbol string, sig Signal) decision.Decision {
+func (e *Engine) signalToDecision(ctx *decision.Context, symbol string, sig Signal, timeframe string) decision.Decision {
 	action := ""
 	switch {
 	case strings.HasPrefix(sig.SignalType, "buy") || strings.HasPrefix(sig.SignalType, "quasi_buy"):
@@ -237,15 +259,34 @@ func (e *Engine) signalToDecision(ctx *decision.Context, symbol string, sig Sign
 	if symbol == "BTCUSDT" || symbol == "ETHUSDT" {
 		leverage = ctx.BTCETHLeverage
 	}
+	signalID := v2SignalID(symbol, timeframe, sig)
+	closeTime := normalizeV2EpochMillis(sig.Timestamp)
 
 	return decision.Decision{
-		Symbol:     symbol,
-		Action:     action,
-		Leverage:   leverage,
-		StopLoss:   sig.StopLoss,
-		TakeProfit: sig.TakeProfit,
-		Confidence: sig.Confidence,
-		Reasoning:  fmt.Sprintf("缠论V2 %s 置信度%d 背驰强度%.2f", sig.SignalType, sig.Confidence, sig.DivergenceStrength),
+		Symbol:          symbol,
+		Action:          action,
+		Leverage:        leverage,
+		StopLoss:        sig.StopLoss,
+		TakeProfit:      sig.TakeProfit,
+		Confidence:      sig.Confidence,
+		Reasoning:       fmt.Sprintf("缠论V2 %s 置信度%d 背驰强度%.2f", sig.SignalType, sig.Confidence, sig.DivergenceStrength),
+		StrategyMode:    "chanlun_v2",
+		StrategyName:    "chanlun_v2",
+		StrategyVersion: "v0.1",
+		ConfigHash:      e.configHash,
+		SignalID:        signalID,
+		SignalType:      sig.SignalType,
+		SignalTimeframe: timeframe,
+		StructureTarget: sig.TakeProfit,
+		StrategyMetadata: map[string]any{
+			"layer":               "trade_action",
+			"timeframe":           timeframe,
+			"signal_close_time":   closeTime,
+			"decision_close_time": closeTime,
+			"divergence_strength": sig.DivergenceStrength,
+			"center_id":           signalCenterID(sig),
+			"reason_code":         "chanlun_v2_signal",
+		},
 	}
 }
 
@@ -272,9 +313,24 @@ func (e *Engine) managePositions(ctx *decision.Context, timeframes map[string]st
 					closeAction = "close_short"
 				}
 				decisions = append(decisions, decision.Decision{
-					Symbol:    pos.Symbol,
-					Action:    closeAction,
-					Reasoning: fmt.Sprintf("缠论V2反向信号 %s 置信度%d", sig.SignalType, sig.Confidence),
+					Symbol:          pos.Symbol,
+					Action:          closeAction,
+					Reasoning:       fmt.Sprintf("缠论V2反向信号 %s 置信度%d", sig.SignalType, sig.Confidence),
+					StrategyMode:    "chanlun_v2",
+					StrategyName:    "chanlun_v2",
+					StrategyVersion: "v0.1",
+					ConfigHash:      e.configHash,
+					SignalID:        v2SignalID(pos.Symbol, timeframes["trade"], sig),
+					SignalType:      sig.SignalType,
+					SignalTimeframe: timeframes["trade"],
+					StrategyMetadata: map[string]any{
+						"layer":               "position_management",
+						"timeframe":           timeframes["trade"],
+						"signal_close_time":   normalizeV2EpochMillis(sig.Timestamp),
+						"decision_close_time": normalizeV2EpochMillis(sig.Timestamp),
+						"position_side":       strings.ToLower(pos.Side),
+						"reason_code":         "chanlun_v2_reverse_signal",
+					},
 				})
 				break
 			}
@@ -294,14 +350,7 @@ func (e *Engine) resolveTimeframes() map[string]string {
 }
 
 func (e *Engine) resolveSymbols(ctx *decision.Context) []string {
-	var symbols []string
-	for _, c := range ctx.CandidateCoins {
-		symbols = append(symbols, c.Symbol)
-	}
-	if len(symbols) > 10 {
-		symbols = symbols[:10]
-	}
-	return symbols
+	return strategySymbolNames(e.resolveSymbolUniverse(ctx))
 }
 
 func min(a, b int) int {

@@ -86,6 +86,38 @@ func newProgrammaticTestServer(t *testing.T, configure ...func(*config.Config)) 
 	return NewServer(tm, 8080)
 }
 
+func newChanlunV2TestServer(t *testing.T, configure ...func(*config.TraderConfig)) *Server {
+	t.Helper()
+	tm := manager.NewTraderManager()
+	cfg := config.TraderConfig{
+		ID:                  "chanlun-v2-trader",
+		Name:                "Chanlun V2 Trader",
+		DecisionMode:        config.DecisionModeChanlunV2,
+		Exchange:            "binance",
+		BinanceAPIKey:       "fake-api-key-for-test",
+		BinanceSecretKey:    "fake-secret-key-for-test",
+		InitialBalance:      10000.0,
+		ScanIntervalMinutes: 3,
+		ChanlunV2Strategy: config.ChanlunV2StrategyConfig{
+			Timeframes: map[string]string{"higher": "4h", "trade": "1h", "sub": "15m", "micro": "3m"},
+			HistoryDepth: map[string]int{
+				"1h": 240,
+			},
+		},
+	}
+	for _, fn := range configure {
+		fn(&cfg)
+	}
+	if err := tm.AddTraderWithPolicies(cfg, "", 10, 20, 60,
+		config.LeverageConfig{BTCETHLeverage: 5, AltcoinLeverage: 5},
+		config.TradingFrequencyProfile{Legacy: true, Mode: config.TradingFrequencyModeLegacy, EffectiveMode: config.TradingFrequencyModeLegacy, AnalysisIntervalMinutes: 15, PromptCandidateLimit: 8},
+		config.StrategyRiskProfile{Legacy: true, RollbackLegacyValidation: true, FeeSlippagePct: 0.002, DefaultMinNetRR: 2.5, ADXTimeframe: "1h"},
+	); err != nil {
+		t.Fatalf("添加缠论V2 trader失败: %v", err)
+	}
+	return NewServer(tm, 8080)
+}
+
 // doRequest 执行 HTTP 请求并返回 recorder
 func doRequest(s *Server, method, path string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, nil)
@@ -488,6 +520,53 @@ func TestStrategySignalsParsesAuditViewOptions(t *testing.T) {
 	}
 }
 
+func TestChanlunV2StrategySignalsEmptyReportIncludesTimeframes(t *testing.T) {
+	s := newChanlunV2TestServer(t)
+	w := doRequest(s, "GET", "/api/strategy/signals?trader_id=chanlun-v2-trader&symbol=ETHUSDT")
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/strategy/signals: 期望200，实际=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSON(t, w)
+	if body["decision_mode"] != "chanlun_v2" || body["trade_timeframe"] != "1h" || body["micro_timeframe"] != "3m" {
+		t.Fatalf("缠论V2空信号报告应返回模式和timeframe元数据: %+v", body)
+	}
+	if hash, ok := body["config_hash"].(string); !ok || hash == "" {
+		t.Fatalf("缠论V2报告应返回config_hash: %+v", body)
+	}
+}
+
+func TestChanlunV2StrategySignalsParsesAuditViewOptions(t *testing.T) {
+	s := newChanlunV2TestServer(t)
+	w := doRequest(s, "GET", "/api/strategy/signals?trader_id=chanlun-v2-trader&symbol=ETHUSDT&view=audit&layers=trade_action&statuses=ready&limit=25")
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/strategy/signals audit: 期望200，实际=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSON(t, w)
+	if body["view"] != "audit" {
+		t.Fatalf("应返回audit视图: %+v", body)
+	}
+	filters, ok := body["filters"].(map[string]interface{})
+	if !ok || filters["limit"].(float64) != 25 {
+		t.Fatalf("应返回过滤参数: %+v", body)
+	}
+}
+
+func TestChanlunV2StrategySymbolsEmptyListBeforeCycle(t *testing.T) {
+	s := newChanlunV2TestServer(t)
+	w := doRequest(s, "GET", "/api/strategy/symbols?trader_id=chanlun-v2-trader")
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/strategy/symbols: 期望200，实际=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSON(t, w)
+	symbols, ok := body["symbols"].([]interface{})
+	if !ok {
+		t.Fatalf("尚无策略周期时symbols应为数组而不是null: %+v", body)
+	}
+	if len(symbols) != 0 {
+		t.Fatalf("尚无策略周期时symbols应为空数组: %+v", symbols)
+	}
+}
+
 func TestMarketKlinesRejectsUnsupportedTimeframe(t *testing.T) {
 	s := newTestServerWithTrader(t)
 	w := doRequest(s, "GET", "/api/market/klines?trader_id=test-trader-1&symbol=ETHUSDT&timeframe=5m")
@@ -555,6 +634,61 @@ func TestMarketKlinesExplicitLimitOverridesProgrammaticHistoryDepth(t *testing.T
 	}
 	if body["limit"] != float64(12) || body["configured_limit"] != float64(12) || body["limit_source"] != "query" {
 		t.Fatalf("响应应说明使用query limit: %+v", body)
+	}
+}
+
+func TestMarketKlinesUsesChanlunV2HistoryDepthWhenLimitMissing(t *testing.T) {
+	var gotSymbol, gotTimeframe string
+	var gotLimit int
+	var gotClosedOnly bool
+	restore := trader.SetMarketKlineFetcherForTest(func(symbol, timeframe string, limit int, closedOnly bool) ([]market.Kline, error) {
+		gotSymbol = symbol
+		gotTimeframe = timeframe
+		gotLimit = limit
+		gotClosedOnly = closedOnly
+		return fakeMarketKlines(limit), nil
+	})
+	defer restore()
+
+	s := newChanlunV2TestServer(t, func(cfg *config.TraderConfig) {
+		cfg.ChanlunV2Strategy.HistoryDepth["15m"] = 123
+	})
+	w := doRequest(s, "GET", "/api/market/klines?trader_id=chanlun-v2-trader&symbol=ETHUSDT&timeframe=15m")
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/market/klines: 期望200，实际=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSON(t, w)
+	if gotSymbol != "ETHUSDT" || gotTimeframe != "15m" || gotLimit != 123 || !gotClosedOnly {
+		t.Fatalf("fetcher参数不符合v2配置深度: symbol=%s timeframe=%s limit=%d closed=%v", gotSymbol, gotTimeframe, gotLimit, gotClosedOnly)
+	}
+	if body["limit"] != float64(123) || body["configured_limit"] != float64(123) || body["limit_source"] != "chanlun_v2_history_depth" {
+		t.Fatalf("响应应说明使用缠论V2 history_depth: %+v", body)
+	}
+}
+
+func TestMarketKlinesCapsChanlunV2HistoryDepth(t *testing.T) {
+	var gotLimit int
+	restore := trader.SetMarketKlineFetcherForTest(func(symbol, timeframe string, limit int, closedOnly bool) ([]market.Kline, error) {
+		gotLimit = limit
+		return fakeMarketKlines(limit), nil
+	})
+	defer restore()
+
+	s := newChanlunV2TestServer(t, func(cfg *config.TraderConfig) {
+		cfg.ChanlunV2Strategy.HistoryDepth["1h"] = trader.MaxMarketKlineLimit + 50
+	})
+	w := doRequest(s, "GET", "/api/market/klines?trader_id=chanlun-v2-trader&symbol=ETHUSDT&timeframe=1h")
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/market/klines: 期望200，实际=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSON(t, w)
+	if gotLimit != trader.MaxMarketKlineLimit {
+		t.Fatalf("v2配置深度超过上限时应截断: got=%d", gotLimit)
+	}
+	if body["limit"] != float64(trader.MaxMarketKlineLimit) ||
+		body["configured_limit"] != float64(trader.MaxMarketKlineLimit+50) ||
+		body["limit_source"] != "chanlun_v2_history_depth_capped" {
+		t.Fatalf("响应应说明缠论V2 history_depth 被截断: %+v", body)
 	}
 }
 

@@ -233,6 +233,9 @@ func (s *Server) handleStrategySymbols(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 		return
 	}
+	if symbols == nil {
+		symbols = []chanlun.StrategySymbol{}
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"trader_id": traderID,
 		"symbols":   symbols,

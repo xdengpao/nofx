@@ -21,6 +21,9 @@ import (
 // ChanlunV2EngineInterface 缠论 v2 引擎接口，由 strategy/chanlunv2 包实现
 type ChanlunV2EngineInterface interface {
 	GetFullDecision(ctx *decision.Context) (*decision.FullDecision, error)
+	SymbolUniverse(traderID string) []chanlun.StrategySymbol
+	LatestSignalsWithOptions(traderID, symbol string, opts chanlun.SignalReportOptions) (*chanlun.SignalReport, bool)
+	EmptySignalReportWithOptions(traderID, symbol string, opts chanlun.SignalReportOptions) *chanlun.SignalReport
 }
 
 // AutoTraderConfig 自动交易配置（简化版 - AI全权决策）
@@ -29,7 +32,7 @@ type AutoTraderConfig struct {
 	ID           string // Trader唯一标识（用于日志目录等）
 	Name         string // Trader显示名称
 	AIModel      string // AI模型: "qwen" 或 "deepseek"
-	DecisionMode string // ai 或 programmatic
+	DecisionMode string // ai、programmatic 或 chanlun_v2
 
 	// 交易平台选择
 	Exchange string // "binance", "hyperliquid" 或 "aster"
@@ -174,6 +177,8 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 	if config.AIModel == "" {
 		if config.DecisionMode == "programmatic" {
 			config.AIModel = "programmatic"
+		} else if config.DecisionMode == "chanlun_v2" {
+			config.AIModel = "chanlun_v2"
 		} else if config.UseQwen {
 			config.AIModel = "qwen"
 		} else {
@@ -2938,10 +2943,13 @@ func (at *AutoTrader) GetDecisionLogger() *logger.DecisionLogger {
 
 // GetStrategySymbols 返回程序化策略最近一次解析出的分析标的池。
 func (at *AutoTrader) GetStrategySymbols() []chanlun.StrategySymbol {
-	if at.programmaticEngine == nil {
-		return nil
+	if at.programmaticEngine != nil {
+		return at.programmaticEngine.SymbolUniverse(at.id)
 	}
-	return at.programmaticEngine.SymbolUniverse(at.id)
+	if at.chanlunV2Engine != nil {
+		return at.chanlunV2Engine.SymbolUniverse(at.id)
+	}
+	return nil
 }
 
 // GetLatestStrategySignals 返回程序化策略最近一次分析出的 symbol 信号报告。
@@ -2951,14 +2959,20 @@ func (at *AutoTrader) GetLatestStrategySignals(symbol string) (*chanlun.SignalRe
 
 // GetLatestStrategySignalsWithOptions 返回带过滤/视图参数的程序化策略信号报告。
 func (at *AutoTrader) GetLatestStrategySignalsWithOptions(symbol string, opts chanlun.SignalReportOptions) (*chanlun.SignalReport, bool) {
-	if at.programmaticEngine == nil {
-		return nil, false
-	}
 	normalized := market.Normalize(symbol)
-	if report, ok := at.programmaticEngine.LatestSignalsWithOptions(at.id, normalized, opts); ok {
-		return report, true
+	if at.programmaticEngine != nil {
+		if report, ok := at.programmaticEngine.LatestSignalsWithOptions(at.id, normalized, opts); ok {
+			return report, true
+		}
+		return at.programmaticEngine.EmptySignalReportWithOptions(at.id, normalized, opts), true
 	}
-	return at.programmaticEngine.EmptySignalReportWithOptions(at.id, normalized, opts), true
+	if at.chanlunV2Engine != nil {
+		if report, ok := at.chanlunV2Engine.LatestSignalsWithOptions(at.id, normalized, opts); ok {
+			return report, true
+		}
+		return at.chanlunV2Engine.EmptySignalReportWithOptions(at.id, normalized, opts), true
+	}
+	return nil, false
 }
 
 // GetMarketKlines 返回闭合 K 线，供策略检查区使用。
@@ -2984,6 +2998,17 @@ func (at *AutoTrader) ResolveMarketKlineLimit(timeframe string, explicitLimit in
 			if limit > MaxMarketKlineLimit {
 				limit = MaxMarketKlineLimit
 				source = "programmatic_history_depth_capped"
+			}
+			return MarketKlineLimitResolution{Limit: limit, ConfiguredLimit: configured, LimitSource: source}
+		}
+	}
+	if at != nil && at.config.DecisionMode == "chanlun_v2" {
+		if configured, ok := at.chanlunV2HistoryDepthForTimeframe(timeframe); ok && configured > 0 {
+			source := "chanlun_v2_history_depth"
+			limit := configured
+			if limit > MaxMarketKlineLimit {
+				limit = MaxMarketKlineLimit
+				source = "chanlun_v2_history_depth_capped"
 			}
 			return MarketKlineLimitResolution{Limit: limit, ConfiguredLimit: configured, LimitSource: source}
 		}
@@ -3015,11 +3040,25 @@ func (at *AutoTrader) programmaticHistoryDepthForTimeframe(timeframe string) (in
 	}
 }
 
+func (at *AutoTrader) chanlunV2HistoryDepthForTimeframe(timeframe string) (int, bool) {
+	if at == nil {
+		return 0, false
+	}
+	for key, depth := range at.config.ChanlunV2StrategyConfig.HistoryDepth {
+		if strings.EqualFold(strings.TrimSpace(key), strings.TrimSpace(timeframe)) && depth > 0 {
+			return depth, true
+		}
+	}
+	return 0, false
+}
+
 // GetStatus 获取系统状态（用于API）
 func (at *AutoTrader) GetStatus() map[string]interface{} {
 	aiProvider := "DeepSeek"
 	if at.config.DecisionMode == "programmatic" {
 		aiProvider = "Programmatic"
+	} else if at.config.DecisionMode == "chanlun_v2" {
+		aiProvider = "Chanlun V2"
 	} else if at.config.UseQwen {
 		aiProvider = "Qwen"
 	}

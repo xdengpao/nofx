@@ -427,9 +427,9 @@ function TraderDetailsPage({
   const [strategySymbol, setStrategySymbol] = useState('');
   const [strategySignalView, setStrategySignalView] = useState<StrategySignalView>('default');
   const traderId = selectedTrader?.trader_id;
-  const isProgrammaticTrader = status?.decision_mode === 'programmatic';
+  const isStrategyTrader = isStrategyDecisionMode(status?.decision_mode);
   const { data: strategySymbols } = useSWR<StrategySymbolsResponse>(
-    traderId && isProgrammaticTrader ? `strategy-symbols-${traderId}` : null,
+    traderId && isStrategyTrader ? `strategy-symbols-${traderId}` : null,
     () => api.getStrategySymbols(traderId),
     { refreshInterval: 30000, revalidateOnFocus: false }
   );
@@ -442,14 +442,14 @@ function TraderDetailsPage({
   }, [strategySymbol, symbolOptions]);
 
   const { data: strategySignals } = useSWR<StrategySignalReport>(
-    traderId && isProgrammaticTrader && strategySymbol ? `strategy-signals-${traderId}-${strategySymbol}-${strategySignalView}` : null,
+    traderId && isStrategyTrader && strategySymbol ? `strategy-signals-${traderId}-${strategySymbol}-${strategySignalView}` : null,
     () => api.getStrategySignals(traderId, strategySymbol, { view: strategySignalView }),
     { refreshInterval: 30000, revalidateOnFocus: false }
   );
   const strategyTradeTimeframe = normalizeStrategyTimeframe(strategySignals?.trade_timeframe);
 
   const { data: strategyKlines, error: strategyKlinesError } = useSWR<MarketKlineResponse>(
-    traderId && isProgrammaticTrader && strategySymbol ? `market-klines-${traderId}-${strategySymbol}-${strategyTradeTimeframe}` : null,
+    traderId && isStrategyTrader && strategySymbol ? `market-klines-${traderId}-${strategySymbol}-${strategyTradeTimeframe}` : null,
     () => api.getMarketKlines(traderId, strategySymbol, strategyTradeTimeframe),
     { refreshInterval: 30000, revalidateOnFocus: false }
   );
@@ -726,8 +726,8 @@ function StrategyInspector({
   const latestItem = displayModel.latest;
   const chartMarkers = displayModel.chartMarkers;
   const positionItems = displayModel.items.filter((item) => item.category === 'position_management').slice(0, 5);
-  const isProgrammatic = status?.decision_mode === 'programmatic';
-  const hasTimeframeFallback = isProgrammatic && !signals?.trade_timeframe;
+  const isStrategyMode = isStrategyDecisionMode(status?.decision_mode);
+  const hasTimeframeFallback = isStrategyMode && !signals?.trade_timeframe;
   const diagnostic = diagnosticText(signals?.latest_diagnostics);
   const summary = signals?.marker_summary;
 
@@ -767,7 +767,7 @@ function StrategyInspector({
         </div>
       </div>
 
-      {!isProgrammatic ? (
+      {!isStrategyMode ? (
         <div className="rounded p-4 text-sm" style={{ background: '#0B0E11', color: '#848E9C', border: '1px solid #2B3139' }}>
           当前 trader 使用 AI 决策模式。
         </div>
@@ -968,6 +968,10 @@ function diagnosticText(value?: Record<string, unknown>) {
   return '';
 }
 
+function isStrategyDecisionMode(mode?: string) {
+  return mode === 'programmatic' || mode === 'chanlun_v2';
+}
+
 function normalizeStrategyTimeframe(value?: string) {
   return value === '15m' || value === '1h' || value === '4h' ? value : '1h';
 }
@@ -1080,7 +1084,7 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
             className="flex items-center gap-2 text-sm transition-colors"
             style={{ color: '#F0B90B' }}
           >
-            <span className="font-semibold">📤 {t(decision.decision_mode === 'programmatic' ? 'strategyAnalysis' : 'aiThinking', language)}</span>
+            <span className="font-semibold">📤 {t(isStrategyDecisionMode(decision.decision_mode) ? 'strategyAnalysis' : 'aiThinking', language)}</span>
             <span className="text-xs">{showCoT ? t('collapse', language) : t('expand', language)}</span>
           </button>
           {showCoT && (
