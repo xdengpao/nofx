@@ -363,7 +363,7 @@ func printContestants(cfg *config.Config) {
 // printTradingMode 打印交易模式信息
 func printTradingMode(cfg *config.Config) {
 	fmt.Println()
-	fmt.Println("🤖 AI全权决策模式:")
+	fmt.Println(tradingModeTitle(cfg))
 	fmt.Printf("  • 杠杆倍数: 山寨币最高 %dx | BTC/ETH最高 %dx\n",
 		cfg.Leverage.AltcoinLeverage, cfg.Leverage.BTCETHLeverage)
 	fmt.Println("  • 单笔风险: ≤ 账户净值的 2%")
@@ -380,11 +380,47 @@ func printTradingMode(cfg *config.Config) {
 	}
 
 	fmt.Println()
-	fmt.Println("⚠️  风险提示: AI自动交易有风险，建议小额资金测试！")
+	fmt.Println("⚠️  风险提示: 自动交易有风险，建议小额资金测试！")
 	fmt.Println()
 	fmt.Println("按 Ctrl+C 停止运行")
 	fmt.Println(strings.Repeat("═", 60))
 	fmt.Println()
+}
+
+func tradingModeTitle(cfg *config.Config) string {
+	if cfg == nil {
+		return "🤖 AI决策模式:"
+	}
+	hasAI := false
+	hasProgrammatic := false
+	hasChanlunV2 := false
+	for _, traderCfg := range cfg.Traders {
+		if !traderCfg.Enabled {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(traderCfg.DecisionMode)) {
+		case "", config.DecisionModeAI:
+			hasAI = true
+		case config.DecisionModeProgrammatic:
+			hasProgrammatic = true
+		case config.DecisionModeChanlunV2:
+			hasChanlunV2 = true
+		default:
+			return "🧭 多决策模式:"
+		}
+	}
+	switch {
+	case hasAI && !hasProgrammatic && !hasChanlunV2:
+		return "🤖 AI决策模式:"
+	case !hasAI && hasProgrammatic && !hasChanlunV2:
+		return "🧮 程序化策略决策模式:"
+	case !hasAI && !hasProgrammatic && hasChanlunV2:
+		return "🧩 缠论V2策略决策模式:"
+	case !hasAI && (hasProgrammatic || hasChanlunV2):
+		return "🧭 策略决策模式:"
+	default:
+		return "🧭 多决策模式:"
+	}
 }
 
 func formatPercentConfig(value float64) float64 {

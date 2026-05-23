@@ -387,6 +387,64 @@ func TestStartupSequence_ConfigThenDataDirThenModules(t *testing.T) {
 	}
 }
 
+func TestTradingModeTitleReflectsEnabledDecisionModes(t *testing.T) {
+	cases := []struct {
+		name    string
+		traders []config.TraderConfig
+		want    string
+	}{
+		{
+			name: "ai only",
+			traders: []config.TraderConfig{{
+				Enabled:      true,
+				DecisionMode: config.DecisionModeAI,
+			}},
+			want: "🤖 AI决策模式:",
+		},
+		{
+			name: "programmatic only",
+			traders: []config.TraderConfig{{
+				Enabled:      true,
+				DecisionMode: config.DecisionModeProgrammatic,
+			}},
+			want: "🧮 程序化策略决策模式:",
+		},
+		{
+			name: "chanlun v2 only",
+			traders: []config.TraderConfig{{
+				Enabled:      true,
+				DecisionMode: config.DecisionModeChanlunV2,
+			}},
+			want: "🧩 缠论V2策略决策模式:",
+		},
+		{
+			name: "strategy mix",
+			traders: []config.TraderConfig{
+				{Enabled: true, DecisionMode: config.DecisionModeProgrammatic},
+				{Enabled: true, DecisionMode: config.DecisionModeChanlunV2},
+			},
+			want: "🧭 策略决策模式:",
+		},
+		{
+			name: "ai and strategy mix",
+			traders: []config.TraderConfig{
+				{Enabled: true, DecisionMode: config.DecisionModeAI},
+				{Enabled: true, DecisionMode: config.DecisionModeChanlunV2},
+			},
+			want: "🧭 多决策模式:",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tradingModeTitle(&config.Config{Traders: tc.traders})
+			if got != tc.want {
+				t.Fatalf("tradingModeTitle()=%q want=%q", got, tc.want)
+			}
+		})
+	}
+}
+
 // ============================================================================
 // 辅助函数
 // ============================================================================
