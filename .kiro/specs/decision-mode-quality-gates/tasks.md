@@ -123,17 +123,17 @@
   - 确认没有提交 `data/`、`decision_logs/`、`coin_pool_cache/` 或真实密钥。
   - 提交信息建议：`Clarify decision mode quality gates`。
 
-- [ ] 17. 推送 GitHub
+- [x] 17. 推送 GitHub
   - 推送当前分支 `jzhbnofxdev` 到 GitHub。
   - 验证点：远端包含新提交。
 
-- [ ] 18. 部署到 161 服务器
+- [x] 18. 部署到 161 服务器
   - 在 161 仓库确认工作区状态，保留既有未跟踪 Rust 构建产物，不误删用户/服务器改动。
   - 拉取最新提交。
   - 执行 `sudo docker compose up -d --build`。
   - 验证 `nofx-trading` 和 `nofx-frontend` 均 healthy。
 
-- [ ] 19. 部署后线上验证
+- [x] 19. 部署后线上验证
   - 检查 `/api/status` 和前端 HTTP 状态。
   - 查看 `nofx-trading` 最近日志，确认：
     - `Aster Chanlun V2 Trader` 周期显示为缠论 V2 策略。
