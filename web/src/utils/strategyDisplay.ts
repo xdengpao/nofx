@@ -2,8 +2,10 @@ import type { SignalDisplayCategory, SignalMarker, StrategySignalReport } from '
 import {
   markerStatusLabel,
   normalizeEpochMs,
+  resolveActionTimestamp,
   resolveDecisionCloseTime,
   resolveDisplayCloseTime,
+  resolveEvaluationCloseTime,
   resolveSignalCloseTime,
   resolveTradeIntent,
   signalLabel,
@@ -145,16 +147,17 @@ function categoryTitle(category: SignalDisplayCategory, marker: SignalMarker) {
 }
 
 function markerSummary(marker: SignalMarker, category: SignalDisplayCategory) {
-  const age = typeof marker.age_candles === 'number' && marker.age_candles > 0 ? ` · age ${marker.age_candles}` : '';
+  const age = typeof marker.age_candles === 'number' && marker.age_candles > 0 ? ` · ${marker.age_candles}根` : '';
   const status = markerStatusLabel(marker.status);
-  const reason = marker.reason_code || marker.entry_invalidation_reason || marker.entry_window_state;
+  const freshness = marker.freshness_state ? ` · ${freshnessStateLabel(marker.freshness_state)}` : '';
+  const reason = marker.stale_reason || marker.reason_code || marker.entry_invalidation_reason || marker.entry_window_state;
   if (category === 'preview_watch') {
     return `${marker.preview_phase || 'preview'} · ${marker.preview_closed_components || '--'} components · ${status}`;
   }
   if (category === 'entry_trigger') {
     return `${marker.entry_trigger_type || 'trigger'} · ${marker.entry_trigger_timeframe || marker.timeframe} · ${status}`;
   }
-  return `${status}${age}${reason ? ` · ${reason}` : ''}`;
+  return `${status}${freshness}${age}${reason ? ` · ${reason}` : ''}`;
 }
 
 function tooltipRows(marker: SignalMarker, category: SignalDisplayCategory) {
@@ -162,10 +165,12 @@ function tooltipRows(marker: SignalMarker, category: SignalDisplayCategory) {
     { label: '类别', value: categoryTitle(category, marker) },
     { label: '状态', value: markerStatusLabel(marker.status) },
     { label: '结构时间', value: formatTime(resolveSignalCloseTime(marker)) },
-    { label: '决策时间', value: formatTime(resolveDecisionCloseTime(marker)) },
+    { label: '评估K线', value: formatTime(resolveEvaluationCloseTime(marker) || resolveDecisionCloseTime(marker)) },
+    { label: '动作时间', value: formatTime(resolveActionTimestamp(marker)) },
+    { label: '新鲜度', value: freshnessStateLabel(marker.freshness_state) },
     { label: '年龄', value: marker.age_candles ? `${marker.age_candles} 根` : '--' },
     { label: '层级', value: marker.source_layer || '--' },
-    { label: '原因', value: marker.reason_code || marker.reason || marker.entry_invalidation_reason || '--' },
+    { label: '原因', value: marker.stale_reason || marker.reason_code || marker.reason || marker.entry_invalidation_reason || '--' },
     { label: '父结构', value: marker.parent_structure_key || marker.parent_signal_id || '--' },
     { label: '触发', value: marker.entry_trigger_id || '--' },
     { label: '生命周期', value: marker.lifecycle_key || '--' },
@@ -213,6 +218,27 @@ function compactStatus(status?: string) {
       return '备';
     default:
       return '';
+  }
+}
+
+function freshnessStateLabel(state?: string) {
+  switch ((state || '').toLowerCase()) {
+    case 'fresh':
+      return '新鲜';
+    case 'aged':
+      return '老化';
+    case 'expired':
+      return '过期';
+    case 'target_crossed':
+      return '目标已穿越';
+    case 'rr_invalid':
+      return 'RR不足';
+    case 'invalidated':
+      return '失效';
+    case 'background':
+      return '背景';
+    default:
+      return state || '--';
   }
 }
 

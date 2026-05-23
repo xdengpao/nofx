@@ -75,6 +75,11 @@ export interface DecisionAction {
   trade_intent?: string;
   signal_close_time?: number;
   decision_close_time?: number;
+  evaluation_close_time?: number;
+  action_timestamp?: number;
+  freshness_state?: string;
+  age_candles?: number;
+  stale_reason?: string;
   strategy_metadata?: Record<string, unknown>;
   strategy_diagnostics?: Record<string, unknown>;
   requested_close_percentage?: number;
@@ -382,6 +387,8 @@ export interface SignalMarker {
   first_seen_close_time?: number;
   last_seen_close_time?: number;
   last_updated_at?: number;
+  evaluation_close_time?: number;
+  action_timestamp?: number;
   action?: string;
   final_action?: string;
   trade_intent?: string;
@@ -400,6 +407,7 @@ export interface SignalMarker {
   remaining_net_rr?: number;
   freshness_state?: string;
   age_candles?: number;
+  stale_reason?: string;
   preview_phase?: string;
   preview_source_timeframe?: string;
   preview_closed_components?: number;

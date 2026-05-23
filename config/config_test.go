@@ -272,6 +272,58 @@ func TestNormalizeTradingFrequency_ActiveDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
+func TestNormalizeChanlunV2SignalFreshnessDefaultsAndOverrides(t *testing.T) {
+	profile := NormalizeChanlunV2SignalFreshness(ChanlunV2SignalFreshnessConfig{
+		SoftAgeCandles:               -1,
+		MaxLifetimeCandles:           0,
+		ConfidenceDecayPerAgedCandle: 0,
+		MinRemainingNetRR:            -2,
+		SoftAgeBySignalType: map[string]int{
+			" BUY2 ": 3,
+			"bad":    4,
+		},
+		MaxLifetimeBySignalType: map[string]int{
+			"buy2":  2,
+			"sell2": 5,
+		},
+	})
+	if profile.Enabled == nil || !*profile.Enabled || profile.MissedTargetGuard == nil || !*profile.MissedTargetGuard {
+		t.Fatalf("缺省freshness gate应启用: %+v", profile)
+	}
+	if profile.SoftAgeCandles != 1 || profile.MaxLifetimeCandles != 2 || profile.ConfidenceDecayPerAgedCandle != 10 {
+		t.Fatalf("非法默认值应归一化为保守默认: %+v", profile)
+	}
+	if profile.MinRemainingNetRR != 0 {
+		t.Fatalf("负数min_remaining_net_rr应归零: %+v", profile)
+	}
+	if profile.SoftAgeBySignalType["buy2"] != 3 {
+		t.Fatalf("合法signal type覆盖项应保留: %+v", profile.SoftAgeBySignalType)
+	}
+	if _, ok := profile.SoftAgeBySignalType["bad"]; ok {
+		t.Fatalf("非法signal type覆盖项应丢弃: %+v", profile.SoftAgeBySignalType)
+	}
+	if profile.MaxLifetimeBySignalType["buy2"] != 3 {
+		t.Fatalf("max_lifetime_by_signal_type不能低于同类型soft_age: %+v", profile.MaxLifetimeBySignalType)
+	}
+}
+
+func TestValidateChanlunV2TraderNormalizesSignalFreshness(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].DecisionMode = DecisionModeChanlunV2
+	cfg.Traders[0].AIModel = ""
+	cfg.Traders[0].ChanlunV2Strategy.SignalFreshness = ChanlunV2SignalFreshnessConfig{
+		SoftAgeCandles:     0,
+		MaxLifetimeCandles: 0,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("chanlun_v2旧配置不应要求新增signal_freshness字段: %v", err)
+	}
+	freshness := cfg.Traders[0].ChanlunV2Strategy.SignalFreshness
+	if freshness.Enabled == nil || !*freshness.Enabled || freshness.SoftAgeCandles != 1 || freshness.MaxLifetimeCandles != 2 {
+		t.Fatalf("Validate应写回归一化后的freshness默认值: %+v", freshness)
+	}
+}
+
 func TestNormalizeTradingFrequency_InvalidValues(t *testing.T) {
 	tests := []struct {
 		name string

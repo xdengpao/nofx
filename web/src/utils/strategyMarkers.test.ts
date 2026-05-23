@@ -6,6 +6,9 @@ import {
   markerBelongsToKline,
   markerBelongsToKlineAt,
   normalizeEpochMs,
+  resolveActionTimestamp,
+  resolveEvaluationCloseTime,
+  resolveSignalCloseTime,
   resolveTradeIntent,
   signalLabel,
   tradeIntentLabel,
@@ -43,6 +46,19 @@ describe('strategy marker helpers', () => {
     });
     expect(markerBelongsToKline(marker, { close_time: 1_779_004_800_500 })).toBe(true);
     expect(markerBelongsToKlineAt(marker.signal_close_time, { close_time: 1_779_004_800_000 })).toBe(false);
+  });
+
+  it('resolves structure, evaluation and action timestamps independently', () => {
+    const marker = markerFixture({
+      close_time: 1_779_001_200_000,
+      signal_close_time: 1_779_001_200_000,
+      decision_close_time: 1_779_004_800_000,
+      evaluation_close_time: 1_779_004_800_000,
+      action_timestamp: 1_779_004_860_000,
+    });
+    expect(resolveSignalCloseTime(marker)).toBe(1_779_001_200_000);
+    expect(resolveEvaluationCloseTime(marker)).toBe(1_779_004_800_000);
+    expect(resolveActionTimestamp(marker)).toBe(1_779_004_860_000);
   });
 
   it('expands action markers into paired signal and decision visual markers', () => {

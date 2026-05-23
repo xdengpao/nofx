@@ -392,25 +392,35 @@ func buildOpenRejection(d Decision, ctx *Context, reason string) OpenRejection {
 func NewOpenRejectionFromDecision(d Decision, reason string) OpenRejection {
 	signalClose, _ := decisionMetadataInt64Any(d.StrategyMetadata, "signal_close_time", "trigger_close_time", "segment_end_time")
 	decisionClose, _ := decisionMetadataInt64Any(d.StrategyMetadata, "decision_close_time")
+	evaluationClose, _ := decisionMetadataInt64Any(d.StrategyMetadata, "evaluation_close_time", "decision_close_time")
+	actionTimestamp, _ := decisionMetadataInt64Any(d.StrategyMetadata, "action_timestamp")
 	tradeIntent, _ := d.StrategyMetadata["trade_intent"].(string)
 	if strings.TrimSpace(tradeIntent) == "" {
 		tradeIntent = d.Action
 	}
+	freshnessState, _ := d.StrategyMetadata["freshness_state"].(string)
+	staleReason, _ := d.StrategyMetadata["stale_reason"].(string)
+	ageCandles := decisionMetadataInt(d.StrategyMetadata, "age_candles")
 	return OpenRejection{
-		Symbol:            d.Symbol,
-		Action:            d.Action,
-		Reason:            reason,
-		StrategyMode:      d.StrategyMode,
-		StrategyName:      d.StrategyName,
-		StrategyVersion:   d.StrategyVersion,
-		ConfigHash:        d.ConfigHash,
-		SignalID:          d.SignalID,
-		SignalType:        d.SignalType,
-		SignalTimeframe:   d.SignalTimeframe,
-		SignalCloseTime:   signalClose,
-		DecisionCloseTime: decisionClose,
-		TradeIntent:       tradeIntent,
-		StrategyMetadata:  copyStringAnyMap(d.StrategyMetadata),
+		Symbol:              d.Symbol,
+		Action:              d.Action,
+		Reason:              reason,
+		StrategyMode:        d.StrategyMode,
+		StrategyName:        d.StrategyName,
+		StrategyVersion:     d.StrategyVersion,
+		ConfigHash:          d.ConfigHash,
+		SignalID:            d.SignalID,
+		SignalType:          d.SignalType,
+		SignalTimeframe:     d.SignalTimeframe,
+		SignalCloseTime:     signalClose,
+		DecisionCloseTime:   decisionClose,
+		EvaluationCloseTime: evaluationClose,
+		ActionTimestamp:     actionTimestamp,
+		TradeIntent:         tradeIntent,
+		FreshnessState:      freshnessState,
+		AgeCandles:          ageCandles,
+		StaleReason:         staleReason,
+		StrategyMetadata:    copyStringAnyMap(d.StrategyMetadata),
 	}
 }
 
@@ -440,6 +450,26 @@ func decisionMetadataInt64(values map[string]any, key string) (int64, bool) {
 		return int64(value), true
 	default:
 		return 0, false
+	}
+}
+
+func decisionMetadataInt(values map[string]any, key string) int {
+	if len(values) == 0 {
+		return 0
+	}
+	switch value := values[key].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case int32:
+		return int(value)
+	case float64:
+		return int(value)
+	case float32:
+		return int(value)
+	default:
+		return 0
 	}
 }
 

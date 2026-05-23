@@ -131,6 +131,14 @@ export function resolveDecisionCloseTime(marker: Pick<SignalMarker, 'decision_cl
   return normalizeEpochMs(marker.decision_close_time);
 }
 
+export function resolveEvaluationCloseTime(marker: Pick<SignalMarker, 'evaluation_close_time' | 'decision_close_time'>): number {
+  return normalizeEpochMs(marker.evaluation_close_time || marker.decision_close_time);
+}
+
+export function resolveActionTimestamp(marker: Pick<SignalMarker, 'action_timestamp'>): number {
+  return normalizeEpochMs(marker.action_timestamp);
+}
+
 export function isActionMarker(marker: Partial<Pick<SignalMarker, 'trade_intent' | 'action' | 'final_action' | 'status'>>): boolean {
   if ((marker.trade_intent || marker.action || marker.final_action || '').trim() !== '') return true;
   const status = (marker.status || '').trim().toLowerCase();

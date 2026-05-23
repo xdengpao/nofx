@@ -66,12 +66,15 @@ func (e *Engine) EmptySignalReportWithOptions(traderID, symbol string, opts chan
 func (e *Engine) setLatestReport(traderID, symbol string, mr *multiLevelResult, signals []Signal, diagnostics []string) {
 	symbol = market.Normalize(symbol)
 	report := e.baseSignalReport(traderID, symbol)
+	evaluationClose := evaluationCloseTime(mr, "trade")
 	report.Signals = make([]chanlun.ChanlunSignal, 0, len(signals))
 	report.SignalMarkers = make([]chanlun.SignalMarker, 0, len(signals))
 	for _, sig := range signals {
 		clSignal := e.signalToReportSignal(symbol, report.TradeTimeframe, sig)
 		report.Signals = append(report.Signals, clSignal)
-		report.SignalMarkers = append(report.SignalMarkers, signalToV2Marker(clSignal, "ready", clSignal.ActionHint, "缠论V2买卖点信号"))
+		marker := signalToV2Marker(clSignal, "ready", clSignal.ActionHint, "缠论V2买卖点信号")
+		marker.EvaluationCloseTime = firstPositiveInt64(evaluationClose, marker.DecisionCloseTime, marker.SignalCloseTime)
+		report.SignalMarkers = append(report.SignalMarkers, marker)
 	}
 	if len(diagnostics) == 0 && len(signals) == 0 {
 		diagnostics = []string{fmt.Sprintf("%s %s 无买卖点信号", symbol, report.TradeTimeframe)}
@@ -80,10 +83,10 @@ func (e *Engine) setLatestReport(traderID, symbol string, mr *multiLevelResult, 
 		"messages":  append([]string(nil), diagnostics...),
 		"structure": describeMultiLevelResult(mr),
 	}
-	report.MarkerSummary = buildChanlunV2MarkerSummary(report.SignalMarkers, report.SignalMarkers)
-
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	preserveTerminalV2Markers(report, e.latestSignals[traderID+"|"+symbol])
+	report.MarkerSummary = buildChanlunV2MarkerSummary(report.SignalMarkers, report.SignalMarkers)
 	e.latestSignals[traderID+"|"+symbol] = report
 }
 
@@ -122,17 +125,13 @@ func (e *Engine) markRejectedOpenMarkers(ctx *decision.Context, candidates, vali
 			validIDs[d.SignalID] = true
 		}
 	}
-	reasonBySignalID := map[string]string{}
-	reasonBySymbolAction := map[string]string{}
+	rejectionBySignalID := map[string]decision.OpenRejection{}
+	rejectionBySymbolAction := map[string]decision.OpenRejection{}
 	for _, rejection := range rejections {
-		reason := strings.TrimSpace(rejection.Reason)
-		if reason == "" {
-			reason = strings.Join(rejection.GateReasons, "; ")
-		}
 		if rejection.SignalID != "" {
-			reasonBySignalID[rejection.SignalID] = reason
+			rejectionBySignalID[rejection.SignalID] = rejection
 		}
-		reasonBySymbolAction[market.Normalize(rejection.Symbol)+"|"+rejection.Action] = reason
+		rejectionBySymbolAction[market.Normalize(rejection.Symbol)+"|"+rejection.Action] = rejection
 	}
 
 	e.mu.Lock()
@@ -141,10 +140,11 @@ func (e *Engine) markRejectedOpenMarkers(ctx *decision.Context, candidates, vali
 		if !decision.IsOpenLikeAction(d.Action) || d.SignalID == "" || validIDs[d.SignalID] {
 			continue
 		}
-		reason := reasonBySignalID[d.SignalID]
-		if reason == "" {
-			reason = reasonBySymbolAction[market.Normalize(d.Symbol)+"|"+d.Action]
+		rejection, ok := rejectionBySignalID[d.SignalID]
+		if !ok {
+			rejection, ok = rejectionBySymbolAction[market.Normalize(d.Symbol)+"|"+d.Action]
 		}
+		reason := openRejectionReason(rejection)
 		if reason == "" {
 			reason = "缠论V2开仓信号被验证层拒绝"
 		}
@@ -157,10 +157,7 @@ func (e *Engine) markRejectedOpenMarkers(ctx *decision.Context, candidates, vali
 			if report.SignalMarkers[i].SignalID != d.SignalID {
 				continue
 			}
-			report.SignalMarkers[i].Status = "rejected"
-			report.SignalMarkers[i].Reason = reason
-			report.SignalMarkers[i].FinalAction = d.Action
-			report.SignalMarkers[i].TradeIntent = d.Action
+			applyOpenRejectionToV2Marker(&report.SignalMarkers[i], d, rejection, reason)
 		}
 		if report.LatestDiagnostics == nil {
 			report.LatestDiagnostics = map[string]any{}
@@ -242,28 +239,29 @@ func signalToV2Marker(signal chanlun.ChanlunSignal, status, action, reason strin
 		action = signal.ActionHint
 	}
 	return chanlun.SignalMarker{
-		Symbol:            signal.Symbol,
-		Timeframe:         signal.AnalysisTF,
-		CloseTime:         closeTime,
-		SignalCloseTime:   closeTime,
-		DecisionCloseTime: firstPositiveInt64(signal.DecisionCloseTime, closeTime),
-		DisplayCloseTime:  closeTime,
-		SignalType:        signal.SignalType,
-		Direction:         signal.Direction,
-		Level:             signal.Level,
-		SourceLayer:       "trade_action",
-		Status:            status,
-		SignalID:          signal.SignalID,
-		StructureKey:      signal.StructureKey,
-		LifecycleKey:      signal.LifecycleKey,
-		ReasonCode:        signal.ReasonCode,
-		DisplayCategory:   "trade_action",
-		DisplayPriority:   90,
-		Action:            action,
-		FinalAction:       action,
-		TradeIntent:       action,
-		Price:             signal.Price,
-		Reason:            reason,
+		Symbol:              signal.Symbol,
+		Timeframe:           signal.AnalysisTF,
+		CloseTime:           closeTime,
+		SignalCloseTime:     closeTime,
+		DecisionCloseTime:   firstPositiveInt64(signal.DecisionCloseTime, closeTime),
+		DisplayCloseTime:    closeTime,
+		EvaluationCloseTime: firstPositiveInt64(signal.DecisionCloseTime, closeTime),
+		SignalType:          signal.SignalType,
+		Direction:           signal.Direction,
+		Level:               signal.Level,
+		SourceLayer:         "trade_action",
+		Status:              status,
+		SignalID:            signal.SignalID,
+		StructureKey:        signal.StructureKey,
+		LifecycleKey:        signal.LifecycleKey,
+		ReasonCode:          signal.ReasonCode,
+		DisplayCategory:     "trade_action",
+		DisplayPriority:     90,
+		Action:              action,
+		FinalAction:         action,
+		TradeIntent:         action,
+		Price:               signal.Price,
+		Reason:              reason,
 	}
 }
 
@@ -277,6 +275,7 @@ func decisionToV2Marker(d decision.Decision) chanlun.SignalMarker {
 	if decisionCloseTime == 0 {
 		decisionCloseTime = closeTime
 	}
+	evaluationCloseTime := firstPositiveInt64(metadataInt64(d.StrategyMetadata, "evaluation_close_time"), decisionCloseTime)
 	signalID := d.SignalID
 	if signalID == "" {
 		signalID = fmt.Sprintf("chanlun_v2:%s:%s:%d", market.Normalize(d.Symbol), d.Action, closeTime)
@@ -287,28 +286,150 @@ func decisionToV2Marker(d decision.Decision) chanlun.SignalMarker {
 		direction = "short"
 	}
 	return chanlun.SignalMarker{
-		Symbol:            market.Normalize(d.Symbol),
-		Timeframe:         timeframe,
-		CloseTime:         closeTime,
-		SignalCloseTime:   closeTime,
-		DecisionCloseTime: decisionCloseTime,
-		DisplayCloseTime:  decisionCloseTime,
-		SignalType:        signalType,
-		Direction:         direction,
-		Level:             "position",
-		SourceLayer:       "position_management",
-		Status:            "ready",
-		SignalID:          signalID,
-		LifecycleKey:      signalID,
-		ReasonCode:        firstNonEmptyString(metadataString(d.StrategyMetadata, "reason_code"), "chanlun_v2_position_management"),
-		DisplayCategory:   "position_management",
-		DisplayPriority:   70,
-		Action:            d.Action,
-		FinalAction:       d.Action,
-		TradeIntent:       d.Action,
-		PositionSide:      metadataString(d.StrategyMetadata, "position_side"),
-		Reason:            d.Reasoning,
+		Symbol:              market.Normalize(d.Symbol),
+		Timeframe:           timeframe,
+		CloseTime:           closeTime,
+		SignalCloseTime:     closeTime,
+		DecisionCloseTime:   decisionCloseTime,
+		DisplayCloseTime:    decisionCloseTime,
+		EvaluationCloseTime: evaluationCloseTime,
+		ActionTimestamp:     metadataInt64(d.StrategyMetadata, "action_timestamp"),
+		SignalType:          signalType,
+		Direction:           direction,
+		Level:               "position",
+		SourceLayer:         "position_management",
+		Status:              "ready",
+		SignalID:            signalID,
+		LifecycleKey:        signalID,
+		ReasonCode:          firstNonEmptyString(metadataString(d.StrategyMetadata, "reason_code"), "chanlun_v2_position_management"),
+		DisplayCategory:     "position_management",
+		DisplayPriority:     70,
+		Action:              d.Action,
+		FinalAction:         d.Action,
+		TradeIntent:         d.Action,
+		PositionSide:        metadataString(d.StrategyMetadata, "position_side"),
+		Reason:              d.Reasoning,
+		RemainingNetRR:      metadataFloat64(d.StrategyMetadata, "remaining_net_rr"),
+		FreshnessState:      metadataString(d.StrategyMetadata, "freshness_state"),
+		AgeCandles:          metadataInt(d.StrategyMetadata, "age_candles"),
+		StaleReason:         metadataString(d.StrategyMetadata, "stale_reason"),
 	}
+}
+
+func preserveTerminalV2Markers(report, existing *chanlun.SignalReport) {
+	if report == nil || existing == nil || len(existing.SignalMarkers) == 0 || len(report.SignalMarkers) == 0 {
+		return
+	}
+	terminalBySignalID := map[string]chanlun.SignalMarker{}
+	for _, marker := range existing.SignalMarkers {
+		if marker.SignalID == "" || !isTerminalV2Marker(marker) {
+			continue
+		}
+		terminalBySignalID[marker.SignalID] = marker
+	}
+	if len(terminalBySignalID) == 0 {
+		return
+	}
+	for i := range report.SignalMarkers {
+		terminal, ok := terminalBySignalID[report.SignalMarkers[i].SignalID]
+		if !ok {
+			continue
+		}
+		report.SignalMarkers[i] = mergeTerminalV2Marker(report.SignalMarkers[i], terminal)
+	}
+}
+
+func isTerminalV2Marker(marker chanlun.SignalMarker) bool {
+	switch strings.ToLower(strings.TrimSpace(marker.Status)) {
+	case "rejected", "failed", "expired", "invalidated":
+		return true
+	default:
+		return false
+	}
+}
+
+func mergeTerminalV2Marker(base, terminal chanlun.SignalMarker) chanlun.SignalMarker {
+	merged := base
+	merged.Status = firstNonEmptyString(terminal.Status, base.Status)
+	merged.Reason = firstNonEmptyString(terminal.Reason, base.Reason)
+	merged.ReasonCode = firstNonEmptyString(terminal.ReasonCode, base.ReasonCode)
+	merged.Action = firstNonEmptyString(terminal.Action, base.Action)
+	merged.FinalAction = firstNonEmptyString(terminal.FinalAction, base.FinalAction)
+	merged.TradeIntent = firstNonEmptyString(terminal.TradeIntent, base.TradeIntent)
+	merged.DecisionCloseTime = firstPositiveInt64(terminal.DecisionCloseTime, terminal.DisplayCloseTime, base.DecisionCloseTime)
+	merged.DisplayCloseTime = firstPositiveInt64(terminal.DisplayCloseTime, merged.DecisionCloseTime, base.DisplayCloseTime)
+	merged.EvaluationCloseTime = firstPositiveInt64(terminal.EvaluationCloseTime, merged.DecisionCloseTime, base.EvaluationCloseTime)
+	merged.ActionTimestamp = firstPositiveInt64(terminal.ActionTimestamp, base.ActionTimestamp)
+	merged.DisplayCategory = firstNonEmptyString(terminal.DisplayCategory, base.DisplayCategory)
+	merged.DisplayPriority = maxInt(terminal.DisplayPriority, base.DisplayPriority)
+	merged.FreshnessState = firstNonEmptyString(terminal.FreshnessState, base.FreshnessState)
+	if terminal.AgeCandles > 0 {
+		merged.AgeCandles = terminal.AgeCandles
+	}
+	merged.StaleReason = firstNonEmptyString(terminal.StaleReason, base.StaleReason)
+	if terminal.RemainingNetRR > 0 {
+		merged.RemainingNetRR = terminal.RemainingNetRR
+	}
+	merged.LastUpdatedAt = firstPositiveInt64(terminal.LastUpdatedAt, merged.DecisionCloseTime, merged.DisplayCloseTime, base.LastUpdatedAt)
+	return merged
+}
+
+func applyOpenRejectionToV2Marker(marker *chanlun.SignalMarker, d decision.Decision, rejection decision.OpenRejection, reason string) {
+	if marker == nil {
+		return
+	}
+	signalClose := firstPositiveInt64(rejection.SignalCloseTime, metadataInt64(d.StrategyMetadata, "signal_close_time"), marker.SignalCloseTime, marker.CloseTime)
+	decisionClose := firstPositiveInt64(rejection.DecisionCloseTime, rejection.EvaluationCloseTime, metadataInt64(d.StrategyMetadata, "decision_close_time"), metadataInt64(d.StrategyMetadata, "evaluation_close_time"), marker.DecisionCloseTime, signalClose)
+	if decisionClose > 0 && signalClose > 0 && decisionClose < signalClose {
+		decisionClose = signalClose
+	}
+	actionTimestamp := firstPositiveInt64(rejection.ActionTimestamp, metadataInt64(d.StrategyMetadata, "action_timestamp"), time.Now().UnixMilli())
+	reasonCode := firstNonEmptyString(metadataString(rejection.StrategyMetadata, "guard_reason_code"), metadataString(rejection.StrategyMetadata, "reason_code"), firstOpenRejectionGateReason(rejection), marker.ReasonCode)
+	marker.Status = "rejected"
+	marker.CloseTime = signalClose
+	marker.SignalCloseTime = signalClose
+	marker.DecisionCloseTime = decisionClose
+	marker.DisplayCloseTime = decisionClose
+	marker.EvaluationCloseTime = firstPositiveInt64(rejection.EvaluationCloseTime, decisionClose)
+	marker.ActionTimestamp = actionTimestamp
+	marker.SourceLayer = firstNonEmptyString(marker.SourceLayer, "trade_action")
+	marker.DisplayCategory = "trade_action"
+	marker.DisplayPriority = maxInt(marker.DisplayPriority, 80)
+	marker.ReasonCode = reasonCode
+	marker.Reason = reason
+	marker.Action = firstNonEmptyString(rejection.Action, d.Action, marker.Action)
+	marker.FinalAction = firstNonEmptyString(rejection.TradeIntent, d.Action, marker.FinalAction)
+	marker.TradeIntent = firstNonEmptyString(rejection.TradeIntent, metadataString(d.StrategyMetadata, "trade_intent"), d.Action, marker.TradeIntent)
+	marker.FreshnessState = firstNonEmptyString(rejection.FreshnessState, metadataString(d.StrategyMetadata, "freshness_state"), marker.FreshnessState)
+	ageCandles := rejection.AgeCandles
+	if ageCandles == 0 {
+		ageCandles = metadataInt(d.StrategyMetadata, "age_candles")
+	}
+	marker.AgeCandles = ageCandles
+	marker.StaleReason = firstNonEmptyString(rejection.StaleReason, metadataString(d.StrategyMetadata, "stale_reason"), reason)
+	if remainingRR := metadataFloat64(rejection.StrategyMetadata, "remaining_net_rr"); remainingRR > 0 {
+		marker.RemainingNetRR = remainingRR
+	} else if remainingRR := metadataFloat64(d.StrategyMetadata, "remaining_net_rr"); remainingRR > 0 {
+		marker.RemainingNetRR = remainingRR
+	}
+	marker.LastUpdatedAt = actionTimestamp
+}
+
+func openRejectionReason(rejection decision.OpenRejection) string {
+	reason := strings.TrimSpace(rejection.Reason)
+	if reason != "" {
+		return reason
+	}
+	return strings.Join(rejection.GateReasons, "; ")
+}
+
+func firstOpenRejectionGateReason(rejection decision.OpenRejection) string {
+	for _, reason := range rejection.GateReasons {
+		if strings.TrimSpace(reason) != "" {
+			return strings.TrimSpace(reason)
+		}
+	}
+	return ""
 }
 
 func applyChanlunV2ReportOptions(report *chanlun.SignalReport, opts chanlun.SignalReportOptions) {
@@ -648,6 +769,54 @@ func metadataInt64(metadata map[string]any, key string) int64 {
 		return int64(typed)
 	case json.Number:
 		parsed, _ := typed.Int64()
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func metadataInt(metadata map[string]any, key string) int {
+	if metadata == nil {
+		return 0
+	}
+	value, ok := metadata[key]
+	if !ok || value == nil {
+		return 0
+	}
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int64:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case json.Number:
+		parsed, _ := typed.Int64()
+		return int(parsed)
+	default:
+		return 0
+	}
+}
+
+func metadataFloat64(metadata map[string]any, key string) float64 {
+	if metadata == nil {
+		return 0
+	}
+	value, ok := metadata[key]
+	if !ok || value == nil {
+		return 0
+	}
+	switch typed := value.(type) {
+	case float64:
+		return typed
+	case float32:
+		return float64(typed)
+	case int:
+		return float64(typed)
+	case int64:
+		return float64(typed)
+	case json.Number:
+		parsed, _ := typed.Float64()
 		return parsed
 	default:
 		return 0

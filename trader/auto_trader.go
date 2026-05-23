@@ -793,6 +793,11 @@ func applyDecisionSizingToActionRecord(d *decision.Decision, actionRecord *logge
 	}
 	actionRecord.SignalCloseTime = metadataInt64ValueAny(d.StrategyMetadata, "signal_close_time", "trigger_close_time", "segment_end_time")
 	actionRecord.DecisionCloseTime = metadataInt64ValueAny(d.StrategyMetadata, "decision_close_time")
+	actionRecord.EvaluationCloseTime = metadataInt64ValueAny(d.StrategyMetadata, "evaluation_close_time", "decision_close_time")
+	actionRecord.ActionTimestamp = metadataInt64ValueAny(d.StrategyMetadata, "action_timestamp")
+	actionRecord.FreshnessState = metadataStringValue(d.StrategyMetadata, "freshness_state")
+	actionRecord.AgeCandles = metadataIntValue(d.StrategyMetadata, "age_candles")
+	actionRecord.StaleReason = metadataStringValue(d.StrategyMetadata, "stale_reason")
 	actionRecord.StrategyMetadata = copyAnyMap(d.StrategyMetadata)
 	actionRecord.StrategyDiagnostics = copyAnyMap(d.StrategyDiagnosis)
 	actionRecord.RequestedClosePercentage = d.ClosePercentage
@@ -855,6 +860,26 @@ func metadataStringValue(values map[string]any, key string) string {
 	}
 	value, _ := values[key].(string)
 	return value
+}
+
+func metadataIntValue(values map[string]any, key string) int {
+	if len(values) == 0 {
+		return 0
+	}
+	switch value := values[key].(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case int32:
+		return int(value)
+	case float64:
+		return int(value)
+	case float32:
+		return int(value)
+	default:
+		return 0
+	}
 }
 
 func metadataInt64ValueAny(values map[string]any, keys ...string) int64 {
@@ -925,28 +950,38 @@ func (at *AutoTrader) appendOpenRejectionsToRecord(record *logger.DecisionRecord
 		if reason == "" {
 			reason = strings.Join(rejection.GateReasons, "; ")
 		}
+		actionTime := time.Now()
+		actionTimestamp := rejection.ActionTimestamp
+		if actionTimestamp <= 0 {
+			actionTimestamp = actionTime.UnixMilli()
+		}
 		record.Decisions = append(record.Decisions, logger.DecisionAction{
-			Action:            "open_rejected",
-			Symbol:            rejection.Symbol,
-			Timestamp:         time.Now(),
-			Success:           false,
-			Error:             reason,
-			Reasoning:         reason,
-			GateState:         rejection.GateState,
-			GateReasons:       append([]string(nil), rejection.GateReasons...),
-			GateDiagnostics:   copyGateDiagnostics(rejection.GateDiagnostics),
-			Simulations:       copyOpenFrequencySimulations(rejection.Simulations),
-			StrategyMode:      rejection.StrategyMode,
-			StrategyName:      rejection.StrategyName,
-			StrategyVersion:   rejection.StrategyVersion,
-			ConfigHash:        rejection.ConfigHash,
-			SignalID:          rejection.SignalID,
-			SignalType:        rejection.SignalType,
-			SignalTimeframe:   rejection.SignalTimeframe,
-			TradeIntent:       rejection.TradeIntent,
-			SignalCloseTime:   rejection.SignalCloseTime,
-			DecisionCloseTime: rejection.DecisionCloseTime,
-			StrategyMetadata:  copyAnyMap(rejection.StrategyMetadata),
+			Action:              "open_rejected",
+			Symbol:              rejection.Symbol,
+			Timestamp:           actionTime,
+			Success:             false,
+			Error:               reason,
+			Reasoning:           reason,
+			GateState:           rejection.GateState,
+			GateReasons:         append([]string(nil), rejection.GateReasons...),
+			GateDiagnostics:     copyGateDiagnostics(rejection.GateDiagnostics),
+			Simulations:         copyOpenFrequencySimulations(rejection.Simulations),
+			StrategyMode:        rejection.StrategyMode,
+			StrategyName:        rejection.StrategyName,
+			StrategyVersion:     rejection.StrategyVersion,
+			ConfigHash:          rejection.ConfigHash,
+			SignalID:            rejection.SignalID,
+			SignalType:          rejection.SignalType,
+			SignalTimeframe:     rejection.SignalTimeframe,
+			TradeIntent:         rejection.TradeIntent,
+			SignalCloseTime:     rejection.SignalCloseTime,
+			DecisionCloseTime:   rejection.DecisionCloseTime,
+			EvaluationCloseTime: rejection.EvaluationCloseTime,
+			ActionTimestamp:     actionTimestamp,
+			FreshnessState:      rejection.FreshnessState,
+			AgeCandles:          rejection.AgeCandles,
+			StaleReason:         rejection.StaleReason,
+			StrategyMetadata:    copyAnyMap(rejection.StrategyMetadata),
 		})
 		record.ExecutionLog = append(record.ExecutionLog,
 			fmt.Sprintf("⚠ %s %s 被开仓门控拒绝: %s", rejection.Symbol, rejection.Action, reason))

@@ -222,6 +222,11 @@ type DecisionAction struct {
 	TradeIntent              string                            `json:"trade_intent,omitempty"`
 	SignalCloseTime          int64                             `json:"signal_close_time,omitempty"`
 	DecisionCloseTime        int64                             `json:"decision_close_time,omitempty"`
+	EvaluationCloseTime      int64                             `json:"evaluation_close_time,omitempty"`
+	ActionTimestamp          int64                             `json:"action_timestamp,omitempty"`
+	FreshnessState           string                            `json:"freshness_state,omitempty"`
+	AgeCandles               int                               `json:"age_candles,omitempty"`
+	StaleReason              string                            `json:"stale_reason,omitempty"`
 	StrategyMetadata         map[string]any                    `json:"strategy_metadata,omitempty"`
 	StrategyDiagnostics      map[string]any                    `json:"strategy_diagnostics,omitempty"`
 	RequestedClosePercentage float64                           `json:"requested_close_percentage,omitempty"`

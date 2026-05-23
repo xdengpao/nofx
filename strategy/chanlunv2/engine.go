@@ -22,6 +22,7 @@ type Engine struct {
 
 // NewEngine 创建缠论V2引擎
 func NewEngine(cfg config.ChanlunV2StrategyConfig) (*Engine, error) {
+	cfg = config.NormalizeChanlunV2StrategyConfig(cfg)
 	return &Engine{
 		Config:         cfg,
 		latestSignals:  map[string]*chanlunSignalReport{},
@@ -58,8 +59,7 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 	// 对每个标的进行多级别分析
 	for _, symbol := range symbols {
 		symbolDiagnostics := []string{}
-		// 直接获取 K 线数据（不依赖 ctx.MarketDataMap）
-		multiResult := e.analyzeSymbol(symbol, timeframes)
+		multiResult := e.analyzeSymbolFromContext(ctx, symbol, timeframes)
 		if multiResult == nil {
 			symbolDiagnostics = append(symbolDiagnostics, fmt.Sprintf("%s 数据不足", symbol))
 			diagnostics = append(diagnostics, symbolDiagnostics...)
@@ -78,8 +78,9 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		e.setLatestReport(ctx.TraderID, symbol, multiResult, signals, symbolDiagnostics)
 
 		// 信号转 Decision
+		decisionCloseTime := evaluationCloseTime(multiResult, "trade")
 		for _, sig := range signals {
-			d := e.signalToDecision(ctx, symbol, sig, timeframes["trade"])
+			d := e.signalToDecision(ctx, symbol, sig, timeframes["trade"], decisionCloseTime)
 			if d.Action != "" {
 				allDecisions = append(allDecisions, d)
 				diagnostics = append(diagnostics, fmt.Sprintf("%s %s 置信度%d", symbol, sig.SignalType, sig.Confidence))
@@ -95,14 +96,15 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 	allDecisions = append(posDecisions, allDecisions...)
 
 	rawDecisions := append([]decision.Decision(nil), allDecisions...)
-	openRejections := []decision.OpenRejection{}
-	allDecisions, openRejections = e.validateChanlunV2Decisions(ctx, allDecisions, prep)
+	allDecisions, freshnessRejections := e.applyChanlunV2FreshnessGuard(ctx, allDecisions, timeframes)
+	allDecisions, validationRejections := e.validateChanlunV2Decisions(ctx, allDecisions, prep)
+	openRejections := append(freshnessRejections, validationRejections...)
 	e.markRejectedOpenMarkers(ctx, rawDecisions, allDecisions, openRejections)
 
 	if len(allDecisions) == 0 {
 		reason := "缠论V2策略未发现可执行信号"
 		if len(openRejections) > 0 {
-			reason = "缠论V2开仓信号已全部被风控过滤: " + strings.Join(chanlunV2OpenRejectionReasons(openRejections), "; ")
+			reason = "缠论V2开仓信号已全部被过滤: " + strings.Join(chanlunV2OpenRejectionReasons(openRejections), "; ")
 		}
 		allDecisions = []decision.Decision{{
 			Symbol:    "ALL",
@@ -118,8 +120,11 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 	if prep != nil && prep.RiskIncreaseBlocked && strings.TrimSpace(prep.StopReason) != "" {
 		summary += "; 风险增加已阻断: " + prep.StopReason
 	}
-	if len(openRejections) > 0 {
-		summary += "; 风控拒绝 " + strings.Join(chanlunV2OpenRejectionReasons(openRejections), "; ")
+	if len(freshnessRejections) > 0 {
+		summary += "; 信号新鲜度拒绝 " + strings.Join(chanlunV2OpenRejectionReasons(freshnessRejections), "; ")
+	}
+	if len(validationRejections) > 0 {
+		summary += "; 风控/open gate拒绝 " + strings.Join(chanlunV2OpenRejectionReasons(validationRejections), "; ")
 	}
 
 	return &decision.FullDecision{
@@ -132,27 +137,31 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		ConfigHash:      e.configHash,
 		OpenRejections:  openRejections,
 		StrategyDiagnostics: map[string]any{
-			"messages":        diagnostics,
-			"timeframes":      timeframes,
-			"symbols":         symbols,
-			"open_rejections": chanlunV2OpenRejectionReasons(openRejections),
+			"messages":              diagnostics,
+			"timeframes":            timeframes,
+			"symbols":               symbols,
+			"open_rejections":       chanlunV2OpenRejectionReasons(openRejections),
+			"freshness_rejections":  chanlunV2OpenRejectionReasons(freshnessRejections),
+			"validation_rejections": chanlunV2OpenRejectionReasons(validationRejections),
 		},
 	}, nil
 }
 
 type multiLevelResult struct {
-	Symbol  string
-	Results map[string]*AnalysisResult // timeframe → result
+	Symbol            string
+	Results           map[string]*AnalysisResult // level → result
+	LastClosedByLevel map[string]int64
 }
 
 func (e *Engine) analyzeMultiLevel(symbol string, data *market.Data, timeframes map[string]string) *multiLevelResult {
-	result := &multiLevelResult{Symbol: symbol, Results: map[string]*AnalysisResult{}}
+	result := &multiLevelResult{Symbol: symbol, Results: map[string]*AnalysisResult{}, LastClosedByLevel: map[string]int64{}}
 
 	for level, tf := range timeframes {
 		klines, ok := data.Klines[tf]
 		if !ok || len(klines) < 30 {
 			continue
 		}
+		result.LastClosedByLevel[level] = latestKlineCloseMillis(klines)
 		input := e.buildInput(klines, tf)
 		output, err := AnalyzeKlines(input)
 		if err != nil {
@@ -170,8 +179,20 @@ func (e *Engine) analyzeMultiLevel(symbol string, data *market.Data, timeframes 
 	return result
 }
 
+func (e *Engine) analyzeSymbolFromContext(ctx *decision.Context, symbol string, timeframes map[string]string) *multiLevelResult {
+	if ctx != nil && ctx.MarketDataMap != nil {
+		normalized := market.Normalize(symbol)
+		if data := ctx.MarketDataMap[normalized]; data != nil {
+			if result := e.analyzeMultiLevel(normalized, data, timeframes); result != nil {
+				return result
+			}
+		}
+	}
+	return e.analyzeSymbol(symbol, timeframes)
+}
+
 func (e *Engine) analyzeSymbol(symbol string, timeframes map[string]string) *multiLevelResult {
-	result := &multiLevelResult{Symbol: symbol, Results: map[string]*AnalysisResult{}}
+	result := &multiLevelResult{Symbol: symbol, Results: map[string]*AnalysisResult{}, LastClosedByLevel: map[string]int64{}}
 
 	for level, tf := range timeframes {
 		depth := 240
@@ -182,6 +203,7 @@ func (e *Engine) analyzeSymbol(symbol string, timeframes map[string]string) *mul
 		if err != nil || len(klines) < 30 {
 			continue
 		}
+		result.LastClosedByLevel[level] = latestKlineCloseMillis(klines)
 		input := e.buildInput(klines, tf)
 		output, err := AnalyzeKlines(input)
 		if err != nil {
@@ -270,7 +292,7 @@ func (e *Engine) multiLevelJudgment(mr *multiLevelResult, timeframes map[string]
 	return filtered
 }
 
-func (e *Engine) signalToDecision(ctx *decision.Context, symbol string, sig Signal, timeframe string) decision.Decision {
+func (e *Engine) signalToDecision(ctx *decision.Context, symbol string, sig Signal, timeframe string, decisionCloseTimes ...int64) decision.Decision {
 	action := ""
 	switch {
 	case strings.HasPrefix(sig.SignalType, "buy") || strings.HasPrefix(sig.SignalType, "quasi_buy"):
@@ -288,6 +310,13 @@ func (e *Engine) signalToDecision(ctx *decision.Context, symbol string, sig Sign
 	}
 	signalID := v2SignalID(symbol, timeframe, sig)
 	closeTime := normalizeV2EpochMillis(sig.Timestamp)
+	decisionCloseTime := closeTime
+	if len(decisionCloseTimes) > 0 && decisionCloseTimes[0] > 0 {
+		decisionCloseTime = decisionCloseTimes[0]
+	}
+	if decisionCloseTime > 0 && closeTime > 0 && decisionCloseTime < closeTime {
+		decisionCloseTime = closeTime
+	}
 
 	return decision.Decision{
 		Symbol:          symbol,
@@ -306,13 +335,15 @@ func (e *Engine) signalToDecision(ctx *decision.Context, symbol string, sig Sign
 		SignalTimeframe: timeframe,
 		StructureTarget: sig.TakeProfit,
 		StrategyMetadata: map[string]any{
-			"layer":               "trade_action",
-			"timeframe":           timeframe,
-			"signal_close_time":   closeTime,
-			"decision_close_time": closeTime,
-			"divergence_strength": sig.DivergenceStrength,
-			"center_id":           signalCenterID(sig),
-			"reason_code":         "chanlun_v2_signal",
+			"layer":                 "trade_action",
+			"timeframe":             timeframe,
+			"trade_intent":          action,
+			"signal_close_time":     closeTime,
+			"decision_close_time":   decisionCloseTime,
+			"evaluation_close_time": decisionCloseTime,
+			"divergence_strength":   sig.DivergenceStrength,
+			"center_id":             signalCenterID(sig),
+			"reason_code":           "chanlun_v2_signal",
 		},
 	}
 }
@@ -323,10 +354,11 @@ func (e *Engine) managePositions(ctx *decision.Context, timeframes map[string]st
 	}
 	var decisions []decision.Decision
 	for _, pos := range ctx.Positions {
-		mr := e.analyzeSymbol(pos.Symbol, timeframes)
+		mr := e.analyzeSymbolFromContext(ctx, pos.Symbol, timeframes)
 		if mr == nil {
 			continue
 		}
+		decisionCloseTime := evaluationCloseTime(mr, "trade")
 		tradeResult, ok := mr.Results["trade"]
 		if !ok {
 			continue
@@ -338,6 +370,10 @@ func (e *Engine) managePositions(ctx *decision.Context, timeframes map[string]st
 				closeAction := "close_long"
 				if pos.Side == "SHORT" {
 					closeAction = "close_short"
+				}
+				signalCloseTime := normalizeV2EpochMillis(sig.Timestamp)
+				if decisionCloseTime > 0 && signalCloseTime > 0 && decisionCloseTime < signalCloseTime {
+					decisionCloseTime = signalCloseTime
 				}
 				decisions = append(decisions, decision.Decision{
 					Symbol:          pos.Symbol,
@@ -351,12 +387,14 @@ func (e *Engine) managePositions(ctx *decision.Context, timeframes map[string]st
 					SignalType:      sig.SignalType,
 					SignalTimeframe: timeframes["trade"],
 					StrategyMetadata: map[string]any{
-						"layer":               "position_management",
-						"timeframe":           timeframes["trade"],
-						"signal_close_time":   normalizeV2EpochMillis(sig.Timestamp),
-						"decision_close_time": normalizeV2EpochMillis(sig.Timestamp),
-						"position_side":       strings.ToLower(pos.Side),
-						"reason_code":         "chanlun_v2_reverse_signal",
+						"layer":                 "position_management",
+						"timeframe":             timeframes["trade"],
+						"trade_intent":          closeAction,
+						"signal_close_time":     signalCloseTime,
+						"decision_close_time":   decisionCloseTime,
+						"evaluation_close_time": decisionCloseTime,
+						"position_side":         strings.ToLower(pos.Side),
+						"reason_code":           "chanlun_v2_reverse_signal",
 					},
 				})
 				break
@@ -364,6 +402,122 @@ func (e *Engine) managePositions(ctx *decision.Context, timeframes map[string]st
 		}
 	}
 	return decisions
+}
+
+func (e *Engine) applyChanlunV2FreshnessGuard(ctx *decision.Context, decisions []decision.Decision, timeframes map[string]string) ([]decision.Decision, []decision.OpenRejection) {
+	if len(decisions) == 0 {
+		return decisions, nil
+	}
+	policy := config.NormalizeChanlunV2SignalFreshness(e.Config.SignalFreshness)
+	if policy.Enabled != nil && !*policy.Enabled {
+		return decisions, nil
+	}
+	tradeTF := firstNonEmptyString(timeframes["trade"], "1h")
+	out := make([]decision.Decision, 0, len(decisions))
+	var rejections []decision.OpenRejection
+	for _, d := range decisions {
+		if !decision.IsOpenLikeAction(d.Action) {
+			out = append(out, d)
+			continue
+		}
+		if d.StrategyMetadata == nil {
+			d.StrategyMetadata = map[string]any{}
+		}
+		signalClose := firstPositiveInt64(metadataInt64(d.StrategyMetadata, "signal_close_time"), metadataInt64(d.StrategyMetadata, "trigger_close_time"), metadataInt64(d.StrategyMetadata, "segment_end_time"))
+		decisionClose := firstPositiveInt64(metadataInt64(d.StrategyMetadata, "decision_close_time"), metadataInt64(d.StrategyMetadata, "evaluation_close_time"), signalClose)
+		if decisionClose > 0 && signalClose > 0 && decisionClose < signalClose {
+			decisionClose = signalClose
+		}
+		ageCandles := signalAgeCandles(signalClose, decisionClose, tradeTF)
+		softAge, maxLifetime := e.chanlunV2FreshnessLimits(policy, d.SignalType)
+		freshnessState := "fresh"
+		if ageCandles > maxLifetime {
+			freshnessState = "expired"
+		} else if ageCandles > softAge {
+			freshnessState = "aged"
+		}
+		currentPrice := currentPriceForV2Guard(ctx, d.Symbol, tradeTF)
+		minRR := e.minRemainingNetRR(ctx, policy)
+		d.StrategyMetadata["signal_close_time"] = signalClose
+		d.StrategyMetadata["decision_close_time"] = decisionClose
+		d.StrategyMetadata["evaluation_close_time"] = decisionClose
+		d.StrategyMetadata["freshness_state"] = freshnessState
+		d.StrategyMetadata["age_candles"] = ageCandles
+		d.StrategyMetadata["soft_age_candles"] = softAge
+		d.StrategyMetadata["max_lifetime_candles"] = maxLifetime
+		d.StrategyMetadata["current_price"] = currentPrice
+		d.StrategyMetadata["min_remaining_net_rr"] = minRR
+
+		reject := func(state, reasonCode, reason string, extra map[string]any) {
+			d.StrategyMetadata["freshness_state"] = state
+			d.StrategyMetadata["guard_reason_code"] = reasonCode
+			d.StrategyMetadata["reason_code"] = reasonCode
+			d.StrategyMetadata["stale_reason"] = reason
+			d.StrategyMetadata["action_timestamp"] = time.Now().UnixMilli()
+			for key, value := range extra {
+				d.StrategyMetadata[key] = value
+			}
+			rejection := decision.NewOpenRejectionFromDecision(d, reason)
+			rejection.GateState = "blocked"
+			rejection.GateReasons = []string{reasonCode}
+			rejection.GateDiagnostics = map[string]any{
+				"source":                "freshness_gate",
+				"reason_code":           reasonCode,
+				"freshness_state":       state,
+				"age_candles":           ageCandles,
+				"soft_age_candles":      softAge,
+				"max_lifetime_candles":  maxLifetime,
+				"signal_close_time":     signalClose,
+				"decision_close_time":   decisionClose,
+				"evaluation_close_time": decisionClose,
+				"current_price":         currentPrice,
+				"min_remaining_net_rr":  minRR,
+			}
+			for key, value := range extra {
+				rejection.GateDiagnostics[key] = value
+			}
+			rejections = append(rejections, rejection)
+		}
+
+		if currentPrice > 0 && policy.MissedTargetGuard != nil && *policy.MissedTargetGuard {
+			if targetCrossed(d.Action, currentPrice, d.TakeProfit) {
+				reason := fmt.Sprintf("%s %s 被信号新鲜度门控拒绝: 目标已穿越，当前价%.6f 目标%.6f，信号年龄%d根%s", d.Symbol, d.Action, currentPrice, d.TakeProfit, ageCandles, tradeTF)
+				reject("target_crossed", "freshness_gate.target_crossed", reason, map[string]any{"target_crossed": true})
+				continue
+			}
+		}
+		if freshnessState == "expired" {
+			reason := fmt.Sprintf("%s %s 被信号新鲜度门控拒绝: 信号已过期，年龄%d根%s超过硬上限%d根，结构时间=%d 评估K线=%d", d.Symbol, d.Action, ageCandles, tradeTF, maxLifetime, signalClose, decisionClose)
+			reject("expired", "freshness_gate.signal_expired", reason, nil)
+			continue
+		}
+		if currentPrice > 0 {
+			if remainingRR, ok := remainingNetRRForV2Decision(d.Action, currentPrice, d.StopLoss, d.TakeProfit, v2TradingCostPct(ctx)); ok {
+				d.StrategyMetadata["remaining_net_rr"] = remainingRR
+				if remainingRR < minRR {
+					reason := fmt.Sprintf("%s %s 被信号新鲜度门控拒绝: 剩余净RR %.2f低于阈值%.2f，当前价%.6f 止损%.6f 止盈%.6f", d.Symbol, d.Action, remainingRR, minRR, currentPrice, d.StopLoss, d.TakeProfit)
+					reject("rr_invalid", "freshness_gate.rr_invalid", reason, map[string]any{"remaining_net_rr": remainingRR})
+					continue
+				}
+			}
+		} else {
+			d.StrategyMetadata["freshness_diagnostic"] = "缺少当前价，已跳过目标穿越和剩余RR检查"
+		}
+		if freshnessState == "aged" {
+			agedReason := fmt.Sprintf("信号老化%d根%s，超过soft阈值%d根", ageCandles, tradeTF, softAge)
+			d.StrategyMetadata["stale_reason"] = agedReason
+			decay := (ageCandles - softAge) * policy.ConfidenceDecayPerAgedCandle
+			if decay > 0 {
+				before := d.Confidence
+				d.Confidence = max(0, d.Confidence-decay)
+				d.StrategyMetadata["confidence_before_freshness_decay"] = before
+				d.StrategyMetadata["confidence_decay"] = decay
+				d.Reasoning += fmt.Sprintf("；%s，置信度衰减%d", agedReason, decay)
+			}
+		}
+		out = append(out, d)
+	}
+	return out, rejections
 }
 
 func (e *Engine) validateChanlunV2Decisions(ctx *decision.Context, decisions []decision.Decision, prep *decision.CyclePreparation) ([]decision.Decision, []decision.OpenRejection) {
@@ -444,6 +598,138 @@ func (e *Engine) resolveTimeframes() map[string]string {
 
 func (e *Engine) resolveSymbols(ctx *decision.Context) []string {
 	return strategySymbolNames(e.resolveSymbolUniverse(ctx))
+}
+
+func latestKlineCloseMillis(klines []market.Kline) int64 {
+	if len(klines) == 0 {
+		return 0
+	}
+	return normalizeV2EpochMillis(klines[len(klines)-1].CloseTime)
+}
+
+func evaluationCloseTime(mr *multiLevelResult, level string) int64 {
+	if mr == nil {
+		return 0
+	}
+	if value := mr.LastClosedByLevel[level]; value > 0 {
+		return normalizeV2EpochMillis(value)
+	}
+	return 0
+}
+
+func signalAgeCandles(signalClose, decisionClose int64, timeframe string) int {
+	if signalClose <= 0 || decisionClose <= signalClose {
+		return 0
+	}
+	step := timeframeDurationMillis(timeframe)
+	if step <= 0 {
+		return 0
+	}
+	return int((decisionClose - signalClose) / step)
+}
+
+func timeframeDurationMillis(timeframe string) int64 {
+	duration, err := time.ParseDuration(strings.TrimSpace(timeframe))
+	if err != nil || duration <= 0 {
+		return int64(time.Hour / time.Millisecond)
+	}
+	return int64(duration / time.Millisecond)
+}
+
+func (e *Engine) chanlunV2FreshnessLimits(policy config.ChanlunV2SignalFreshnessConfig, signalType string) (int, int) {
+	soft := policy.SoftAgeCandles
+	if value := policy.SoftAgeBySignalType[strings.ToLower(strings.TrimSpace(signalType))]; value > 0 {
+		soft = value
+	}
+	maxLifetime := policy.MaxLifetimeCandles
+	if value := policy.MaxLifetimeBySignalType[strings.ToLower(strings.TrimSpace(signalType))]; value > 0 {
+		maxLifetime = value
+	}
+	if soft <= 0 {
+		soft = 1
+	}
+	if maxLifetime < soft {
+		maxLifetime = soft
+	}
+	return soft, maxLifetime
+}
+
+func (e *Engine) minRemainingNetRR(ctx *decision.Context, policy config.ChanlunV2SignalFreshnessConfig) float64 {
+	if policy.MinRemainingNetRR > 0 {
+		return policy.MinRemainingNetRR
+	}
+	if ctx != nil && ctx.StrategyRiskPolicy != nil && ctx.StrategyRiskPolicy.DefaultMinNetRR > 0 {
+		return ctx.StrategyRiskPolicy.DefaultMinNetRR
+	}
+	return 1.2
+}
+
+func currentPriceForV2Guard(ctx *decision.Context, symbol, timeframe string) float64 {
+	if ctx == nil || ctx.MarketDataMap == nil {
+		return 0
+	}
+	data := ctx.MarketDataMap[market.Normalize(symbol)]
+	if data == nil {
+		data = ctx.MarketDataMap[symbol]
+	}
+	if data == nil {
+		return 0
+	}
+	if data.CurrentPrice > 0 {
+		return data.CurrentPrice
+	}
+	if data.Klines != nil {
+		if klines := data.Klines[timeframe]; len(klines) > 0 {
+			return klines[len(klines)-1].Close
+		}
+	}
+	return 0
+}
+
+func targetCrossed(action string, currentPrice, takeProfit float64) bool {
+	if currentPrice <= 0 || takeProfit <= 0 {
+		return false
+	}
+	switch decision.DecisionDirection(action) {
+	case "long":
+		return currentPrice >= takeProfit
+	case "short":
+		return currentPrice <= takeProfit
+	default:
+		return false
+	}
+}
+
+func remainingNetRRForV2Decision(action string, currentPrice, stopLoss, takeProfit, costPct float64) (float64, bool) {
+	if currentPrice <= 0 || stopLoss <= 0 || takeProfit <= 0 {
+		return 0, false
+	}
+	var risk, reward float64
+	switch decision.DecisionDirection(action) {
+	case "long":
+		risk = currentPrice - stopLoss
+		reward = takeProfit - currentPrice
+	case "short":
+		risk = stopLoss - currentPrice
+		reward = currentPrice - takeProfit
+	default:
+		return 0, false
+	}
+	if risk <= 0 || reward <= 0 {
+		return 0, true
+	}
+	net := reward/risk - costPct
+	if net < 0 {
+		return 0, true
+	}
+	return net, true
+}
+
+func v2TradingCostPct(ctx *decision.Context) float64 {
+	if ctx != nil && ctx.StrategyRiskPolicy != nil && ctx.StrategyRiskPolicy.FeeSlippagePct > 0 {
+		return ctx.StrategyRiskPolicy.FeeSlippagePct
+	}
+	return 0.002
 }
 
 func min(a, b int) int {

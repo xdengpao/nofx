@@ -8,7 +8,9 @@ import {
   markerStatusLabel,
   markerTone,
   normalizeEpochMs,
+  resolveActionTimestamp,
   resolveDecisionCloseTime,
+  resolveEvaluationCloseTime,
   resolveSignalCloseTime,
   resolveTradeIntent,
   signalLabel,
@@ -214,6 +216,8 @@ export function StrategyCandlestickChart({
                   const marker = visual.marker;
                   const signalClose = resolveSignalCloseTime(marker);
                   const decisionClose = resolveDecisionCloseTime(marker);
+                  const evaluationClose = resolveEvaluationCloseTime(marker) || decisionClose;
+                  const actionTime = resolveActionTimestamp(marker);
                   return (
                   <div key={visual.id} className="border-t pt-2" style={{ borderColor: '#2B3139' }}>
                     <div className="font-semibold">{visual.label}</div>
@@ -222,16 +226,18 @@ export function StrategyCandlestickChart({
                     </div>
                     <div className="mt-1 grid grid-cols-[64px_1fr] gap-x-2 font-mono" style={{ color: '#848E9C' }}>
                       <span>结构</span><span>{formatFullTime(signalClose)}</span>
-                      <span>决策</span><span>{decisionClose ? formatFullTime(decisionClose) : '缺少确认时间'}</span>
+                      <span>评估K线</span><span>{evaluationClose ? formatFullTime(evaluationClose) : '缺少评估时间'}</span>
+                      <span>动作</span><span>{actionTime ? formatFullTime(actionTime) : '--'}</span>
                       <span>年龄</span><span>{marker.age_candles ? `${marker.age_candles} 根` : '--'}</span>
+                      <span>新鲜度</span><span>{freshnessStateLabel(marker.freshness_state)}</span>
                       <span>来源</span><span>{marker.source_layer || '--'}</span>
                       <span>状态</span><span>{marker.status || '--'}</span>
-                      <span>原因</span><span>{marker.reason_code || marker.entry_invalidation_reason || '--'}</span>
+                      <span>原因</span><span>{marker.stale_reason || marker.reason_code || marker.entry_invalidation_reason || '--'}</span>
                       <span>父级</span><span>{marker.parent_structure_key || marker.parent_signal_id || '--'}</span>
                       <span>触发</span><span>{marker.entry_trigger_id || '--'}</span>
                     </div>
                     {visual.pairOutOfRange && visual.pairCloseTime && (
-                      <div className="mt-1" style={{ color: '#F0B90B' }}>配对时间 {formatFullTime(visual.pairCloseTime)} 不在当前图表范围内</div>
+                      <div className="mt-1" style={{ color: '#F0B90B' }}>{pairCloseLabel(visual.kind)} {formatFullTime(visual.pairCloseTime)} 不在当前图表范围内</div>
                     )}
                     {marker.reason && <div className="mt-1 break-words" style={{ color: '#B7BDC6' }}>{marker.reason}</div>}
                     <div className="mt-1 font-mono" style={{ color: '#848E9C' }}>{marker.lifecycle_key || marker.signal_id}</div>
@@ -396,13 +402,36 @@ function visualKindLabel(kind: 'signal' | 'decision' | 'merged' | 'cluster') {
     case 'signal':
       return '结构点';
     case 'decision':
-      return '决策点';
+      return '评估点';
     case 'merged':
-      return '结构/决策';
+      return '结构/评估';
     case 'cluster':
       return '信号簇';
     default:
       return '';
+  }
+}
+
+function pairCloseLabel(kind: 'signal' | 'decision' | 'merged' | 'cluster') {
+  if (kind === 'decision') return '结构时间';
+  if (kind === 'signal') return '评估K线';
+  return '配对时间';
+}
+
+function freshnessStateLabel(state?: string) {
+  switch ((state || '').toLowerCase()) {
+    case 'fresh':
+      return '新鲜';
+    case 'aged':
+      return '老化';
+    case 'expired':
+      return '过期';
+    case 'target_crossed':
+      return '目标已穿越';
+    case 'rr_invalid':
+      return 'RR不足';
+    default:
+      return state || '--';
   }
 }
 

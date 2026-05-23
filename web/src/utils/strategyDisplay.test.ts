@@ -92,6 +92,40 @@ describe('strategy display model', () => {
       expect(model.chartMarkers[0].symbol).toBe(symbol);
     }
   });
+
+  it('shows stale rejection timing with structure, evaluation and action rows', () => {
+    const item = buildSignalDisplayModel({
+      trader_id: 't1',
+      symbol: 'BNBUSDT',
+      decision_mode: 'chanlun_v2',
+      signals: [],
+      signal_markers: [
+        markerFixture({
+          signal_id: 'bn-old-buy2',
+          signal_type: 'buy2',
+          direction: 'long',
+          source_layer: 'trade_action',
+          display_category: 'trade_action',
+          status: 'rejected',
+          action: 'open_long',
+          trade_intent: 'open_long',
+          close_time: 1_779_001_200_000,
+          signal_close_time: 1_779_001_200_000,
+          decision_close_time: 1_779_012_000_000,
+          evaluation_close_time: 1_779_012_000_000,
+          action_timestamp: 1_779_012_060_000,
+          freshness_state: 'expired',
+          age_candles: 3,
+          stale_reason: '信号已过期',
+        }),
+      ],
+    }).latest;
+
+    expect(item?.summary).toContain('过期');
+    expect(item?.summary).toContain('3根');
+    expect(item?.tooltipRows.map((row) => row.label)).toEqual(expect.arrayContaining(['结构时间', '评估K线', '动作时间', '新鲜度']));
+    expect(item?.tooltipRows.find((row) => row.label === '原因')?.value).toBe('信号已过期');
+  });
 });
 
 function markerFixture(overrides: Partial<SignalMarker> = {}): SignalMarker {

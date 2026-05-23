@@ -10,7 +10,15 @@ import { LanguageProvider, useLanguage } from './contexts/LanguageContext';
 import { backtestApi } from './lib/backtestApi';
 import { t, type Language } from './i18n/translations';
 import { buildSignalDisplayModel } from './utils/strategyDisplay';
-import { markerDisplayLabel, markerStatusLabel, markerTone, resolveTradeIntent, tradeIntentLabel } from './utils/strategyMarkers';
+import {
+  markerDisplayLabel,
+  markerStatusLabel,
+  markerTone,
+  resolveEvaluationCloseTime,
+  resolveSignalCloseTime,
+  resolveTradeIntent,
+  tradeIntentLabel,
+} from './utils/strategyMarkers';
 import type {
   SystemStatus,
   AccountInfo,
@@ -724,6 +732,7 @@ function StrategyInspector({
     statuses: statusFilters,
   });
   const latestItem = displayModel.latest;
+  const latestStaleHint = latestItem ? staleSignalHint(latestItem.marker) : '';
   const chartMarkers = displayModel.chartMarkers;
   const positionItems = displayModel.items.filter((item) => item.category === 'position_management').slice(0, 5);
   const isStrategyMode = isStrategyDecisionMode(status?.decision_mode);
@@ -809,6 +818,11 @@ function StrategyInspector({
                     <span style={{ color: latestItem.marker.direction === 'long' ? '#0ECB81' : latestItem.marker.direction === 'short' ? '#F6465D' : '#848E9C' }}>{latestItem.title}</span>
                   </div>
                   <div className="text-sm" style={{ color: '#EAECEF' }}>{latestItem.summary}</div>
+                  {latestStaleHint && (
+                    <div className="rounded px-2 py-1 text-xs" style={{ background: 'rgba(240, 185, 11, 0.08)', color: '#F0B90B', border: '1px solid rgba(240, 185, 11, 0.2)' }}>
+                      {latestStaleHint}
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-2 font-mono text-xs">
                     {latestItem.tooltipRows.slice(2, 8).map((row) => (
                       <div key={`${row.label}-${row.value}`} style={{ color: '#848E9C' }}>
@@ -974,6 +988,21 @@ function isStrategyDecisionMode(mode?: string) {
 
 function normalizeStrategyTimeframe(value?: string) {
   return value === '15m' || value === '1h' || value === '4h' ? value : '1h';
+}
+
+function staleSignalHint(marker: SignalMarker) {
+  const age = typeof marker.age_candles === 'number' ? marker.age_candles : 0;
+  const state = (marker.freshness_state || '').toLowerCase();
+  const signalClose = resolveSignalCloseTime(marker);
+  const evaluationClose = resolveEvaluationCloseTime(marker);
+  const lagHours = signalClose > 0 && evaluationClose > signalClose
+    ? ((evaluationClose - signalClose) / 3_600_000).toFixed(1)
+    : '';
+  if (['aged', 'expired', 'target_crossed', 'rr_invalid'].includes(state) || age > 1) {
+    const label = state === 'expired' ? '旧信号已过期' : state === 'aged' ? '旧信号老化' : state === 'target_crossed' ? '目标已穿越' : state === 'rr_invalid' ? '剩余RR不足' : '旧信号';
+    return `${label}${age > 0 ? ` · ${age}根` : ''}${lagHours ? ` · ${lagHours}h` : ''}`;
+  }
+  return '';
 }
 
 function SignalBadge({ marker }: { marker: SignalMarker }) {

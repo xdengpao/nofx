@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -55,15 +56,28 @@ type LeverageConfig struct {
 
 // ChanlunV2StrategyConfig 基于 Rust 缠论库的 v2 策略配置
 type ChanlunV2StrategyConfig struct {
-	Timeframes   map[string]string `json:"timeframes,omitempty"`    // higher/trade/sub/micro → 4h/1h/15m/3m
-	HistoryDepth map[string]int    `json:"history_depth,omitempty"` // timeframe → kline count (700-1000)
-	Structure    map[string]any    `json:"structure,omitempty"`
-	Divergence   map[string]any    `json:"divergence,omitempty"`
-	Signals      map[string]any    `json:"signals,omitempty"`
-	Recursive    map[string]any    `json:"recursive,omitempty"`
-	MultiLevel   map[string]any    `json:"multi_level,omitempty"`
-	Position     map[string]any    `json:"position,omitempty"`
-	Risk         map[string]any    `json:"risk,omitempty"`
+	Timeframes      map[string]string              `json:"timeframes,omitempty"`    // higher/trade/sub/micro → 4h/1h/15m/3m
+	HistoryDepth    map[string]int                 `json:"history_depth,omitempty"` // timeframe → kline count (700-1000)
+	SignalFreshness ChanlunV2SignalFreshnessConfig `json:"signal_freshness,omitempty"`
+	Structure       map[string]any                 `json:"structure,omitempty"`
+	Divergence      map[string]any                 `json:"divergence,omitempty"`
+	Signals         map[string]any                 `json:"signals,omitempty"`
+	Recursive       map[string]any                 `json:"recursive,omitempty"`
+	MultiLevel      map[string]any                 `json:"multi_level,omitempty"`
+	Position        map[string]any                 `json:"position,omitempty"`
+	Risk            map[string]any                 `json:"risk,omitempty"`
+}
+
+// ChanlunV2SignalFreshnessConfig 控制缠论 V2 旧信号是否还能继续作为开仓候选。
+type ChanlunV2SignalFreshnessConfig struct {
+	Enabled                      *bool          `json:"enabled,omitempty"`
+	SoftAgeCandles               int            `json:"soft_age_candles,omitempty"`
+	MaxLifetimeCandles           int            `json:"max_lifetime_candles,omitempty"`
+	SoftAgeBySignalType          map[string]int `json:"soft_age_by_signal_type,omitempty"`
+	MaxLifetimeBySignalType      map[string]int `json:"max_lifetime_by_signal_type,omitempty"`
+	MissedTargetGuard            *bool          `json:"missed_target_guard,omitempty"`
+	ConfidenceDecayPerAgedCandle int            `json:"confidence_decay_per_aged_candle,omitempty"`
+	MinRemainingNetRR            float64        `json:"min_remaining_net_rr,omitempty"`
 }
 
 // DynamicCandidatePoolConfig 动态候选池配置。
@@ -361,6 +375,67 @@ func (c *DynamicCandidatePoolConfig) ApplyDefaults() {
 // IsEnabled 返回动态候选池是否启用。
 func (c DynamicCandidatePoolConfig) IsEnabled() bool {
 	return c.Enabled == nil || *c.Enabled
+}
+
+// NormalizeChanlunV2StrategyConfig 填充缠论 V2 运行时默认配置。
+func NormalizeChanlunV2StrategyConfig(cfg ChanlunV2StrategyConfig) ChanlunV2StrategyConfig {
+	cfg.SignalFreshness = NormalizeChanlunV2SignalFreshness(cfg.SignalFreshness)
+	return cfg
+}
+
+// NormalizeChanlunV2SignalFreshness 返回保守的新鲜度策略，旧配置缺省时自动启用。
+func NormalizeChanlunV2SignalFreshness(cfg ChanlunV2SignalFreshnessConfig) ChanlunV2SignalFreshnessConfig {
+	if cfg.Enabled == nil {
+		cfg.Enabled = boolPtr(true)
+	}
+	if cfg.MissedTargetGuard == nil {
+		cfg.MissedTargetGuard = boolPtr(true)
+	}
+	if cfg.SoftAgeCandles <= 0 || cfg.SoftAgeCandles > 48 {
+		cfg.SoftAgeCandles = 1
+	}
+	if cfg.MaxLifetimeCandles <= 0 || cfg.MaxLifetimeCandles > 96 || cfg.MaxLifetimeCandles < cfg.SoftAgeCandles {
+		cfg.MaxLifetimeCandles = 2
+		if cfg.MaxLifetimeCandles < cfg.SoftAgeCandles {
+			cfg.MaxLifetimeCandles = cfg.SoftAgeCandles
+		}
+	}
+	if cfg.ConfidenceDecayPerAgedCandle <= 0 || cfg.ConfidenceDecayPerAgedCandle > 20 {
+		cfg.ConfidenceDecayPerAgedCandle = 10
+	}
+	if cfg.MinRemainingNetRR < 0 {
+		cfg.MinRemainingNetRR = 0
+	}
+	cfg.SoftAgeBySignalType = normalizeChanlunV2SignalAgeOverrides(cfg.SoftAgeBySignalType, 48)
+	cfg.MaxLifetimeBySignalType = normalizeChanlunV2SignalAgeOverrides(cfg.MaxLifetimeBySignalType, 96)
+	for signalType, soft := range cfg.SoftAgeBySignalType {
+		if maxLife, ok := cfg.MaxLifetimeBySignalType[signalType]; ok && maxLife < soft {
+			cfg.MaxLifetimeBySignalType[signalType] = soft
+		}
+	}
+	return cfg
+}
+
+func normalizeChanlunV2SignalAgeOverrides(values map[string]int, maxAllowed int) map[string]int {
+	if len(values) == 0 {
+		return nil
+	}
+	out := map[string]int{}
+	for key, value := range values {
+		signalType := strings.ToLower(strings.TrimSpace(key))
+		if !isValidProgrammaticSignalType(signalType) || value <= 0 || value > maxAllowed {
+			continue
+		}
+		out[signalType] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 // NormalizeTradingFrequency 归一化开仓频率配置。旧配置缺少 trading_frequency 时保持现状。
@@ -893,6 +968,7 @@ func (c *Config) Validate() error {
 			if trader.AIModel != "" && trader.AIModel != "qwen" && trader.AIModel != "deepseek" && trader.AIModel != "custom" {
 				return fmt.Errorf("trader[%d]: chanlun_v2模式下ai_model如配置必须是 'qwen', 'deepseek' 或 'custom'", i)
 			}
+			trader.ChanlunV2Strategy = NormalizeChanlunV2StrategyConfig(trader.ChanlunV2Strategy)
 		} else if trader.AIModel != "qwen" && trader.AIModel != "deepseek" && trader.AIModel != "custom" {
 			return fmt.Errorf("trader[%d]: ai_model必须是 'qwen', 'deepseek' 或 'custom'", i)
 		}
