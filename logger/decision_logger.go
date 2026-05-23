@@ -127,6 +127,9 @@ type AccountSnapshot struct {
 	TotalUnrealizedProfit float64 `json:"total_unrealized_profit"`
 	PositionCount         int     `json:"position_count"`
 	MarginUsedPct         float64 `json:"margin_used_pct"`
+	CostBasis             float64 `json:"cost_basis,omitempty"`
+	RealizedPnL           float64 `json:"realized_pnl,omitempty"`
+	PnLSource             string  `json:"pnl_source,omitempty"`
 	AccountTooSmall       bool    `json:"account_too_small,omitempty"`
 	TotalRealized24h      float64 `json:"total_realized_24h,omitempty"`
 }

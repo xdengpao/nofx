@@ -33,6 +33,9 @@ type AccountInfo struct {
 	AvailableBalance float64 `json:"available_balance"`
 	TotalPnL         float64 `json:"total_pnl"`
 	TotalPnLPct      float64 `json:"total_pnl_pct"`
+	CostBasis        float64 `json:"cost_basis,omitempty"`
+	RealizedPnL      float64 `json:"realized_pnl,omitempty"`
+	PnLSource        string  `json:"pnl_source,omitempty"`
 	TotalRealized24h float64 `json:"total_realized_24h,omitempty"`
 	MarginUsed       float64 `json:"margin_used"`
 	MarginUsedPct    float64 `json:"margin_used_pct"`

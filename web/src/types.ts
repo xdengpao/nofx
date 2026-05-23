@@ -21,6 +21,9 @@ export interface AccountInfo {
   available_balance: number;
   total_pnl: number;
   total_pnl_pct: number;
+  cost_basis?: number;
+  realized_pnl?: number;
+  pnl_source?: string;
   total_unrealized_pnl: number;
   initial_balance: number;
   daily_pnl: number;

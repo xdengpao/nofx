@@ -18,6 +18,9 @@ export interface AccountInfo {
   available_balance: number;
   total_pnl: number;
   total_pnl_pct: number;
+  cost_basis?: number;
+  realized_pnl?: number;
+  pnl_source?: string;
   total_unrealized_pnl: number;
   margin_used: number;
   margin_used_pct: number;

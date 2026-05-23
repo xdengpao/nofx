@@ -529,8 +529,8 @@ function TraderDetailsPage({
         <StatCard
           title={t('totalEquity', language)}
           value={`${account?.total_equity?.toFixed(2) || '0.00'} USDT`}
-          change={account?.total_pnl_pct || 0}
-          positive={(account?.total_pnl ?? 0) > 0}
+          change={account && Math.abs(account.total_pnl_pct || 0) > 0.0001 ? account.total_pnl_pct : undefined}
+          positive={(account?.total_pnl ?? 0) >= 0}
         />
         <StatCard
           title={t('availableBalance', language)}
@@ -540,8 +540,9 @@ function TraderDetailsPage({
         <StatCard
           title={t('totalPnL', language)}
           value={`${account?.total_pnl !== undefined && account.total_pnl >= 0 ? '+' : ''}${account?.total_pnl?.toFixed(2) || '0.00'} USDT`}
-          change={account?.total_pnl_pct || 0}
+          change={account && Math.abs(account.total_pnl_pct || 0) > 0.0001 ? account.total_pnl_pct : undefined}
           positive={(account?.total_pnl ?? 0) >= 0}
+          subtitle={`成本基准 ${account?.cost_basis?.toFixed(2) || account?.total_equity?.toFixed(2) || '0.00'} USDT`}
         />
         <StatCard
           title={t('positions', language)}

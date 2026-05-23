@@ -506,6 +506,9 @@ func (at *AutoTrader) runCycle() error {
 		TotalUnrealizedProfit: ctx.Account.TotalPnL,
 		PositionCount:         ctx.Account.PositionCount,
 		MarginUsedPct:         ctx.Account.MarginUsedPct,
+		CostBasis:             ctx.Account.CostBasis,
+		RealizedPnL:           ctx.Account.RealizedPnL,
+		PnLSource:             ctx.Account.PnLSource,
 		TotalRealized24h:      ctx.Account.TotalRealized24h,
 	}
 
@@ -1288,6 +1291,7 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 
 	var positionInfos []decision.PositionInfo
 	totalMarginUsed := 0.0
+	totalUnrealizedPnL := 0.0
 
 	// 当前持仓的key集合（用于清理已平仓的记录）
 	currentPositionKeys := make(map[string]bool)
@@ -1302,6 +1306,7 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 			quantity = -quantity // 空仓数量为负，转为正数
 		}
 		unrealizedPnl := pos["unRealizedProfit"].(float64)
+		totalUnrealizedPnL += unrealizedPnl
 		liquidationPrice := pos["liquidationPrice"].(float64)
 
 		// 计算占用保证金（估算）
@@ -1415,12 +1420,8 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 			ai500Limit, len(candidateCoins))
 	}
 
-	// 5. 计算总盈亏
-	totalPnL := totalEquity - at.initialBalance
-	totalPnLPct := 0.0
-	if at.initialBalance > 0 {
-		totalPnLPct = (totalPnL / at.initialBalance) * 100
-	}
+	// 5. 计算交易盈亏：不要把充值/初始投入误算为利润。
+	accountPnL := computeAccountPnLSummary(frequencyRecords, totalEquity, totalUnrealizedPnL, at.initialBalance)
 
 	marginUsedPct := 0.0
 	if totalEquity > 0 {
@@ -1474,8 +1475,11 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		Account: decision.AccountInfo{
 			TotalEquity:      totalEquity,
 			AvailableBalance: availableBalance,
-			TotalPnL:         totalPnL,
-			TotalPnLPct:      totalPnLPct,
+			TotalPnL:         accountPnL.TotalPnL,
+			TotalPnLPct:      accountPnL.TotalPnLPct,
+			CostBasis:        accountPnL.CostBasis,
+			RealizedPnL:      accountPnL.RealizedPnL,
+			PnLSource:        accountPnL.Source,
 			TotalRealized24h: totalRealized24h,
 			MarginUsed:       totalMarginUsed,
 			MarginUsedPct:    marginUsedPct,
@@ -1673,6 +1677,56 @@ func totalRealizedPnLSince(records []*logger.DecisionRecord, since time.Time) fl
 		total += event.PnL
 	}
 	return total
+}
+
+type accountPnLSummary struct {
+	TotalPnL    float64
+	TotalPnLPct float64
+	RealizedPnL float64
+	CostBasis   float64
+	Source      string
+}
+
+func computeAccountPnLSummary(records []*logger.DecisionRecord, totalEquity, totalUnrealizedPnL, configuredInitialBalance float64) accountPnLSummary {
+	events, _ := logger.BuildTradeEvents(records)
+	realizedPnL := 0.0
+	for _, event := range events {
+		realizedPnL += event.PnL
+	}
+	totalPnL := realizedPnL + totalUnrealizedPnL
+	if math.Abs(totalPnL) < 1e-8 {
+		totalPnL = 0
+	}
+
+	costBasis := totalEquity - totalPnL
+	source := "trade_logs_plus_unrealized"
+	if len(events) == 0 && totalPnL == 0 {
+		source = "current_equity_cost_basis_no_trades"
+	}
+	if costBasis <= 0 {
+		if configuredInitialBalance > 0 {
+			costBasis = configuredInitialBalance
+			source += "_configured_initial_fallback"
+		} else if totalEquity > 0 {
+			costBasis = totalEquity
+			source += "_equity_fallback"
+		}
+	}
+
+	totalPnLPct := 0.0
+	if costBasis > 0 {
+		totalPnLPct = totalPnL / costBasis * 100
+	}
+	if math.Abs(totalPnLPct) < 1e-8 {
+		totalPnLPct = 0
+	}
+	return accountPnLSummary{
+		TotalPnL:    totalPnL,
+		TotalPnLPct: totalPnLPct,
+		RealizedPnL: realizedPnL,
+		CostBasis:   costBasis,
+		Source:      source,
+	}
 }
 
 func isOpenActionName(action string) bool {
@@ -3238,11 +3292,8 @@ func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
 		totalMarginUsed += marginUsed
 	}
 
-	totalPnL := totalEquity - at.initialBalance
-	totalPnLPct := 0.0
-	if at.initialBalance > 0 {
-		totalPnLPct = (totalPnL / at.initialBalance) * 100
-	}
+	records := at.loadRecentDecisionRecords(10000)
+	accountPnL := computeAccountPnLSummary(records, totalEquity, totalUnrealizedPnL, at.initialBalance)
 
 	marginUsedPct := 0.0
 	if totalEquity > 0 {
@@ -3257,8 +3308,11 @@ func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
 		"available_balance": availableBalance,      // 可用余额
 
 		// 盈亏统计
-		"total_pnl":            totalPnL,           // 总盈亏 = equity - initial
-		"total_pnl_pct":        totalPnLPct,        // 总盈亏百分比
+		"total_pnl":            accountPnL.TotalPnL,    // 交易盈亏 = 已实现 + 未实现，不把投入本金算作利润
+		"total_pnl_pct":        accountPnL.TotalPnLPct, // 相对成本基准的交易收益率
+		"cost_basis":           accountPnL.CostBasis,   // 成本基准 = 当前净值 - 交易盈亏
+		"realized_pnl":         accountPnL.RealizedPnL, // 决策日志可对账的已实现盈亏
+		"pnl_source":           accountPnL.Source,
 		"total_unrealized_pnl": totalUnrealizedPnL, // 未实现盈亏（从持仓计算）
 		"initial_balance":      at.initialBalance,  // 初始余额
 		"daily_pnl":            at.dailyPnL,        // 日盈亏

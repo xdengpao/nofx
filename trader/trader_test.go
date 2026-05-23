@@ -574,9 +574,13 @@ type mockTrader struct {
 	cancelStopOrdersCalls int
 	lastTakeProfitPrice   float64
 	positions             []map[string]interface{}
+	balance               map[string]interface{}
 }
 
 func (m *mockTrader) GetBalance() (map[string]interface{}, error) {
+	if m.balance != nil {
+		return m.balance, nil
+	}
 	return map[string]interface{}{
 		"totalWalletBalance":    10000.0,
 		"totalUnrealizedProfit": 0.0,
@@ -1697,6 +1701,70 @@ func TestBuildTradingContext_InjectsAIStateRiskAndExecutionQuality(t *testing.T)
 	}
 	if len(ctx.CandidateCoins) == 0 {
 		t.Fatal("默认币种池应生成候选币")
+	}
+}
+
+func TestGetAccountInfoTreatsCurrentEquityAsCostBasisWhenNoTrades(t *testing.T) {
+	at := &AutoTrader{
+		trader: &mockTrader{balance: map[string]interface{}{
+			"totalWalletBalance":    44.42,
+			"totalUnrealizedProfit": 0.0,
+			"availableBalance":      44.41,
+		}},
+		decisionLogger: logger.NewDecisionLogger(t.TempDir()),
+		initialBalance: 10,
+	}
+
+	account, err := at.GetAccountInfo()
+	if err != nil {
+		t.Fatalf("GetAccountInfo 不应失败: %v", err)
+	}
+	if got := account["total_pnl"].(float64); math.Abs(got) > 0.000001 {
+		t.Fatalf("无交易无持仓时不应把当前净值计为利润: got=%.6f", got)
+	}
+	if got := account["total_pnl_pct"].(float64); math.Abs(got) > 0.000001 {
+		t.Fatalf("无交易无持仓时收益率应为0: got=%.6f", got)
+	}
+	if got := account["cost_basis"].(float64); math.Abs(got-44.42) > 0.000001 {
+		t.Fatalf("成本基准应等于当前净值: got=%.6f", got)
+	}
+	if got := account["pnl_source"].(string); got != "current_equity_cost_basis_no_trades" {
+		t.Fatalf("pnl_source不符合预期: %s", got)
+	}
+}
+
+func TestComputeAccountPnLSummaryUsesTradeLogsPlusUnrealizedPnL(t *testing.T) {
+	openTime := time.Date(2026, 5, 23, 10, 0, 0, 0, time.UTC)
+	closeTime := openTime.Add(time.Hour)
+	records := []*logger.DecisionRecord{
+		{Timestamp: openTime, Decisions: []logger.DecisionAction{{
+			Action:    "open_long",
+			Symbol:    "ETHUSDT",
+			Quantity:  1,
+			Leverage:  5,
+			Price:     100,
+			Timestamp: openTime,
+			Success:   true,
+		}}},
+		{Timestamp: closeTime, Decisions: []logger.DecisionAction{{
+			Action:    "close_long",
+			Symbol:    "ETHUSDT",
+			Quantity:  1,
+			Price:     110,
+			Timestamp: closeTime,
+			Success:   true,
+		}}},
+	}
+
+	summary := computeAccountPnLSummary(records, 56, 1, 10)
+	if math.Abs(summary.TotalPnL-11) > 0.000001 {
+		t.Fatalf("总盈亏应为已实现10 + 未实现1: %+v", summary)
+	}
+	if math.Abs(summary.CostBasis-45) > 0.000001 {
+		t.Fatalf("成本基准应为当前净值减交易盈亏: %+v", summary)
+	}
+	if math.Abs(summary.TotalPnLPct-(11.0/45.0*100)) > 0.000001 {
+		t.Fatalf("收益率应按成本基准计算: %+v", summary)
 	}
 }
 

@@ -524,10 +524,11 @@ func (s *Server) handleEquityHistory(c *gin.Context) {
 		Timestamp        string  `json:"timestamp"`
 		TotalEquity      float64 `json:"total_equity"`      // 账户净值（wallet + unrealized）
 		AvailableBalance float64 `json:"available_balance"` // 可用余额
-		TotalPnL         float64 `json:"total_pnl"`         // 总盈亏（相对初始余额）
-		TotalPnLPct      float64 `json:"total_pnl_pct"`     // 总盈亏百分比
-		PositionCount    int     `json:"position_count"`    // 持仓数量
-		MarginUsedPct    float64 `json:"margin_used_pct"`   // 保证金使用率
+		TotalPnL         float64 `json:"total_pnl"`         // 交易盈亏（已实现 + 未实现）
+		TotalPnLPct      float64 `json:"total_pnl_pct"`     // 相对成本基准的盈亏百分比
+		CostBasis        float64 `json:"cost_basis,omitempty"`
+		PositionCount    int     `json:"position_count"`  // 持仓数量
+		MarginUsedPct    float64 `json:"margin_used_pct"` // 保证金使用率
 		CycleNumber      int     `json:"cycle_number"`
 	}
 
@@ -557,13 +558,21 @@ func (s *Server) handleEquityHistory(c *gin.Context) {
 	for _, record := range records {
 		// TotalBalance字段实际存储的是TotalEquity
 		totalEquity := record.AccountState.TotalBalance
-		// TotalUnrealizedProfit字段实际存储的是TotalPnL（相对初始余额）
+		// TotalUnrealizedProfit字段历史上承载总盈亏，当前为交易盈亏。
 		totalPnL := record.AccountState.TotalUnrealizedProfit
+
+		costBasis := record.AccountState.CostBasis
+		if costBasis <= 0 {
+			costBasis = initialBalance
+		}
+		if costBasis <= 0 && totalEquity > 0 {
+			costBasis = totalEquity - totalPnL
+		}
 
 		// 计算盈亏百分比
 		totalPnLPct := 0.0
-		if initialBalance > 0 {
-			totalPnLPct = (totalPnL / initialBalance) * 100
+		if costBasis > 0 {
+			totalPnLPct = (totalPnL / costBasis) * 100
 		}
 
 		history = append(history, EquityPoint{
@@ -572,6 +581,7 @@ func (s *Server) handleEquityHistory(c *gin.Context) {
 			AvailableBalance: record.AccountState.AvailableBalance,
 			TotalPnL:         totalPnL,
 			TotalPnLPct:      totalPnLPct,
+			CostBasis:        costBasis,
 			PositionCount:    record.AccountState.PositionCount,
 			MarginUsedPct:    record.AccountState.MarginUsedPct,
 			CycleNumber:      record.CycleNumber,
