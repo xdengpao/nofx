@@ -464,6 +464,55 @@ func TestBuildExecutionQuality_DetectsRiskAndRejections(t *testing.T) {
 	}
 }
 
+func TestBuildExecutionQuality_ModeAwareFailureCounts(t *testing.T) {
+	now := time.Date(2026, 5, 6, 14, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{
+		{
+			Timestamp:    now,
+			DecisionMode: "ai",
+			Success:      false,
+			ErrorMessage: "获取AI决策失败: 响应解析失败",
+		},
+		{
+			Timestamp:    now.Add(time.Minute),
+			Success:      false,
+			ErrorMessage: "获取AI决策失败: timeout",
+		},
+		{
+			Timestamp:    now.Add(2 * time.Minute),
+			DecisionMode: "chanlun_v2",
+			Success:      false,
+			ErrorMessage: "获取AI决策失败: 缠论V2策略引擎未初始化",
+		},
+		{
+			Timestamp:    now.Add(3 * time.Minute),
+			DecisionMode: "programmatic",
+			Success:      false,
+			ErrorMessage: "程序化策略引擎未初始化",
+		},
+		{
+			Timestamp:    now.Add(4 * time.Minute),
+			DecisionMode: "chanlun_v2",
+			Success:      false,
+			ErrorMessage: "DeepSeek调用失败: timeout",
+		},
+	}
+
+	stats := BuildExecutionQuality(records, 0)
+	if stats.AIFailureCount != 3 {
+		t.Fatalf("AI失败计数错误: got=%d stats=%+v", stats.AIFailureCount, stats)
+	}
+	if stats.AIFailureCountByMode["ai"] != 1 || stats.AIFailureCountByMode["legacy"] != 1 || stats.AIFailureCountByMode["chanlun_v2"] != 1 {
+		t.Fatalf("AI失败按模式计数错误: %+v", stats.AIFailureCountByMode)
+	}
+	if stats.StrategyFailureCount != 2 {
+		t.Fatalf("策略失败计数错误: got=%d stats=%+v", stats.StrategyFailureCount, stats)
+	}
+	if stats.StrategyFailureCountByMode["chanlun_v2"] != 1 || stats.StrategyFailureCountByMode["programmatic"] != 1 {
+		t.Fatalf("策略失败按模式计数错误: %+v", stats.StrategyFailureCountByMode)
+	}
+}
+
 // ============================================================================
 // 需求 11.1: LogDecision 和 GetLatestRecords 往返
 // ============================================================================

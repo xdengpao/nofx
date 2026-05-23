@@ -1561,6 +1561,57 @@ func TestAutoTraderApplyAICallState_FailureSetsBackoff(t *testing.T) {
 	}
 }
 
+func TestAutoTraderDecisionModeLabelAndActionLog(t *testing.T) {
+	cases := []struct {
+		name       string
+		mode       string
+		wantLabel  string
+		wantAction string
+	}{
+		{
+			name:       "empty defaults to ai",
+			wantLabel:  "AI决策",
+			wantAction: "🤖 正在请求AI分析并决策...",
+		},
+		{
+			name:       "ai",
+			mode:       "ai",
+			wantLabel:  "AI决策",
+			wantAction: "🤖 正在请求AI分析并决策...",
+		},
+		{
+			name:       "programmatic",
+			mode:       "programmatic",
+			wantLabel:  "程序化策略",
+			wantAction: "🧮 正在运行程序化策略分析并决策...",
+		},
+		{
+			name:       "chanlun v2",
+			mode:       "chanlun_v2",
+			wantLabel:  "缠论V2策略",
+			wantAction: "🧩 正在运行缠论V2策略分析并决策...",
+		},
+		{
+			name:       "unknown",
+			mode:       "experimental",
+			wantLabel:  "策略(experimental)",
+			wantAction: "🤖 正在请求AI分析并决策...",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			at := &AutoTrader{config: AutoTraderConfig{DecisionMode: tc.mode}}
+			if got := at.decisionModeLabel(); got != tc.wantLabel {
+				t.Fatalf("decisionModeLabel()=%q want=%q", got, tc.wantLabel)
+			}
+			if got := at.decisionModeActionLog(); got != tc.wantAction {
+				t.Fatalf("decisionModeActionLog()=%q want=%q", got, tc.wantAction)
+			}
+		})
+	}
+}
+
 func TestBuildTradingContext_InjectsAIStateRiskAndExecutionQuality(t *testing.T) {
 	pool.SetCoinPoolAPI("")
 	pool.SetOITopAPI("")
@@ -1581,6 +1632,7 @@ func TestBuildTradingContext_InjectsAIStateRiskAndExecutionQuality(t *testing.T)
 		name:     "Alpha",
 		exchange: "binance",
 		config: AutoTraderConfig{
+			DecisionMode:        "chanlun_v2",
 			MaxRiskPerTrade:     0.015,
 			TotalRiskBudget:     0.07,
 			MaxDailyLoss:        0.06,
@@ -1609,6 +1661,9 @@ func TestBuildTradingContext_InjectsAIStateRiskAndExecutionQuality(t *testing.T)
 
 	if ctx.TraderID != "trader-alpha" || ctx.Exchange != "binance" {
 		t.Fatalf("trader作用域字段错误: trader_id=%q exchange=%q", ctx.TraderID, ctx.Exchange)
+	}
+	if ctx.DecisionMode != "chanlun_v2" {
+		t.Fatalf("DecisionMode 未注入: got=%q", ctx.DecisionMode)
 	}
 	if math.Abs(ctx.MaxRiskPerTrade-0.015) > 0.000001 {
 		t.Fatalf("MaxRiskPerTrade 未注入: got=%.4f", ctx.MaxRiskPerTrade)

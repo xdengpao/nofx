@@ -69,7 +69,7 @@ func EvaluateOpenGate(input OpenGateInput) OpenGateResult {
 	result.EffectiveRisk = baseOpenGateRisk(ctx)
 	result.AdjustedSizeUSD = input.Decision.PositionSizeUSD
 
-	if !ctx.AIBackoffUntil.IsZero() && time.Now().Before(ctx.AIBackoffUntil) {
+	if isAIModeForGate(ctx.DecisionMode) && !ctx.AIBackoffUntil.IsZero() && time.Now().Before(ctx.AIBackoffUntil) {
 		result.block(fmt.Sprintf("AI调用退避中，直到 %s", ctx.AIBackoffUntil.Format(time.RFC3339)))
 	}
 
@@ -80,7 +80,7 @@ func EvaluateOpenGate(input OpenGateInput) OpenGateResult {
 	applySameSideExposureGate(&result, input.Decision, ctx, input.StrategyProfile)
 	applyCorrelationConcentrationGate(&result, input.Decision, ctx, input.StrategyProfile, input.MarketData)
 	applyHighADXChaseGate(&result, input.Decision, input.MarketData)
-	applyExecutionQualityGate(&result, input.ExecutionQuality)
+	applyExecutionQualityGate(&result, input.ExecutionQuality, ctx.DecisionMode)
 	applyLossModeGate(&result, input.Decision, ctx)
 
 	if result.AdjustedSizeUSD <= 0 {
@@ -494,7 +494,7 @@ func applyHighADXChaseGate(result *OpenGateResult, d *Decision, data *market.Dat
 	}
 }
 
-func applyExecutionQualityGate(result *OpenGateResult, quality *logger.ExecutionQualityStats) {
+func applyExecutionQualityGate(result *OpenGateResult, quality *logger.ExecutionQualityStats, decisionMode string) {
 	if quality == nil {
 		return
 	}
@@ -506,10 +506,15 @@ func applyExecutionQualityGate(result *OpenGateResult, quality *logger.Execution
 		result.penalize("partial_close失败率偏高，新开仓降权")
 		result.EffectiveRisk *= 0.5
 	}
-	if quality.AIFailureCount >= 3 {
-		result.penalize("AI失败次数偏高，新开仓降权")
+	if isAIModeForGate(decisionMode) && quality.AIFailureCount >= 3 {
+		result.penalize("AI调用失败次数偏高，新开仓降权")
 		result.EffectiveRisk *= 0.5
 	}
+}
+
+func isAIModeForGate(decisionMode string) bool {
+	mode := strings.ToLower(strings.TrimSpace(decisionMode))
+	return mode == "" || mode == "ai"
 }
 
 func (result *OpenGateResult) block(reason string) {

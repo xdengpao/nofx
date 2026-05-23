@@ -183,6 +183,9 @@ export interface ExecutionQuality {
   protection_order_failures?: number;
   high_risk_execution_failures?: number;
   ai_failure_count: number;
+  ai_failure_count_by_mode?: Record<string, number>;
+  strategy_failure_count?: number;
+  strategy_failure_count_by_mode?: Record<string, number>;
   unmatched_action_count: number;
   recent_high_risk_errors?: ExecutionRiskEvent[];
   recent_open_rejection_reasons?: string[];

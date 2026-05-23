@@ -332,16 +332,22 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 // Run 运行自动交易主循环
 func (at *AutoTrader) Run() error {
 	at.isRunning = true
-	if at.config.DecisionMode == "programmatic" {
+	switch at.GetDecisionMode() {
+	case "programmatic":
 		log.Println("🚀 程序化策略自动交易系统启动")
-	} else {
+	case "chanlun_v2":
+		log.Println("🚀 缠论V2策略自动交易系统启动")
+	default:
 		log.Println("🚀 AI驱动自动交易系统启动")
 	}
 	log.Printf("💰 初始余额: %.2f USDT", at.initialBalance)
 	log.Printf("⚙️  扫描间隔: %v", at.config.ScanInterval)
-	if at.config.DecisionMode == "programmatic" {
+	switch at.GetDecisionMode() {
+	case "programmatic":
 		log.Println("🧮 程序化策略将生成开仓、加仓、减仓和平仓决策")
-	} else {
+	case "chanlun_v2":
+		log.Println("🧩 缠论V2策略将生成交易决策")
+	default:
 		log.Println("🤖 AI将全权决定杠杆、仓位大小、止损止盈等参数")
 	}
 
@@ -523,11 +529,7 @@ func (at *AutoTrader) runCycle() error {
 		ctx.Account.TotalEquity, ctx.Account.AvailableBalance, ctx.Account.PositionCount)
 
 	// 4. 按 trader 决策模式获取完整决策
-	if at.config.DecisionMode == "programmatic" {
-		log.Println("🧮 正在运行程序化策略分析并决策...")
-	} else {
-		log.Println("🤖 正在请求AI分析并决策...")
-	}
+	log.Println(at.decisionModeActionLog())
 	fullDecision, err := at.getFullDecision(ctx)
 
 	// 即使有错误，也保存思维链、决策和输入prompt（用于debug）
@@ -634,10 +636,28 @@ func (at *AutoTrader) runCycle() error {
 }
 
 func (at *AutoTrader) decisionModeLabel() string {
-	if at.config.DecisionMode == "programmatic" {
+	mode := at.GetDecisionMode()
+	switch mode {
+	case "ai":
+		return "AI决策"
+	case "programmatic":
 		return "程序化策略"
+	case "chanlun_v2":
+		return "缠论V2策略"
+	default:
+		return fmt.Sprintf("策略(%s)", mode)
 	}
-	return "AI决策"
+}
+
+func (at *AutoTrader) decisionModeActionLog() string {
+	switch at.GetDecisionMode() {
+	case "programmatic":
+		return "🧮 正在运行程序化策略分析并决策..."
+	case "chanlun_v2":
+		return "🧩 正在运行缠论V2策略分析并决策..."
+	default:
+		return "🤖 正在请求AI分析并决策..."
+	}
 }
 
 func (at *AutoTrader) getFullDecision(ctx *decision.Context) (*decision.FullDecision, error) {
@@ -1395,6 +1415,7 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		CurrentTime:              time.Now().Format("2006-01-02 15:04:05"),
 		TraderID:                 at.id,
 		Exchange:                 at.exchange,
+		DecisionMode:             at.GetDecisionMode(),
 		RuntimeMinutes:           int(time.Since(at.startTime).Minutes()),
 		CallCount:                at.callCount,
 		BTCETHLeverage:           at.config.BTCETHLeverage,  // 使用配置的杠杆倍数

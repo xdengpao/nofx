@@ -91,6 +91,9 @@ interface PerformanceAnalysis {
     protection_order_failures?: number;
     high_risk_execution_failures?: number;
     ai_failure_count: number;
+    ai_failure_count_by_mode?: Record<string, number>;
+    strategy_failure_count?: number;
+    strategy_failure_count_by_mode?: Record<string, number>;
     unmatched_action_count: number;
     recent_high_risk_errors?: Array<{ timestamp: string; symbol?: string; action?: string; risk_type: string; reason: string }>;
     recent_open_rejection_reasons?: string[];
@@ -292,7 +295,7 @@ export default function AILearning({ traderId }: AILearningProps) {
               <div className="text-xl font-bold mono" style={{ color: (execution.protection_order_failures || 0) > 0 ? '#F87171' : '#10B981' }}>{execution.protection_order_failures || 0}</div>
             </div>
             <div>
-              <div className="text-xs uppercase" style={{ color: '#848E9C' }}>AI Fail</div>
+              <div className="text-xs uppercase" style={{ color: '#848E9C' }}>AI Call Fail</div>
               <div className="text-xl font-bold mono" style={{ color: (execution.ai_failure_count || 0) > 0 ? '#F0B90B' : '#10B981' }}>{execution.ai_failure_count || 0}</div>
             </div>
             <div>

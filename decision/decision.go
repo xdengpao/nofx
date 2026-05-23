@@ -24,6 +24,7 @@ type Context struct {
 	CurrentTime              string                             `json:"current_time"`
 	TraderID                 string                             `json:"trader_id,omitempty"`
 	Exchange                 string                             `json:"exchange,omitempty"`
+	DecisionMode             string                             `json:"-"`
 	RuntimeMinutes           int                                `json:"runtime_minutes"`
 	CallCount                int                                `json:"call_count"`
 	Account                  AccountInfo                        `json:"account"`

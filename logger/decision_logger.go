@@ -612,6 +612,9 @@ type ExecutionQualityStats struct {
 	ProtectionOrderFailures      int                  `json:"protection_order_failures"`
 	HighRiskExecutionFailures    int                  `json:"high_risk_execution_failures"`
 	AIFailureCount               int                  `json:"ai_failure_count"`
+	AIFailureCountByMode         map[string]int       `json:"ai_failure_count_by_mode,omitempty"`
+	StrategyFailureCount         int                  `json:"strategy_failure_count,omitempty"`
+	StrategyFailureCountByMode   map[string]int       `json:"strategy_failure_count_by_mode,omitempty"`
 	UnmatchedActionCount         int                  `json:"unmatched_action_count"`
 	RecentHighRiskErrors         []ExecutionRiskEvent `json:"recent_high_risk_errors,omitempty"`
 	RecentOpenRejectionReasons   []string             `json:"recent_open_rejection_reasons,omitempty"`
@@ -1188,8 +1191,13 @@ func BuildExecutionQuality(records []*DecisionRecord, unmatchedCount int) Execut
 		if record == nil {
 			continue
 		}
-		if !record.Success && isAIFailureText(record.ErrorMessage) {
+		if isAIFailureRecord(record) {
 			stats.AIFailureCount++
+			incrementModeCount(&stats.AIFailureCountByMode, normalizeDecisionModeForQuality(record.DecisionMode))
+		}
+		if isStrategyFailureRecord(record) {
+			stats.StrategyFailureCount++
+			incrementModeCount(&stats.StrategyFailureCountByMode, normalizeDecisionModeForQuality(record.DecisionMode))
 		}
 		for _, action := range record.Decisions {
 			stats.TotalActions++
@@ -1246,6 +1254,70 @@ func isAIFailureText(value string) bool {
 		strings.Contains(value, "获取ai决策") ||
 		strings.Contains(value, "api调用失败") ||
 		strings.Contains(value, "响应解析失败")
+}
+
+func normalizeDecisionModeForQuality(mode string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		return "legacy"
+	}
+	return mode
+}
+
+func isAIFailureRecord(record *DecisionRecord) bool {
+	if record == nil || record.Success {
+		return false
+	}
+	mode := normalizeDecisionModeForQuality(record.DecisionMode)
+	if mode == "ai" || mode == "legacy" {
+		return isAIFailureText(record.ErrorMessage)
+	}
+	return isExplicitAIProviderFailureText(record.ErrorMessage)
+}
+
+func isStrategyFailureRecord(record *DecisionRecord) bool {
+	if record == nil || record.Success || strings.TrimSpace(record.ErrorMessage) == "" {
+		return false
+	}
+	mode := normalizeDecisionModeForQuality(record.DecisionMode)
+	if mode == "ai" || mode == "legacy" {
+		return false
+	}
+	return !isExplicitAIProviderFailureText(record.ErrorMessage)
+}
+
+func isExplicitAIProviderFailureText(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return false
+	}
+	keywords := []string{
+		"ai api",
+		"ai api调用失败",
+		"ai调用失败",
+		"ai调用异常",
+		"ai响应解析失败",
+		"ai响应",
+		"ai provider",
+		"ai模型",
+		"deepseek",
+		"qwen",
+		"openai",
+		"openai-compatible",
+	}
+	for _, keyword := range keywords {
+		if strings.Contains(value, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+func incrementModeCount(target *map[string]int, mode string) {
+	if *target == nil {
+		*target = make(map[string]int)
+	}
+	(*target)[mode]++
 }
 
 func isOpenRejection(action DecisionAction) bool {

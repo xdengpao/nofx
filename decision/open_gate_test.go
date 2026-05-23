@@ -3,6 +3,7 @@ package decision
 import (
 	"nofx/logger"
 	"nofx/market"
+	"strings"
 	"testing"
 	"time"
 )
@@ -280,6 +281,93 @@ func TestEvaluateOpenGate_ExecutionQualityBlocks(t *testing.T) {
 	}
 }
 
+func TestEvaluateOpenGate_AIFailurePenaltyIsModeAware(t *testing.T) {
+	cases := []struct {
+		name          string
+		mode          string
+		wantPenalty   bool
+		wantRiskBelow bool
+	}{
+		{name: "legacy", wantPenalty: true, wantRiskBelow: true},
+		{name: "ai", mode: "ai", wantPenalty: true, wantRiskBelow: true},
+		{name: "programmatic", mode: "programmatic"},
+		{name: "chanlun v2", mode: "chanlun_v2"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := newTestContext()
+			ctx.DecisionMode = tc.mode
+			result := EvaluateOpenGate(OpenGateInput{
+				Decision:         &Decision{Symbol: "ETHUSDT", Action: "open_long"},
+				Context:          ctx,
+				ExecutionQuality: &logger.ExecutionQualityStats{AIFailureCount: 3},
+			})
+
+			hasPenalty := openGateHasReason(result, "AI调用失败次数偏高")
+			if hasPenalty != tc.wantPenalty {
+				t.Fatalf("AI failure penalty mismatch: got=%v want=%v result=%+v", hasPenalty, tc.wantPenalty, result)
+			}
+			if tc.wantRiskBelow && result.EffectiveRisk >= ctx.MaxRiskPerTrade {
+				t.Fatalf("AI failure penalty 应降低 effective risk: %+v", result)
+			}
+			if !tc.wantRiskBelow && result.EffectiveRisk != ctx.MaxRiskPerTrade {
+				t.Fatalf("非AI模式不应因 AI failure 降低 risk: %+v", result)
+			}
+		})
+	}
+}
+
+func TestEvaluateOpenGate_AIBackoffIsModeAware(t *testing.T) {
+	cases := []struct {
+		name      string
+		mode      string
+		wantBlock bool
+	}{
+		{name: "legacy", wantBlock: true},
+		{name: "ai", mode: "ai", wantBlock: true},
+		{name: "programmatic", mode: "programmatic"},
+		{name: "chanlun v2", mode: "chanlun_v2"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := newTestContext()
+			ctx.DecisionMode = tc.mode
+			ctx.AIBackoffUntil = time.Now().Add(time.Hour)
+			result := EvaluateOpenGate(OpenGateInput{
+				Decision: &Decision{Symbol: "ETHUSDT", Action: "open_long"},
+				Context:  ctx,
+			})
+
+			if result.Allowed == tc.wantBlock {
+				t.Fatalf("AIBackoff gate mismatch: wantBlock=%v result=%+v", tc.wantBlock, result)
+			}
+			hasReason := openGateHasReason(result, "AI调用退避中")
+			if hasReason != tc.wantBlock {
+				t.Fatalf("AIBackoff reason mismatch: got=%v want=%v result=%+v", hasReason, tc.wantBlock, result)
+			}
+		})
+	}
+}
+
+func TestEvaluateOpenGate_ExecutionQualityBlocksAllModes(t *testing.T) {
+	for _, mode := range []string{"ai", "programmatic", "chanlun_v2"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := newTestContext()
+			ctx.DecisionMode = mode
+			result := EvaluateOpenGate(OpenGateInput{
+				Decision:         &Decision{Symbol: "ETHUSDT", Action: "open_long"},
+				Context:          ctx,
+				ExecutionQuality: &logger.ExecutionQualityStats{HighRiskExecutionFailures: 1},
+			})
+			if result.Allowed {
+				t.Fatalf("%s 模式下高危执行失败仍应阻断: %+v", mode, result)
+			}
+		})
+	}
+}
+
 func TestEvaluateOpenGate_BTCMultiTimeframeBearishBlocksAltLong(t *testing.T) {
 	ctx := newTestContext()
 	ctx.MarketDataMap["BTCUSDT"] = &market.Data{
@@ -522,4 +610,13 @@ func TestValidateOpenDecision_ShortConfidenceTooLow(t *testing.T) {
 	if err := validateOpenDecision(d, ctx); err == nil {
 		t.Fatal("低置信度 short 应被 open gate 拒绝")
 	}
+}
+
+func openGateHasReason(result OpenGateResult, needle string) bool {
+	for _, reason := range result.Reasons {
+		if strings.Contains(reason, needle) {
+			return true
+		}
+	}
+	return false
 }
