@@ -3,7 +3,7 @@
 package chanlunv2
 
 /*
-#cgo LDFLAGS: -L${SRCDIR}/../../lib -lchanlun_v2 -lm
+#cgo LDFLAGS: -L/usr/local/lib -lchanlun_v2 -lm
 #include <stdlib.h>
 #include <string.h>
 

@@ -43,8 +43,7 @@ RUN apk add --no-cache musl-dev
 WORKDIR /build
 COPY chanlun_v2/ .
 RUN cargo build --release && \
-    cp target/release/libchanlun_v2.a /usr/local/lib/ && \
-    cp target/release/libchanlun_v2.so /usr/local/lib/ 2>/dev/null || true
+    cp target/release/libchanlun_v2.a /usr/local/lib/
 
 # ──────────────────────────────────────────────────────────────
 # Backend Build Stage (Go Application)
@@ -54,7 +53,7 @@ FROM golang:${GO_VERSION} AS backend-builder
 RUN apk update && apk add --no-cache git make gcc g++ musl-dev
 
 COPY --from=ta-lib-builder /usr/local /usr/local
-COPY --from=rust-builder /usr/local/lib/libchanlun_v2.* /usr/local/lib/
+COPY --from=rust-builder /usr/local/lib/libchanlun_v2.a /usr/local/lib/
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -68,10 +67,10 @@ RUN CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w" -o nofx .
 # ──────────────────────────────────────────────────────────────
 FROM alpine:${ALPINE_VERSION}
 
-RUN apk update && apk add --no-cache ca-certificates tzdata
+RUN apk update && apk add --no-cache ca-certificates tzdata libgcc
 
 COPY --from=ta-lib-builder /usr/local /usr/local
-COPY --from=rust-builder /usr/local/lib/libchanlun_v2.* /usr/local/lib/
+COPY --from=rust-builder /usr/local/lib/libchanlun_v2.a /usr/local/lib/
 WORKDIR /app
 COPY --from=backend-builder /app/nofx .
 

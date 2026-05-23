@@ -12,6 +12,7 @@ import (
 	"nofx/mcp"
 	"nofx/pool"
 	"nofx/strategy/chanlun"
+	"nofx/strategy/chanlunv2"
 	"strconv"
 	"strings"
 	"time"
@@ -219,6 +220,7 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 
 	var mcpClient *mcp.Client
 	var programmaticEngine *chanlun.Engine
+	var chanlunV2Engine ChanlunV2EngineInterface
 	if config.DecisionMode == "programmatic" {
 		config.ProgrammaticStrategyPolicy.DecisionMode = "programmatic"
 		engine, engineErr := chanlun.NewEngine(config.ProgrammaticStrategyPolicy)
@@ -231,8 +233,12 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 			programmaticEngine.Policy.StrategyName,
 			programmaticEngine.Policy.StrategyVersion)
 	} else if config.DecisionMode == "chanlun_v2" {
-		log.Printf("🧮 [%s] 使用缠论V2策略 (Rust引擎，待初始化)", config.Name)
-		// chanlunV2Engine 将在 strategy/chanlunv2 包实现后注入
+		v2Eng, v2Err := chanlunv2.NewEngine(config.ChanlunV2StrategyConfig)
+		if v2Err != nil {
+			return nil, fmt.Errorf("初始化缠论V2策略引擎失败: %w", v2Err)
+		}
+		chanlunV2Engine = v2Eng
+		log.Printf("🧮 [%s] 使用缠论V2策略 (Rust引擎)", config.Name)
 	} else {
 		mcpClient = mcp.New()
 		// 初始化AI
@@ -303,6 +309,7 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		trader:                trader,
 		mcpClient:             mcpClient,
 		programmaticEngine:    programmaticEngine,
+		chanlunV2Engine:       chanlunV2Engine,
 		decisionLogger:        decisionLogger,
 		initialBalance:        config.InitialBalance,
 		lastResetTime:         time.Now(),
