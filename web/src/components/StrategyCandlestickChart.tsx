@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import type { MarketKline, SignalMarker } from '../types';
 import {
   compareVisualMarkers,
@@ -53,6 +53,7 @@ export function StrategyCandlestickChart({
   error,
 }: StrategyCandlestickChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<HoverState | null>(null);
 
   const visualMarkers = useMemo(
@@ -89,6 +90,14 @@ export function StrategyCandlestickChart({
     return { candleWidth, points, priceToY, width, min: paddedMin, max: paddedMax };
   }, [klines, visualMarkers]);
 
+  const latestCloseTime = klines?.[klines.length - 1]?.close_time ?? null;
+
+  useLayoutEffect(() => {
+    const scrollContainer = scrollContainerRef.current;
+    if (!scrollContainer) return;
+    scrollContainer.scrollLeft = Math.max(0, scrollContainer.scrollWidth - scrollContainer.clientWidth);
+  }, [symbol, timeframe, latestCloseTime, chart.width]);
+
   if (error) {
     return <ChartShell symbol={symbol} timeframe={timeframe} meta="K线接口异常">
       <div className="h-80 flex items-center justify-center text-sm" style={{ color: '#F6465D' }}>{error}</div>
@@ -123,7 +132,7 @@ export function StrategyCandlestickChart({
   return (
     <ChartShell symbol={symbol} timeframe={timeframe} meta={meta}>
       <div ref={containerRef} className="relative">
-        <div className="overflow-x-auto pb-2">
+        <div ref={scrollContainerRef} className="overflow-x-auto pb-2">
           <svg
             role="img"
             aria-label={`${symbol} ${timeframe} 主交易K线`}
