@@ -2,19 +2,19 @@
 
 ## Phase 1: Baseline And Fixtures
 
-- [ ] 1. Save a sanitized 161 log analysis fixture for V2 stale cases
+- [x] 1. Save a sanitized 161 log analysis fixture for V2 stale cases
   - Include BNBUSDT, CLUSDT, DOGEUSDT, HYPEUSDT stale examples without secrets.
   - Keep runtime `decision_logs/` out of source control; store only minimal test fixture under `strategy/chanlunv2/testdata/`.
   - Verify fixture covers ages 3, 8, 19, 27, 58 trade candles.
 
-- [ ] 2. Add a V2 log analysis test/helper
+- [x] 2. Add a V2 log analysis test/helper
   - Parse `DecisionRecord` actions and freshness metadata.
   - Assert stale parent structures do not become executable open decisions.
   - Assert zero quantity open attempts are represented as rejection in new flow.
 
 ## Phase 2: Config And Lifecycle State
 
-- [ ] 3. Add `chanlun_v2_strategy.entry_timing` config
+- [x] 3. Add `chanlun_v2_strategy.entry_timing` config
   - Define config struct, defaults and validation.
   - Mirror programmatic `entry_timing.entry_zone` shape for `max_chase_ratio`, `min_remaining_net_rr` and `max_chase_atr_multiplier`.
   - Add `third_point_quality` config for `G/R/N/G_ATR` thresholds with ATR/percentile/timeframe-normalized defaults.
@@ -22,12 +22,12 @@
   - Include defaults in config hash.
   - Add config tests for old config compatibility and override behavior.
 
-- [ ] 4. Add `chanlun_v2_strategy.position_management` config
+- [x] 4. Add `chanlun_v2_strategy.position_management` config
   - Define breakeven, partial TP, structure break, floating drawdown and reverse close options.
   - Set conservative defaults and validation.
   - Add config tests.
 
-- [ ] 5. Implement V2 lifecycle state store
+- [x] 5. Implement V2 lifecycle state store
   - Add in-memory map with mutex under `strategy/chanlunv2.Engine`.
   - Add optional persistence path under `data/`.
   - Add lifecycle statuses and terminal reason codes.
@@ -35,31 +35,31 @@
 
 ## Phase 3: Parent Structure Layer
 
-- [ ] 6. Split V2 structure signal conversion from open decision creation
+- [x] 6. Split V2 structure signal conversion from open decision creation
   - Convert trade timeframe signals into parent structure markers first.
   - Keep existing strategy check marker behavior for structure visibility.
   - Do not create open-like decisions when direct open is disabled.
 
-- [ ] 7. Add parent structure terminal checks
+- [x] 7. Add parent structure terminal checks
   - Target crossed.
   - Remaining RR below threshold.
   - Watch window expired.
   - Invalid stop/take-profit structure.
   - Persist terminal lifecycle state and diagnostics.
 
-- [ ] 8. Add regression tests for 161 stale parent structures
+- [x] 8. Add regression tests for 161 stale parent structures
   - BNB-like age 19/20 should be background or terminal, not open.
   - CLUSDT-like age 8/9 should not enter open gate.
   - DOGE buy3 age 58 should be terminal.
 
 ## Phase 4: Entry Trigger Layer
 
-- [ ] 9. Implement `EntryTrigger` model and stable ID helper
+- [x] 9. Implement `EntryTrigger` model and stable ID helper
   - Include parent signal lineage.
   - Include trigger close time and trigger timeframe.
   - Ensure IDs change for new triggers but remain stable across repeated scans of the same trigger K line.
 
-- [ ] 10. Implement 15m pullback/retest/resume trigger
+- [x] 10. Implement 15m pullback/retest/resume trigger
   - Use closed 15m K lines from prepared market data.
   - Confirm direction, entry zone and RR.
   - Compute side-aware `P0/P1/G/R/N/G_ATR` for third buy/sell quality when the trigger is breakout-retest based.
@@ -69,13 +69,13 @@
   - Reject `G <= 0`, excessive `G_ATR`, excessive `R`, and overlong `N` according to config.
   - Add tests for long, short and missing-center fallback.
 
-- [ ] 11. Implement continuation and micro confirmation trigger rules
+- [x] 11. Implement continuation and micro confirmation trigger rules
   - Add `breakout_continuation`.
   - Add optional `micro_reversal_confirm` using 3m data.
   - Ensure V2 trigger type normalization accepts `micro_reversal_confirm` instead of reusing the V1 allowed list unchanged.
   - Keep default allowed types configurable.
 
-- [ ] 12. Convert valid entry triggers into open decisions
+- [x] 12. Convert valid entry triggers into open decisions
   - Use `entry_trigger_id` as executable signal ID.
   - Use `trigger_close_time` for executable freshness.
   - Update V2 freshness metadata precedence so `entry_trigger_close_time` / `trigger_close_time` wins over parent structure time for entry-trigger opens.
@@ -83,7 +83,7 @@
   - Preserve `parent_signal_id` and `parent_signal_close_time`.
   - Add tests proving parent old + trigger fresh can pass freshness.
 
-- [ ] 13. Add trigger rejection and quality diagnostics
+- [x] 13. Add trigger rejection and quality diagnostics
   - `entry_trigger_expired`
   - `entry_zone_chased`
   - `entry_rr_invalid`
@@ -96,7 +96,7 @@
 
 ## Phase 5: Open Validation And Sizing Fail-Safe
 
-- [ ] 14. Tighten V2 open sizing fail-safe
+- [x] 14. Tighten V2 open sizing fail-safe
   - Ensure open-like V2 decisions cannot reach exchange execution with `Quantity <= 0`.
   - Convert zero quantity/min notional/margin failures to `open_rejected`.
   - Ensure deterministic execution-layer open failures are caught before exchange calls or recorded as `open_rejected`, not failed `open_long/open_short`.
@@ -119,22 +119,22 @@
 
 ## Phase 6: Position Management
 
-- [ ] 17. Implement V2 breakeven stop movement decision
+- [x] 17. Implement V2 breakeven stop movement decision
   - Trigger by R multiple or profit pct.
   - Include fee/buffer.
   - Use `CancelStopLossOrders()` for stop-loss adjustment only.
 
-- [ ] 18. Implement V2 partial take profit decision
+- [x] 18. Implement V2 partial take profit decision
   - Trigger by R multiple or structure target.
   - Enforce per-position cooldown and max partial count.
   - Use `CancelTakeProfitOrders()` only for take-profit replacement.
 
-- [ ] 19. Implement V2 structure break close/partial close
+- [x] 19. Implement V2 structure break close/partial close
   - Use 15m or configured timeframe.
   - Confirm close beyond structure level for configured bars.
   - Add long and short tests.
 
-- [ ] 20. Implement V2 floating drawdown management
+- [x] 20. Implement V2 floating drawdown management
   - Track peak favorable R/pct after activation.
   - Close partial or full according to config.
   - Add tests for activation and non-activation cases.
@@ -153,7 +153,7 @@
   - Add close reason distribution.
   - Add rejection reason categories.
 
-- [ ] 23. Extend marker metadata
+- [x] 23. Extend marker metadata
   - Add parent/trigger lineage fields.
   - Add structure-to-trigger latency.
   - Add third-point quality fields: `third_point_quality_category`, `support_gap_pct`, `support_gap_atr`, `retracement_ratio`, `pullback_candles`.
@@ -168,19 +168,19 @@
 
 ## Phase 8: Validation
 
-- [ ] 25. Run targeted backend tests
+- [x] 25. Run targeted backend tests
   - `CGO_ENABLED=0 go test ./config ./strategy/chanlunv2`
   - `CGO_ENABLED=0 go test ./decision ./trader ./logger`
   - `CGO_ENABLED=0 go test ./api ./manager`
 
-- [ ] 26. Run frontend tests/build if UI or TypeScript changes
+- [x] 26. Run frontend tests/build if UI or TypeScript changes
   - `cd web && npm run test`
   - `cd web && npm run build`
 
-- [ ] 27. Run full backend build
+- [x] 27. Run full backend build
   - `CGO_ENABLED=0 go build ./...`
 
-- [ ] 28. Perform consistency review
+- [x] 28. Perform consistency review
   - Cross-check requirements, design, tasks and code paths.
   - Confirm no runtime logs, data files or credentials are included.
   - Confirm no test can place real exchange orders.

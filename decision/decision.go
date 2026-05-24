@@ -390,7 +390,7 @@ func buildOpenRejection(d Decision, ctx *Context, reason string) OpenRejection {
 }
 
 func NewOpenRejectionFromDecision(d Decision, reason string) OpenRejection {
-	signalClose, _ := decisionMetadataInt64Any(d.StrategyMetadata, "signal_close_time", "trigger_close_time", "segment_end_time")
+	signalClose, _ := decisionMetadataInt64Any(d.StrategyMetadata, "entry_trigger_close_time", "trigger_close_time", "signal_close_time", "segment_end_time")
 	decisionClose, _ := decisionMetadataInt64Any(d.StrategyMetadata, "decision_close_time")
 	evaluationClose, _ := decisionMetadataInt64Any(d.StrategyMetadata, "evaluation_close_time", "decision_close_time")
 	actionTimestamp, _ := decisionMetadataInt64Any(d.StrategyMetadata, "action_timestamp")

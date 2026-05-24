@@ -18,6 +18,9 @@ type Engine struct {
 	latestSignals     map[string]*chanlunSignalReport
 	symbolUniverse    map[string][]chanlunStrategySymbol
 	staleSuppressions map[string]chanlunV2StaleSuppression
+	lifecycleStates   map[string]SignalLifecycleState
+	lifecycleLoaded   map[string]bool
+	positionStates    map[string]PositionManagementState
 	configHash        string
 }
 
@@ -58,6 +61,9 @@ func NewEngine(cfg config.ChanlunV2StrategyConfig) (*Engine, error) {
 		latestSignals:     map[string]*chanlunSignalReport{},
 		symbolUniverse:    map[string][]chanlunStrategySymbol{},
 		staleSuppressions: map[string]chanlunV2StaleSuppression{},
+		lifecycleStates:   map[string]SignalLifecycleState{},
+		lifecycleLoaded:   map[string]bool{},
+		positionStates:    map[string]PositionManagementState{},
 		configHash:        hashChanlunV2Config(cfg),
 	}, nil
 }
@@ -89,6 +95,16 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 	var downgradedStaleSignals []string
 	rawSignalCount := 0
 	activeSignalCount := 0
+	parentStructureCount := 0
+	entryTriggerCount := 0
+	triggerRejectionReasons := map[string]int{}
+
+	// 持仓管理优先产出风险降低动作，后续开仓候选不能阻塞这些动作。
+	posDecisions := e.managePositions(ctx, timeframes)
+	for _, d := range posDecisions {
+		e.appendDecisionMarker(ctx.TraderID, d)
+	}
+	allDecisions = append(allDecisions, posDecisions...)
 
 	// 对每个标的进行多级别分析
 	for _, symbol := range symbols {
@@ -112,31 +128,38 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		rawSignalCount += len(signals)
 		e.setLatestReport(ctx.TraderID, symbol, multiResult, signals, symbolDiagnostics)
 
-		// 信号转 Decision
+		// 父结构先入生命周期；可执行开仓只来自direct结构窗口或fresh entry trigger。
 		decisionCloseTime := evaluationCloseTime(multiResult, "trade")
 		for _, sig := range signals {
-			d := e.signalToDecision(ctx, symbol, sig, timeframes["trade"], decisionCloseTime)
-			if d.Action != "" {
-				if downgraded, diagnostic := e.downgradeExpiredChanlunV2Signal(ctx, d, timeframes["trade"]); downgraded {
-					if diagnostic != "" {
-						diagnostics = append(diagnostics, diagnostic)
-						downgradedStaleSignals = append(downgradedStaleSignals, diagnostic)
-					}
-					continue
-				}
-				allDecisions = append(allDecisions, d)
-				activeSignalCount++
-				diagnostics = append(diagnostics, fmt.Sprintf("%s %s 置信度%d", symbol, sig.SignalType, sig.Confidence))
+			evaluation := e.evaluateParentStructureEntry(ctx, symbol, sig, multiResult, timeframes, decisionCloseTime)
+			if evaluation.ParentSeen {
+				parentStructureCount++
 			}
+			if len(evaluation.Diagnostics) > 0 {
+				diagnostics = append(diagnostics, evaluation.Diagnostics...)
+			}
+			if evaluation.TriggerRejected && evaluation.ReasonCode != "" {
+				triggerRejectionReasons[evaluation.ReasonCode]++
+			}
+			d := evaluation.Decision
+			if d.Action == "" {
+				continue
+			}
+			if downgraded, diagnostic := e.downgradeExpiredChanlunV2Signal(ctx, d, timeframes["trade"]); downgraded {
+				if diagnostic != "" {
+					diagnostics = append(diagnostics, diagnostic)
+					downgradedStaleSignals = append(downgradedStaleSignals, diagnostic)
+				}
+				continue
+			}
+			allDecisions = append(allDecisions, d)
+			activeSignalCount++
+			if evaluation.TriggerReady && metadataString(d.StrategyMetadata, "layer") == v2LayerEntryTrigger {
+				entryTriggerCount++
+			}
+			diagnostics = append(diagnostics, fmt.Sprintf("%s %s 置信度%d", symbol, sig.SignalType, sig.Confidence))
 		}
 	}
-
-	// 持仓管理
-	posDecisions := e.managePositions(ctx, timeframes)
-	for _, d := range posDecisions {
-		e.appendDecisionMarker(ctx.TraderID, d)
-	}
-	allDecisions = append(posDecisions, allDecisions...)
 
 	rawDecisions := append([]decision.Decision(nil), allDecisions...)
 	allDecisions, freshnessRejections, freshnessSuppressed := e.applyChanlunV2FreshnessGuard(ctx, allDecisions, timeframes)
@@ -187,16 +210,19 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		ConfigHash:      e.configHash,
 		OpenRejections:  openRejections,
 		StrategyDiagnostics: map[string]any{
-			"messages":                 diagnostics,
-			"timeframes":               timeframes,
-			"symbols":                  symbols,
-			"raw_signal_count":         rawSignalCount,
-			"signal_count":             activeSignalCount,
-			"downgraded_stale_signals": append([]string(nil), downgradedStaleSignals...),
-			"open_rejections":          chanlunV2OpenRejectionReasons(openRejections),
-			"freshness_rejections":     chanlunV2OpenRejectionReasons(freshnessRejections),
-			"freshness_suppressed":     append([]string(nil), freshnessSuppressed...),
-			"validation_rejections":    chanlunV2OpenRejectionReasons(validationRejections),
+			"messages":                  diagnostics,
+			"timeframes":                timeframes,
+			"symbols":                   symbols,
+			"raw_signal_count":          rawSignalCount,
+			"signal_count":              activeSignalCount,
+			"parent_structure_count":    parentStructureCount,
+			"entry_trigger_count":       entryTriggerCount,
+			"trigger_rejection_reasons": triggerRejectionReasons,
+			"downgraded_stale_signals":  append([]string(nil), downgradedStaleSignals...),
+			"open_rejections":           chanlunV2OpenRejectionReasons(openRejections),
+			"freshness_rejections":      chanlunV2OpenRejectionReasons(freshnessRejections),
+			"freshness_suppressed":      append([]string(nil), freshnessSuppressed...),
+			"validation_rejections":     chanlunV2OpenRejectionReasons(validationRejections),
 		},
 	}, nil
 }
@@ -456,12 +482,16 @@ func (e *Engine) enrichChanlunV2FreshnessMetadata(ctx *decision.Context, d decis
 	if d.StrategyMetadata == nil {
 		d.StrategyMetadata = map[string]any{}
 	}
-	signalClose := firstPositiveInt64(metadataInt64(d.StrategyMetadata, "signal_close_time"), metadataInt64(d.StrategyMetadata, "trigger_close_time"), metadataInt64(d.StrategyMetadata, "segment_end_time"))
+	evaluationTF := tradeTF
+	if metadataString(d.StrategyMetadata, "layer") == v2LayerEntryTrigger {
+		evaluationTF = firstNonEmptyString(metadataString(d.StrategyMetadata, "entry_trigger_timeframe"), metadataString(d.StrategyMetadata, "timeframe"), d.SignalTimeframe, tradeTF)
+	}
+	signalClose := firstPositiveInt64(metadataInt64(d.StrategyMetadata, "entry_trigger_close_time"), metadataInt64(d.StrategyMetadata, "trigger_close_time"), metadataInt64(d.StrategyMetadata, "signal_close_time"), metadataInt64(d.StrategyMetadata, "segment_end_time"))
 	decisionClose := firstPositiveInt64(metadataInt64(d.StrategyMetadata, "decision_close_time"), metadataInt64(d.StrategyMetadata, "evaluation_close_time"), signalClose)
 	if decisionClose > 0 && signalClose > 0 && decisionClose < signalClose {
 		decisionClose = signalClose
 	}
-	ageCandles := signalAgeCandles(signalClose, decisionClose, tradeTF)
+	ageCandles := signalAgeCandles(signalClose, decisionClose, evaluationTF)
 	softAge, maxLifetime := e.chanlunV2FreshnessLimits(policy, d.SignalType)
 	freshnessState := "fresh"
 	if ageCandles > maxLifetime {
@@ -469,7 +499,7 @@ func (e *Engine) enrichChanlunV2FreshnessMetadata(ctx *decision.Context, d decis
 	} else if ageCandles > softAge {
 		freshnessState = "aged"
 	}
-	currentPrice := currentPriceForV2Guard(ctx, d.Symbol, tradeTF)
+	currentPrice := currentPriceForV2Guard(ctx, d.Symbol, evaluationTF)
 	minRR := e.minRemainingNetRR(ctx, policy)
 	d.StrategyMetadata["signal_close_time"] = signalClose
 	d.StrategyMetadata["decision_close_time"] = decisionClose
@@ -481,7 +511,7 @@ func (e *Engine) enrichChanlunV2FreshnessMetadata(ctx *decision.Context, d decis
 	d.StrategyMetadata["current_price"] = currentPrice
 	d.StrategyMetadata["min_remaining_net_rr"] = minRR
 	return d, chanlunV2FreshnessEvaluation{
-		TradeTimeframe:      tradeTF,
+		TradeTimeframe:      evaluationTF,
 		SignalCloseTime:     signalClose,
 		DecisionCloseTime:   decisionClose,
 		EvaluationCloseTime: decisionClose,
@@ -500,51 +530,8 @@ func (e *Engine) managePositions(ctx *decision.Context, timeframes map[string]st
 	}
 	var decisions []decision.Decision
 	for _, pos := range ctx.Positions {
-		mr := e.analyzeSymbolFromContext(ctx, pos.Symbol, timeframes)
-		if mr == nil {
-			continue
-		}
-		decisionCloseTime := evaluationCloseTime(mr, "trade")
-		tradeResult, ok := mr.Results["trade"]
-		if !ok {
-			continue
-		}
-		// 反向信号出现 → 平仓
-		for _, sig := range tradeResult.Signals {
-			if (pos.Side == "LONG" && sig.Direction == "short" && sig.Confidence >= 60) ||
-				(pos.Side == "SHORT" && sig.Direction == "long" && sig.Confidence >= 60) {
-				closeAction := "close_long"
-				if pos.Side == "SHORT" {
-					closeAction = "close_short"
-				}
-				signalCloseTime := normalizeV2EpochMillis(sig.Timestamp)
-				if decisionCloseTime > 0 && signalCloseTime > 0 && decisionCloseTime < signalCloseTime {
-					decisionCloseTime = signalCloseTime
-				}
-				decisions = append(decisions, decision.Decision{
-					Symbol:          pos.Symbol,
-					Action:          closeAction,
-					Reasoning:       fmt.Sprintf("缠论V2反向信号 %s 置信度%d", sig.SignalType, sig.Confidence),
-					StrategyMode:    "chanlun_v2",
-					StrategyName:    "chanlun_v2",
-					StrategyVersion: "v0.1",
-					ConfigHash:      e.configHash,
-					SignalID:        v2SignalID(pos.Symbol, timeframes["trade"], sig),
-					SignalType:      sig.SignalType,
-					SignalTimeframe: timeframes["trade"],
-					StrategyMetadata: map[string]any{
-						"layer":                 "position_management",
-						"timeframe":             timeframes["trade"],
-						"trade_intent":          closeAction,
-						"signal_close_time":     signalCloseTime,
-						"decision_close_time":   decisionCloseTime,
-						"evaluation_close_time": decisionCloseTime,
-						"position_side":         strings.ToLower(pos.Side),
-						"reason_code":           "chanlun_v2_reverse_signal",
-					},
-				})
-				break
-			}
+		if d := e.evaluateV2PositionManagement(ctx, pos, timeframes); d.Action != "" {
+			decisions = append(decisions, d)
 		}
 	}
 	return decisions
@@ -574,6 +561,7 @@ func (e *Engine) applyChanlunV2FreshnessGuard(ctx *decision.Context, decisions [
 		softAge := eval.SoftAgeCandles
 		maxLifetime := eval.MaxLifetimeCandles
 		freshnessState := eval.FreshnessState
+		evaluationTF := firstNonEmptyString(eval.TradeTimeframe, tradeTF)
 		currentPrice := eval.CurrentPrice
 		minRR := eval.MinRemainingNetRR
 
@@ -625,13 +613,13 @@ func (e *Engine) applyChanlunV2FreshnessGuard(ctx *decision.Context, decisions [
 
 		if currentPrice > 0 && policy.MissedTargetGuard != nil && *policy.MissedTargetGuard {
 			if targetCrossed(d.Action, currentPrice, d.TakeProfit) {
-				reason := fmt.Sprintf("%s %s 被信号新鲜度门控拒绝: 目标已穿越，当前价%.6f 目标%.6f，信号年龄%d根%s", d.Symbol, d.Action, currentPrice, d.TakeProfit, ageCandles, tradeTF)
+				reason := fmt.Sprintf("%s %s 被信号新鲜度门控拒绝: 目标已穿越，当前价%.6f 目标%.6f，信号年龄%d根%s", d.Symbol, d.Action, currentPrice, d.TakeProfit, ageCandles, evaluationTF)
 				reject("target_crossed", "freshness_gate.target_crossed", reason, map[string]any{"target_crossed": true})
 				continue
 			}
 		}
 		if freshnessState == "expired" {
-			reason := fmt.Sprintf("%s %s 被信号新鲜度门控拒绝: 信号已过期，年龄%d根%s超过硬上限%d根，结构时间=%d 评估K线=%d", d.Symbol, d.Action, ageCandles, tradeTF, maxLifetime, signalClose, decisionClose)
+			reason := fmt.Sprintf("%s %s 被信号新鲜度门控拒绝: 信号已过期，年龄%d根%s超过硬上限%d根，结构时间=%d 评估K线=%d", d.Symbol, d.Action, ageCandles, evaluationTF, maxLifetime, signalClose, decisionClose)
 			reject("expired", "freshness_gate.signal_expired", reason, nil)
 			continue
 		}
@@ -648,7 +636,7 @@ func (e *Engine) applyChanlunV2FreshnessGuard(ctx *decision.Context, decisions [
 			d.StrategyMetadata["freshness_diagnostic"] = "缺少当前价，已跳过目标穿越和剩余RR检查"
 		}
 		if freshnessState == "aged" {
-			agedReason := fmt.Sprintf("信号老化%d根%s，超过soft阈值%d根", ageCandles, tradeTF, softAge)
+			agedReason := fmt.Sprintf("信号老化%d根%s，超过soft阈值%d根", ageCandles, evaluationTF, softAge)
 			d.StrategyMetadata["stale_reason"] = agedReason
 			decay := (ageCandles - softAge) * policy.ConfidenceDecayPerAgedCandle
 			if decay > 0 {
@@ -798,10 +786,12 @@ func (e *Engine) validateChanlunV2Decisions(ctx *decision.Context, decisions []d
 		riskReducing = append(riskReducing, d)
 	}
 	if len(openLike) == 0 {
-		return decisions, nil
+		validRisk, riskRejections := decision.ValidateRiskReducingStrategyDecisions(ctx, riskReducing, decision.RiskReducingValidationOptions{Source: "chanlun_v2"})
+		return validRisk, riskRejections
 	}
 
 	if prep != nil && prep.RiskIncreaseBlocked {
+		validRisk, riskRejections := decision.ValidateRiskReducingStrategyDecisions(ctx, riskReducing, decision.RiskReducingValidationOptions{Source: "chanlun_v2"})
 		rejections := make([]decision.OpenRejection, 0, len(openLike))
 		reason := strings.TrimSpace(prep.StopReason)
 		if reason == "" {
@@ -810,14 +800,62 @@ func (e *Engine) validateChanlunV2Decisions(ctx *decision.Context, decisions []d
 		for _, d := range openLike {
 			rejections = append(rejections, decision.NewOpenRejectionFromDecision(d, fmt.Sprintf("%s %s 被拒绝: %s", d.Symbol, d.Action, reason)))
 		}
-		return riskReducing, rejections
+		rejections = append(riskRejections, rejections...)
+		return validRisk, rejections
 	}
 
 	validOpenLike, rejections := decision.ValidateStrategyDecisions(ctx, openLike, decision.StrategyValidationOptions{
 		Source: "chanlun_v2",
 	})
-	valid := append(riskReducing, validOpenLike...)
+	rejections = annotateChanlunV2SizingRejections(rejections)
+	validRisk, riskRejections := decision.ValidateRiskReducingStrategyDecisions(ctx, riskReducing, decision.RiskReducingValidationOptions{Source: "chanlun_v2"})
+	rejections = append(riskRejections, rejections...)
+	valid := append(validRisk, validOpenLike...)
 	return valid, rejections
+}
+
+func annotateChanlunV2SizingRejections(rejections []decision.OpenRejection) []decision.OpenRejection {
+	for i := range rejections {
+		reason := strings.ToLower(rejections[i].Reason)
+		reasonCode := ""
+		switch {
+		case strings.Contains(reason, "仓位大小必须>0") || strings.Contains(reason, "position size"):
+			reasonCode = "position_sizing.zero_quantity"
+		case strings.Contains(reason, "最小下单额") || strings.Contains(reason, "低于最小"):
+			reasonCode = "position_sizing.min_notional"
+		case strings.Contains(reason, "保证金") || strings.Contains(reason, "margin"):
+			reasonCode = "position_sizing.margin_insufficient"
+		case strings.Contains(reason, "sizing不可执行"):
+			reasonCode = "position_sizing.not_executable"
+		}
+		if reasonCode == "" {
+			continue
+		}
+		if len(rejections[i].GateReasons) == 0 {
+			rejections[i].GateReasons = []string{reasonCode}
+		} else if !stringSliceContains(rejections[i].GateReasons, reasonCode) {
+			rejections[i].GateReasons = append([]string{reasonCode}, rejections[i].GateReasons...)
+		}
+		if rejections[i].GateDiagnostics == nil {
+			rejections[i].GateDiagnostics = map[string]any{}
+		}
+		rejections[i].GateDiagnostics["reason_code"] = reasonCode
+		rejections[i].GateDiagnostics["source"] = "position_sizing"
+		if rejections[i].StrategyMetadata == nil {
+			rejections[i].StrategyMetadata = map[string]any{}
+		}
+		rejections[i].StrategyMetadata["reason_code"] = reasonCode
+	}
+	return rejections
+}
+
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) marketHistoryDepth(timeframes map[string]string) map[string]int {

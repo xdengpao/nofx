@@ -324,6 +324,94 @@ func TestValidateChanlunV2TraderNormalizesSignalFreshness(t *testing.T) {
 	}
 }
 
+func TestNormalizeChanlunV2EntryTimingDefaultsAndOverrides(t *testing.T) {
+	profile := NormalizeChanlunV2EntryTiming(ChanlunV2EntryTimingConfig{
+		WatchTimeframe:       "bad",
+		WatchMaxCandles:      -1,
+		TriggerTimeframe:     "3m",
+		MaxTriggerAgeCandles: 3,
+		AllowedTriggerTypes:  []string{" pullback_retest_resume ", "guess", "micro_reversal_confirm"},
+		MinTriggerConfidence: 72,
+		EntryZone: ChanlunV2EntryZoneConfig{
+			MaxChaseRatio:         0.25,
+			MinRemainingNetRR:     3.2,
+			MaxChaseATRMultiplier: 0.8,
+		},
+		ThirdPointQuality: ChanlunV2ThirdPointQualityConfig{
+			QualityTimeframe:     "trigger",
+			MaxSupportGapATR:     0.9,
+			MaxRetracementRatio:  0.4,
+			MaxPullbackCandles:   4,
+			RangePullbackCandles: 7,
+		},
+	})
+	if profile.Enabled == nil || !*profile.Enabled || profile.WatchTimeframe != "15m" || profile.WatchMaxCandles != 8 {
+		t.Fatalf("entry_timing默认值错误: %+v", profile)
+	}
+	if profile.TriggerTimeframe != "3m" || profile.MaxTriggerAgeCandles != 3 || profile.MinTriggerConfidence != 72 {
+		t.Fatalf("entry_timing override未生效: %+v", profile)
+	}
+	if len(profile.AllowedTriggerTypes) != 2 || profile.AllowedTriggerTypes[1] != "micro_reversal_confirm" {
+		t.Fatalf("allowed_trigger_types应过滤非法值并保留micro: %+v", profile.AllowedTriggerTypes)
+	}
+	if profile.EntryZone.MaxChaseRatio != 0.25 || profile.EntryZone.MinRemainingNetRR != 3.2 || profile.EntryZone.MaxChaseATRMultiplier != 0.8 {
+		t.Fatalf("entry_zone override未生效: %+v", profile.EntryZone)
+	}
+	if profile.ThirdPointQuality.QualityTimeframe != "trigger" || profile.ThirdPointQuality.MaxSupportGapATR != 0.9 ||
+		profile.ThirdPointQuality.MaxRetracementRatio != 0.4 || profile.ThirdPointQuality.MaxPullbackCandles != 4 ||
+		profile.ThirdPointQuality.RangePullbackCandles != 7 {
+		t.Fatalf("third_point_quality override未生效: %+v", profile.ThirdPointQuality)
+	}
+}
+
+func TestNormalizeChanlunV2PositionManagementDefaultsAndOverrides(t *testing.T) {
+	disabled := false
+	profile := NormalizeChanlunV2PositionManagement(ChanlunV2PositionManagementConfig{
+		BreakevenEnabled:                &disabled,
+		BreakevenTriggerR:               1.2,
+		PartialTakeProfitR:              2,
+		PartialTakeProfitPct:            40,
+		StructureBreakTimeframe:         "1h",
+		StructureBreakConfirmBars:       3,
+		FloatingDrawdownActivationR:     2.5,
+		FloatingDrawdownPct:             30,
+		ReverseSignalMinConfidence:      75,
+		PartialCloseCooldownMinutes:     20,
+		MaxPartialCloseCountPerPosition: 3,
+		MaxTotalPartialClosePct:         70,
+	})
+	if profile.Enabled == nil || !*profile.Enabled || profile.BreakevenEnabled == nil || *profile.BreakevenEnabled {
+		t.Fatalf("position_management enabled默认/override错误: %+v", profile)
+	}
+	if profile.BreakevenTriggerR != 1.2 || profile.PartialTakeProfitR != 2 || profile.PartialTakeProfitPct != 40 ||
+		profile.StructureBreakTimeframe != "1h" || profile.StructureBreakConfirmBars != 3 ||
+		profile.FloatingDrawdownActivationR != 2.5 || profile.FloatingDrawdownPct != 30 ||
+		profile.ReverseSignalMinConfidence != 75 || profile.PartialCloseCooldownMinutes != 20 ||
+		profile.MaxPartialCloseCountPerPosition != 3 || profile.MaxTotalPartialClosePct != 70 {
+		t.Fatalf("position_management override未生效: %+v", profile)
+	}
+}
+
+func TestValidateChanlunV2TraderNormalizesEntryExitDefaults(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].DecisionMode = DecisionModeChanlunV2
+	cfg.Traders[0].AIModel = ""
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("chanlun_v2旧配置不应要求entry/exit新增字段: %v", err)
+	}
+	timing := cfg.Traders[0].ChanlunV2Strategy.EntryTiming
+	if timing.Enabled == nil || !*timing.Enabled || timing.DirectStructureOpen || timing.WatchTimeframe != "15m" ||
+		timing.TriggerTimeframe != "15m" || timing.EntryZone.MinRemainingNetRR != 2.5 ||
+		timing.ThirdPointQuality.Enabled == nil || !*timing.ThirdPointQuality.Enabled {
+		t.Fatalf("Validate应写回entry_timing保守默认: %+v", timing)
+	}
+	pm := cfg.Traders[0].ChanlunV2Strategy.PositionManagement
+	if pm.Enabled == nil || !*pm.Enabled || pm.BreakevenTriggerR != 1 || pm.PartialTakeProfitR != 1.5 ||
+		pm.StructureBreakTimeframe != "15m" || pm.ReverseSignalMinConfidence != 60 {
+		t.Fatalf("Validate应写回position_management保守默认: %+v", pm)
+	}
+}
+
 func TestNormalizeTradingFrequency_InvalidValues(t *testing.T) {
 	tests := []struct {
 		name string

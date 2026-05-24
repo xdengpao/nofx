@@ -56,16 +56,19 @@ type LeverageConfig struct {
 
 // ChanlunV2StrategyConfig 基于 Rust 缠论库的 v2 策略配置
 type ChanlunV2StrategyConfig struct {
-	Timeframes      map[string]string              `json:"timeframes,omitempty"`    // higher/trade/sub/micro → 4h/1h/15m/3m
-	HistoryDepth    map[string]int                 `json:"history_depth,omitempty"` // timeframe → kline count (700-1000)
-	SignalFreshness ChanlunV2SignalFreshnessConfig `json:"signal_freshness,omitempty"`
-	Structure       map[string]any                 `json:"structure,omitempty"`
-	Divergence      map[string]any                 `json:"divergence,omitempty"`
-	Signals         map[string]any                 `json:"signals,omitempty"`
-	Recursive       map[string]any                 `json:"recursive,omitempty"`
-	MultiLevel      map[string]any                 `json:"multi_level,omitempty"`
-	Position        map[string]any                 `json:"position,omitempty"`
-	Risk            map[string]any                 `json:"risk,omitempty"`
+	Timeframes         map[string]string                 `json:"timeframes,omitempty"`    // higher/trade/sub/micro → 4h/1h/15m/3m
+	HistoryDepth       map[string]int                    `json:"history_depth,omitempty"` // timeframe → kline count (700-1000)
+	SignalFreshness    ChanlunV2SignalFreshnessConfig    `json:"signal_freshness,omitempty"`
+	EntryTiming        ChanlunV2EntryTimingConfig        `json:"entry_timing,omitempty"`
+	PositionManagement ChanlunV2PositionManagementConfig `json:"position_management,omitempty"`
+	LifecycleStatePath string                            `json:"lifecycle_state_path,omitempty"`
+	Structure          map[string]any                    `json:"structure,omitempty"`
+	Divergence         map[string]any                    `json:"divergence,omitempty"`
+	Signals            map[string]any                    `json:"signals,omitempty"`
+	Recursive          map[string]any                    `json:"recursive,omitempty"`
+	MultiLevel         map[string]any                    `json:"multi_level,omitempty"`
+	Position           map[string]any                    `json:"position,omitempty"`
+	Risk               map[string]any                    `json:"risk,omitempty"`
 }
 
 // ChanlunV2SignalFreshnessConfig 控制缠论 V2 旧信号是否还能继续作为开仓候选。
@@ -78,6 +81,67 @@ type ChanlunV2SignalFreshnessConfig struct {
 	MissedTargetGuard            *bool          `json:"missed_target_guard,omitempty"`
 	ConfidenceDecayPerAgedCandle int            `json:"confidence_decay_per_aged_candle,omitempty"`
 	MinRemainingNetRR            float64        `json:"min_remaining_net_rr,omitempty"`
+}
+
+// ChanlunV2EntryTimingConfig 控制 V2 结构信号到可执行入场触发的转换。
+type ChanlunV2EntryTimingConfig struct {
+	Enabled                 *bool                            `json:"enabled,omitempty"`
+	DirectStructureOpen     bool                             `json:"direct_structure_open,omitempty"`
+	DirectOpenMaxAgeCandles int                              `json:"direct_open_max_age_candles,omitempty"`
+	WatchTimeframe          string                           `json:"watch_timeframe,omitempty"`
+	WatchMaxCandles         int                              `json:"watch_max_candles,omitempty"`
+	TriggerTimeframe        string                           `json:"trigger_timeframe,omitempty"`
+	MaxTriggerAgeCandles    int                              `json:"max_trigger_age_candles,omitempty"`
+	AllowedTriggerTypes     []string                         `json:"allowed_trigger_types,omitempty"`
+	MinTriggerConfidence    int                              `json:"min_trigger_confidence,omitempty"`
+	EntryZone               ChanlunV2EntryZoneConfig         `json:"entry_zone,omitempty"`
+	ThirdPointQuality       ChanlunV2ThirdPointQualityConfig `json:"third_point_quality,omitempty"`
+	PilotEnabled            bool                             `json:"pilot_enabled,omitempty"`
+	PilotRiskFraction       float64                          `json:"pilot_risk_fraction,omitempty"`
+}
+
+type ChanlunV2EntryZoneConfig struct {
+	Mode                  string  `json:"mode,omitempty"`
+	MaxChaseRatio         float64 `json:"max_chase_ratio,omitempty"`
+	MinRemainingNetRR     float64 `json:"min_remaining_net_rr,omitempty"`
+	MaxChaseATRMultiplier float64 `json:"max_chase_atr_multiplier,omitempty"`
+}
+
+type ChanlunV2ThirdPointQualityConfig struct {
+	Enabled                   *bool   `json:"enabled,omitempty"`
+	QualityTimeframe          string  `json:"quality_timeframe,omitempty"`
+	UseATRNormalization       *bool   `json:"use_atr_normalization,omitempty"`
+	UseSymbolPercentiles      bool    `json:"use_symbol_percentiles,omitempty"`
+	PercentileLookbackCandles int     `json:"percentile_lookback_candles,omitempty"`
+	MaxSupportGapPercentile   float64 `json:"max_support_gap_percentile,omitempty"`
+	MaxSupportGapPct          float64 `json:"max_support_gap_pct,omitempty"`
+	MaxSupportGapATR          float64 `json:"max_support_gap_atr,omitempty"`
+	MaxRetracementRatio       float64 `json:"max_retracement_ratio,omitempty"`
+	MaxPullbackCandles        int     `json:"max_pullback_candles,omitempty"`
+	RangePullbackCandles      int     `json:"range_pullback_candles,omitempty"`
+	RangeRiskFraction         float64 `json:"range_risk_fraction,omitempty"`
+}
+
+// ChanlunV2PositionManagementConfig 控制 V2 多层风险降低动作。
+type ChanlunV2PositionManagementConfig struct {
+	Enabled                         *bool   `json:"enabled,omitempty"`
+	BreakevenEnabled                *bool   `json:"breakeven_enabled,omitempty"`
+	BreakevenTriggerR               float64 `json:"breakeven_trigger_r,omitempty"`
+	BreakevenBufferPct              float64 `json:"breakeven_buffer_pct,omitempty"`
+	PartialTakeProfitEnabled        *bool   `json:"partial_take_profit_enabled,omitempty"`
+	PartialTakeProfitR              float64 `json:"partial_take_profit_r,omitempty"`
+	PartialTakeProfitPct            float64 `json:"partial_take_profit_pct,omitempty"`
+	StructureBreakEnabled           *bool   `json:"structure_break_enabled,omitempty"`
+	StructureBreakTimeframe         string  `json:"structure_break_timeframe,omitempty"`
+	StructureBreakConfirmBars       int     `json:"structure_break_confirm_bars,omitempty"`
+	FloatingDrawdownEnabled         *bool   `json:"floating_drawdown_enabled,omitempty"`
+	FloatingDrawdownActivationR     float64 `json:"floating_drawdown_activation_r,omitempty"`
+	FloatingDrawdownPct             float64 `json:"floating_drawdown_pct,omitempty"`
+	ReverseSignalCloseEnabled       *bool   `json:"reverse_signal_close_enabled,omitempty"`
+	ReverseSignalMinConfidence      int     `json:"reverse_signal_min_confidence,omitempty"`
+	PartialCloseCooldownMinutes     int     `json:"partial_close_cooldown_minutes,omitempty"`
+	MaxPartialCloseCountPerPosition int     `json:"max_partial_close_count_per_position,omitempty"`
+	MaxTotalPartialClosePct         float64 `json:"max_total_partial_close_pct,omitempty"`
 }
 
 // DynamicCandidatePoolConfig 动态候选池配置。
@@ -380,6 +444,8 @@ func (c DynamicCandidatePoolConfig) IsEnabled() bool {
 // NormalizeChanlunV2StrategyConfig 填充缠论 V2 运行时默认配置。
 func NormalizeChanlunV2StrategyConfig(cfg ChanlunV2StrategyConfig) ChanlunV2StrategyConfig {
 	cfg.SignalFreshness = NormalizeChanlunV2SignalFreshness(cfg.SignalFreshness)
+	cfg.EntryTiming = NormalizeChanlunV2EntryTiming(cfg.EntryTiming)
+	cfg.PositionManagement = NormalizeChanlunV2PositionManagement(cfg.PositionManagement)
 	return cfg
 }
 
@@ -430,6 +496,191 @@ func normalizeChanlunV2SignalAgeOverrides(values map[string]int, maxAllowed int)
 	}
 	if len(out) == 0 {
 		return nil
+	}
+	return out
+}
+
+// NormalizeChanlunV2EntryTiming 返回 V2 结构到入场触发的保守默认配置。
+func NormalizeChanlunV2EntryTiming(cfg ChanlunV2EntryTimingConfig) ChanlunV2EntryTimingConfig {
+	if cfg.Enabled == nil {
+		cfg.Enabled = boolPtr(true)
+	}
+	cfg.WatchTimeframe = normalizeChanlunV2Timeframe(cfg.WatchTimeframe, "15m")
+	if cfg.WatchMaxCandles <= 0 || cfg.WatchMaxCandles > 96 {
+		cfg.WatchMaxCandles = 8
+	}
+	cfg.TriggerTimeframe = normalizeChanlunV2Timeframe(cfg.TriggerTimeframe, cfg.WatchTimeframe)
+	if cfg.MaxTriggerAgeCandles <= 0 || cfg.MaxTriggerAgeCandles > 16 {
+		cfg.MaxTriggerAgeCandles = 1
+	}
+	if cfg.DirectOpenMaxAgeCandles < 0 || cfg.DirectOpenMaxAgeCandles > 16 {
+		cfg.DirectOpenMaxAgeCandles = 0
+	}
+	cfg.AllowedTriggerTypes = normalizeChanlunV2TriggerTypes(cfg.AllowedTriggerTypes)
+	if cfg.MinTriggerConfidence <= 0 || cfg.MinTriggerConfidence > 100 {
+		cfg.MinTriggerConfidence = 65
+	}
+	cfg.EntryZone = NormalizeChanlunV2EntryZone(cfg.EntryZone)
+	cfg.ThirdPointQuality = NormalizeChanlunV2ThirdPointQuality(cfg.ThirdPointQuality)
+	if cfg.PilotRiskFraction < 0 || cfg.PilotRiskFraction > 1 {
+		cfg.PilotRiskFraction = 0
+	}
+	return cfg
+}
+
+func NormalizeChanlunV2EntryZone(cfg ChanlunV2EntryZoneConfig) ChanlunV2EntryZoneConfig {
+	cfg.Mode = strings.ToLower(strings.TrimSpace(cfg.Mode))
+	if cfg.Mode == "" {
+		cfg.Mode = "structure_range"
+	}
+	if cfg.Mode != "structure_range" && cfg.Mode != "atr" {
+		cfg.Mode = "structure_range"
+	}
+	if cfg.MaxChaseRatio <= 0 || cfg.MaxChaseRatio > 1 {
+		cfg.MaxChaseRatio = 0.35
+	}
+	if cfg.MinRemainingNetRR <= 0 {
+		cfg.MinRemainingNetRR = 2.5
+	}
+	if cfg.MinRemainingNetRR < 1 {
+		cfg.MinRemainingNetRR = 1
+	}
+	if cfg.MaxChaseATRMultiplier <= 0 || cfg.MaxChaseATRMultiplier > 10 {
+		cfg.MaxChaseATRMultiplier = 0.6
+	}
+	return cfg
+}
+
+func NormalizeChanlunV2ThirdPointQuality(cfg ChanlunV2ThirdPointQualityConfig) ChanlunV2ThirdPointQualityConfig {
+	if cfg.Enabled == nil {
+		cfg.Enabled = boolPtr(true)
+	}
+	cfg.QualityTimeframe = strings.ToLower(strings.TrimSpace(cfg.QualityTimeframe))
+	switch cfg.QualityTimeframe {
+	case "watch", "trade", "trigger", "3m", "15m", "1h", "4h":
+	default:
+		cfg.QualityTimeframe = "watch"
+	}
+	if cfg.UseATRNormalization == nil {
+		cfg.UseATRNormalization = boolPtr(true)
+	}
+	if cfg.PercentileLookbackCandles <= 0 || cfg.PercentileLookbackCandles > 5000 {
+		cfg.PercentileLookbackCandles = 480
+	}
+	if cfg.MaxSupportGapPercentile <= 0 || cfg.MaxSupportGapPercentile > 100 {
+		cfg.MaxSupportGapPercentile = 70
+	}
+	if cfg.MaxSupportGapPct <= 0 || cfg.MaxSupportGapPct > 20 {
+		cfg.MaxSupportGapPct = 1.0
+	}
+	if cfg.MaxSupportGapATR <= 0 || cfg.MaxSupportGapATR > 10 {
+		cfg.MaxSupportGapATR = 0.6
+	}
+	if cfg.MaxRetracementRatio <= 0 || cfg.MaxRetracementRatio > 1 {
+		cfg.MaxRetracementRatio = 0.55
+	}
+	if cfg.MaxPullbackCandles <= 0 || cfg.MaxPullbackCandles > 96 {
+		cfg.MaxPullbackCandles = 5
+	}
+	if cfg.RangePullbackCandles <= 0 || cfg.RangePullbackCandles < cfg.MaxPullbackCandles || cfg.RangePullbackCandles > 192 {
+		cfg.RangePullbackCandles = 8
+	}
+	if cfg.RangeRiskFraction <= 0 || cfg.RangeRiskFraction > 1 {
+		cfg.RangeRiskFraction = 0.5
+	}
+	return cfg
+}
+
+func NormalizeChanlunV2PositionManagement(cfg ChanlunV2PositionManagementConfig) ChanlunV2PositionManagementConfig {
+	if cfg.Enabled == nil {
+		cfg.Enabled = boolPtr(true)
+	}
+	if cfg.BreakevenEnabled == nil {
+		cfg.BreakevenEnabled = boolPtr(true)
+	}
+	if cfg.BreakevenTriggerR <= 0 || cfg.BreakevenTriggerR > 20 {
+		cfg.BreakevenTriggerR = 1.0
+	}
+	if cfg.BreakevenBufferPct < 0 || cfg.BreakevenBufferPct > 10 {
+		cfg.BreakevenBufferPct = 0.05
+	}
+	if cfg.PartialTakeProfitEnabled == nil {
+		cfg.PartialTakeProfitEnabled = boolPtr(true)
+	}
+	if cfg.PartialTakeProfitR <= 0 || cfg.PartialTakeProfitR > 50 {
+		cfg.PartialTakeProfitR = 1.5
+	}
+	if cfg.PartialTakeProfitPct <= 0 || cfg.PartialTakeProfitPct > 100 {
+		cfg.PartialTakeProfitPct = 50
+	}
+	if cfg.StructureBreakEnabled == nil {
+		cfg.StructureBreakEnabled = boolPtr(true)
+	}
+	cfg.StructureBreakTimeframe = normalizeChanlunV2Timeframe(cfg.StructureBreakTimeframe, "15m")
+	if cfg.StructureBreakConfirmBars <= 0 || cfg.StructureBreakConfirmBars > 10 {
+		cfg.StructureBreakConfirmBars = 2
+	}
+	if cfg.FloatingDrawdownEnabled == nil {
+		cfg.FloatingDrawdownEnabled = boolPtr(true)
+	}
+	if cfg.FloatingDrawdownActivationR <= 0 || cfg.FloatingDrawdownActivationR > 50 {
+		cfg.FloatingDrawdownActivationR = 1.5
+	}
+	if cfg.FloatingDrawdownPct <= 0 || cfg.FloatingDrawdownPct > 100 {
+		cfg.FloatingDrawdownPct = 40
+	}
+	if cfg.ReverseSignalCloseEnabled == nil {
+		cfg.ReverseSignalCloseEnabled = boolPtr(true)
+	}
+	if cfg.ReverseSignalMinConfidence <= 0 || cfg.ReverseSignalMinConfidence > 100 {
+		cfg.ReverseSignalMinConfidence = 60
+	}
+	if cfg.PartialCloseCooldownMinutes < 0 || cfg.PartialCloseCooldownMinutes > 1440 {
+		cfg.PartialCloseCooldownMinutes = 15
+	} else if cfg.PartialCloseCooldownMinutes == 0 {
+		cfg.PartialCloseCooldownMinutes = 15
+	}
+	if cfg.MaxPartialCloseCountPerPosition <= 0 || cfg.MaxPartialCloseCountPerPosition > 10 {
+		cfg.MaxPartialCloseCountPerPosition = 2
+	}
+	if cfg.MaxTotalPartialClosePct <= 0 || cfg.MaxTotalPartialClosePct > 100 {
+		cfg.MaxTotalPartialClosePct = 50
+	}
+	return cfg
+}
+
+func normalizeChanlunV2Timeframe(value, fallback string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if !isSupportedProgrammaticTimeframe(value) {
+		value = fallback
+	}
+	if !isSupportedProgrammaticTimeframe(value) {
+		return "15m"
+	}
+	return value
+}
+
+func normalizeChanlunV2TriggerTypes(values []string) []string {
+	allowed := map[string]bool{
+		"pullback_retest_resume": true,
+		"breakout_continuation":  true,
+		"micro_reversal_confirm": true,
+	}
+	if len(values) == 0 {
+		return []string{"pullback_retest_resume", "breakout_continuation", "micro_reversal_confirm"}
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, value := range values {
+		kind := strings.ToLower(strings.TrimSpace(value))
+		if !allowed[kind] || seen[kind] {
+			continue
+		}
+		seen[kind] = true
+		out = append(out, kind)
+	}
+	if len(out) == 0 {
+		return []string{"pullback_retest_resume", "breakout_continuation", "micro_reversal_confirm"}
 	}
 	return out
 }

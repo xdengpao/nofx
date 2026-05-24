@@ -1,10 +1,12 @@
 package chanlunv2
 
 import (
+	"encoding/json"
 	"nofx/config"
 	"nofx/decision"
 	"nofx/market"
 	"nofx/strategy/chanlun"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -54,8 +56,8 @@ func TestLatestSignalsWithOptionsReturnsV2ReportMarkers(t *testing.T) {
 		t.Fatalf("应生成一个marker: %+v", report.SignalMarkers)
 	}
 	marker := report.SignalMarkers[0]
-	if marker.DisplayCategory != "trade_action" || marker.TradeIntent != "open_long" || marker.Status != "ready" {
-		t.Fatalf("marker无法被前端识别为交易动作: %+v", marker)
+	if marker.DisplayCategory != "structure_background" || marker.SourceLayer != "parent_structure" || marker.Status != "background" {
+		t.Fatalf("marker应作为父结构背景展示: %+v", marker)
 	}
 }
 
@@ -70,7 +72,7 @@ func TestLatestSignalsWithOptionsFiltersV2Markers(t *testing.T) {
 
 	report, ok := engine.LatestSignalsWithOptions("t1", "BTCUSDT", chanlun.SignalReportOptions{
 		View:     "audit",
-		Statuses: []string{"ready"},
+		Statuses: []string{"background"},
 		Limit:    1,
 	})
 	if !ok {
@@ -444,6 +446,341 @@ func TestSetLatestReportPreservesRejectedLifecycleMarker(t *testing.T) {
 	}
 }
 
+func TestChanlunV2161StaleFixtureDoesNotCreateOpen(t *testing.T) {
+	var fixture struct {
+		Cases []struct {
+			Symbol                   string `json:"symbol"`
+			SignalType               string `json:"signal_type"`
+			Direction                string `json:"direction"`
+			ParentSignalCloseTime    int64  `json:"parent_signal_close_time"`
+			FirstEvaluationCloseTime int64  `json:"first_evaluation_close_time"`
+			AgeTradeCandles          int    `json:"age_trade_candles"`
+			Expected                 string `json:"expected"`
+		} `json:"cases"`
+	}
+	data, err := os.ReadFile("testdata/entry_timing_161_stale_signals.json")
+	if err != nil {
+		t.Fatalf("读取161脱敏fixture失败: %v", err)
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatalf("解析161脱敏fixture失败: %v", err)
+	}
+	seenAges := map[int]bool{}
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	for _, item := range fixture.Cases {
+		seenAges[item.AgeTradeCandles] = true
+		sig := Signal{
+			SignalType: item.SignalType,
+			Direction:  item.Direction,
+			Price:      100,
+			StopLoss:   95,
+			TakeProfit: 120,
+			Confidence: 90,
+			Timestamp:  item.ParentSignalCloseTime,
+		}
+		evaluation := engine.evaluateParentStructureEntry(ctx, item.Symbol, sig, nil, map[string]string{"trade": "1h", "sub": "15m", "micro": "3m"}, item.FirstEvaluationCloseTime)
+		if evaluation.Decision.Action != "" {
+			t.Fatalf("%s age=%d旧父结构不应直接生成开仓: %+v", item.Symbol, item.AgeTradeCandles, evaluation.Decision)
+		}
+		if item.Expected == "terminal_expired" && !evaluation.Terminal {
+			t.Fatalf("%s age=%d应进入终态过期: %+v", item.Symbol, item.AgeTradeCandles, evaluation)
+		}
+	}
+	for _, age := range []int{3, 8, 19, 27, 58} {
+		if !seenAges[age] {
+			t.Fatalf("fixture缺少%d根trade candle过期样本", age)
+		}
+	}
+}
+
+func TestEntryTriggerUsesFreshTriggerCloseTimeAndParentLineage(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	base := int64(1710000000000)
+	centerID := 3
+	sig := Signal{
+		SignalType: "buy3",
+		Direction:  "long",
+		Price:      101,
+		StopLoss:   97,
+		TakeProfit: 116,
+		Confidence: 90,
+		CenterID:   &centerID,
+		Timestamp:  base,
+	}
+	mr := chanlunV2QualityResult(base, centerID, "long")
+	ctx := chanlunV2ValidationContext(1000)
+	ctx.MarketDataMap["BNBUSDT"] = chanlunV2EntryMarketData("BNBUSDT", []market.Kline{
+		v2TestKline(base-int64(45*time.Minute/time.Millisecond), 100.2, 100.8, 101.6, 99.0),
+		v2TestKline(base+int64(15*time.Minute/time.Millisecond), 101.0, 100.9, 101.1, 100.8),
+		v2TestKline(base+int64(30*time.Minute/time.Millisecond), 100.9, 101.2, 101.4, 100.8),
+	})
+	evaluation := engine.evaluateParentStructureEntry(ctx, "BNBUSDT", sig, mr, map[string]string{"trade": "1h", "sub": "15m", "micro": "3m"}, base+int64(30*time.Minute/time.Millisecond))
+	if evaluation.Decision.Action != "open_long" || !evaluation.TriggerReady {
+		t.Fatalf("fresh pullback trigger应生成开仓候选: %+v", evaluation)
+	}
+	d := evaluation.Decision
+	if d.SignalID == "" || d.SignalID == v2SignalID("BNBUSDT", "1h", sig) {
+		t.Fatalf("可执行signal_id应来自entry trigger: %+v", d)
+	}
+	if metadataString(d.StrategyMetadata, "parent_signal_id") != v2SignalID("BNBUSDT", "1h", sig) {
+		t.Fatalf("应保留parent_signal_id: %+v", d.StrategyMetadata)
+	}
+	if got := metadataInt64(d.StrategyMetadata, "signal_close_time"); got != base+int64(30*time.Minute/time.Millisecond) {
+		t.Fatalf("signal_close_time应使用entry trigger close: %d", got)
+	}
+	if got := metadataInt64(d.StrategyMetadata, "parent_signal_close_time"); got != base {
+		t.Fatalf("parent_signal_close_time应保留父结构时间: %d", got)
+	}
+	valid, rejections, _ := engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{d}, map[string]string{"trade": "1h"})
+	if len(rejections) != 0 || len(valid) != 1 {
+		t.Fatalf("父结构旧但trigger新鲜时应通过freshness: valid=%+v rejections=%+v", valid, rejections)
+	}
+	if metadataString(valid[0].StrategyMetadata, "freshness_state") != "fresh" || metadataInt(valid[0].StrategyMetadata, "age_candles") != 0 {
+		t.Fatalf("freshness应基于trigger close time: %+v", valid[0].StrategyMetadata)
+	}
+	report, ok := engine.LatestSignalsWithOptions(ctx.TraderID, "BNBUSDT", chanlun.SignalReportOptions{View: "audit"})
+	if !ok || len(report.SignalMarkers) == 0 {
+		t.Fatalf("应写入entry trigger marker: ok=%v report=%+v", ok, report)
+	}
+	var triggerMarker *chanlun.SignalMarker
+	for i := range report.SignalMarkers {
+		if report.SignalMarkers[i].SignalID == d.SignalID {
+			triggerMarker = &report.SignalMarkers[i]
+		}
+	}
+	if triggerMarker == nil || triggerMarker.EntryTriggerID != d.SignalID || triggerMarker.ThirdPointQualityCategory != "strong_third_buy" {
+		t.Fatalf("entry trigger marker应携带lineage和质量指标: %+v", report.SignalMarkers)
+	}
+	if triggerMarker.StructureToTriggerLatencyCandles != 2 {
+		t.Fatalf("entry trigger marker应记录结构到触发延迟: %+v", triggerMarker)
+	}
+}
+
+func TestThirdPointQualityRejectsInvalidCases(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutateData func([]market.Kline) []market.Kline
+		mutateCfg  func(*config.ChanlunV2StrategyConfig)
+		wantReason string
+	}{
+		{
+			name: "reentered center",
+			mutateData: func(klines []market.Kline) []market.Kline {
+				klines[1].Low = 99.8
+				return klines
+			},
+			wantReason: "third_point.reentered_center",
+		},
+		{
+			name: "gap atr too far",
+			mutateCfg: func(cfg *config.ChanlunV2StrategyConfig) {
+				cfg.EntryTiming.ThirdPointQuality.MaxSupportGapATR = 0.1
+			},
+			wantReason: "entry_zone_chased",
+		},
+		{
+			name: "deep retracement",
+			mutateCfg: func(cfg *config.ChanlunV2StrategyConfig) {
+				cfg.EntryTiming.ThirdPointQuality.MaxRetracementRatio = 0.2
+			},
+			wantReason: "third_point.deep_retracement",
+		},
+		{
+			name: "too many pullback candles",
+			mutateCfg: func(cfg *config.ChanlunV2StrategyConfig) {
+				cfg.EntryTiming.ThirdPointQuality.MaxPullbackCandles = 1
+			},
+			wantReason: "third_point.range_after_breakout",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.ChanlunV2StrategyConfig{}
+			if tt.mutateCfg != nil {
+				tt.mutateCfg(&cfg)
+			}
+			engine, err := NewEngine(cfg)
+			if err != nil {
+				t.Fatalf("创建缠论V2引擎失败: %v", err)
+			}
+			base := int64(1710000000000)
+			centerID := 3
+			sig := Signal{SignalType: "buy3", Direction: "long", Price: 101, StopLoss: 97, TakeProfit: 116, Confidence: 90, CenterID: &centerID, Timestamp: base}
+			klines := []market.Kline{
+				v2TestKline(base-int64(45*time.Minute/time.Millisecond), 100.2, 100.8, 101.6, 99.0),
+				v2TestKline(base+int64(15*time.Minute/time.Millisecond), 101.0, 100.9, 101.1, 100.8),
+				v2TestKline(base+int64(30*time.Minute/time.Millisecond), 100.9, 101.2, 101.4, 100.8),
+			}
+			if tt.mutateData != nil {
+				klines = tt.mutateData(klines)
+			}
+			ctx := chanlunV2ValidationContext(1000)
+			ctx.MarketDataMap["BNBUSDT"] = chanlunV2EntryMarketData("BNBUSDT", klines)
+			evaluation := engine.evaluateParentStructureEntry(ctx, "BNBUSDT", sig, chanlunV2QualityResult(base, centerID, "long"), map[string]string{"trade": "1h", "sub": "15m", "micro": "3m"}, base+int64(30*time.Minute/time.Millisecond))
+			if !evaluation.TriggerRejected || evaluation.ReasonCode != tt.wantReason {
+				t.Fatalf("应按%s拒绝: %+v", tt.wantReason, evaluation)
+			}
+		})
+	}
+}
+
+func TestThirdPointQualitySupportsShortAndMissingCenterFallback(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{
+		EntryTiming: config.ChanlunV2EntryTimingConfig{
+			ThirdPointQuality: config.ChanlunV2ThirdPointQualityConfig{MaxSupportGapATR: 2.0},
+		},
+	})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	base := int64(1710000000000)
+	centerID := 4
+	shortSig := Signal{SignalType: "sell3", Direction: "short", Price: 99, StopLoss: 103, TakeProfit: 84, Confidence: 90, CenterID: &centerID, Timestamp: base}
+	ctx := chanlunV2ValidationContext(1000)
+	ctx.MarketDataMap["BNBUSDT"] = chanlunV2EntryMarketData("BNBUSDT", []market.Kline{
+		v2TestKline(base-int64(45*time.Minute/time.Millisecond), 99.8, 99.2, 101.0, 98.4),
+		v2TestKline(base+int64(15*time.Minute/time.Millisecond), 99.0, 99.1, 99.2, 98.7),
+		v2TestKline(base+int64(30*time.Minute/time.Millisecond), 99.1, 98.8, 99.1, 98.4),
+	})
+	evaluation := engine.evaluateParentStructureEntry(ctx, "BNBUSDT", shortSig, chanlunV2QualityResult(base, centerID, "short"), map[string]string{"trade": "1h", "sub": "15m", "micro": "3m"}, base+int64(30*time.Minute/time.Millisecond))
+	if evaluation.Decision.Action != "open_short" || metadataString(evaluation.Decision.StrategyMetadata, "third_point_quality_category") != "strong_third_sell" {
+		t.Fatalf("强三卖应生成short trigger: %+v", evaluation)
+	}
+
+	noCenter := Signal{SignalType: "buy3", Direction: "long", Price: 100, StopLoss: 97, TakeProfit: 116, Confidence: 90, Timestamp: base}
+	ctx.MarketDataMap["ETHUSDT"] = chanlunV2EntryMarketData("ETHUSDT", []market.Kline{
+		v2TestKline(base-int64(45*time.Minute/time.Millisecond), 100.2, 100.8, 101.6, 99.0),
+		v2TestKline(base+int64(15*time.Minute/time.Millisecond), 101.0, 100.9, 101.1, 100.8),
+		v2TestKline(base+int64(30*time.Minute/time.Millisecond), 100.9, 101.2, 101.4, 100.8),
+	})
+	evaluation = engine.evaluateParentStructureEntry(ctx, "ETHUSDT", noCenter, nil, map[string]string{"trade": "1h", "sub": "15m", "micro": "3m"}, base+int64(30*time.Minute/time.Millisecond))
+	if evaluation.Decision.Action != "open_long" || metadataString(evaluation.Decision.StrategyMetadata, "third_point_quality_diagnostic") == "" {
+		t.Fatalf("缺少center时应使用fallback诊断且仍可评估: %+v", evaluation)
+	}
+}
+
+func TestValidateChanlunV2DecisionsRejectsZeroQuantitySizing(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	ctx.MarketDataMap["ZEROUSDT"] = &market.Data{Symbol: "ZEROUSDT", CurrentPrice: 100}
+	d := decision.Decision{
+		Symbol:          "ZEROUSDT",
+		Action:          "open_long",
+		Leverage:        5,
+		StopLoss:        95,
+		TakeProfit:      120,
+		Confidence:      90,
+		StrategyMode:    "chanlun_v2",
+		StrategyName:    "chanlun_v2",
+		StrategyVersion: "v0.1",
+		ConfigHash:      engine.configHash,
+		SignalID:        "zero-quantity",
+		SignalType:      "buy2",
+		SignalTimeframe: "15m",
+		StrategyMetadata: map[string]any{
+			"layer":                    "entry_trigger",
+			"entry_trigger_close_time": int64(1710000000000),
+			"trade_intent":             "open_long",
+		},
+	}
+	valid, rejections := engine.validateChanlunV2Decisions(ctx, []decision.Decision{d}, nil)
+	if len(valid) != 0 || len(rejections) != 1 {
+		t.Fatalf("zero quantity sizing应拒绝: valid=%+v rejections=%+v", valid, rejections)
+	}
+	if len(rejections[0].GateReasons) == 0 || rejections[0].GateReasons[0] != "position_sizing.zero_quantity" {
+		t.Fatalf("应使用position_sizing.zero_quantity原因码: %+v", rejections[0])
+	}
+}
+
+func TestV2PositionManagementBreakevenPartialStructureAndDrawdown(t *testing.T) {
+	disabled := false
+	tests := []struct {
+		name   string
+		cfg    config.ChanlunV2StrategyConfig
+		ctx    *decision.Context
+		warmup func(*Engine, *decision.Context)
+		want   string
+	}{
+		{
+			name: "breakeven",
+			cfg: config.ChanlunV2StrategyConfig{PositionManagement: config.ChanlunV2PositionManagementConfig{
+				PartialTakeProfitEnabled: &disabled,
+				StructureBreakEnabled:    &disabled,
+				FloatingDrawdownEnabled:  &disabled,
+			}},
+			ctx:  chanlunV2PositionContext("BNBUSDT", "long", 100, 106, 95, nil),
+			want: "update_stop_loss",
+		},
+		{
+			name: "partial take profit",
+			cfg: config.ChanlunV2StrategyConfig{PositionManagement: config.ChanlunV2PositionManagementConfig{
+				BreakevenEnabled:        &disabled,
+				StructureBreakEnabled:   &disabled,
+				FloatingDrawdownEnabled: &disabled,
+			}},
+			ctx:  chanlunV2PositionContext("BNBUSDT", "long", 100, 108, 95, nil),
+			want: "partial_close",
+		},
+		{
+			name: "structure break",
+			cfg: config.ChanlunV2StrategyConfig{PositionManagement: config.ChanlunV2PositionManagementConfig{
+				BreakevenEnabled:         &disabled,
+				PartialTakeProfitEnabled: &disabled,
+				FloatingDrawdownEnabled:  &disabled,
+			}},
+			ctx: chanlunV2PositionContext("BNBUSDT", "long", 100, 94, 95, []market.Kline{
+				v2TestKline(1710000000000, 96, 94.5, 96.2, 94.2),
+				v2TestKline(1710000900000, 94.8, 94.2, 95.0, 94.0),
+			}),
+			want: "partial_close",
+		},
+		{
+			name: "floating drawdown",
+			cfg: config.ChanlunV2StrategyConfig{PositionManagement: config.ChanlunV2PositionManagementConfig{
+				BreakevenEnabled:         &disabled,
+				PartialTakeProfitEnabled: &disabled,
+				StructureBreakEnabled:    &disabled,
+				FloatingDrawdownPct:      30,
+			}},
+			ctx: chanlunV2PositionContext("BNBUSDT", "long", 100, 106, 95, nil),
+			warmup: func(engine *Engine, ctx *decision.Context) {
+				warm := chanlunV2PositionContext("BNBUSDT", "long", 100, 110, 95, nil)
+				_ = engine.evaluateV2PositionManagement(warm, warm.Positions[0], map[string]string{"trade": "1h", "sub": "15m", "micro": "3m"})
+			},
+			want: "partial_close",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			engine, err := NewEngine(tt.cfg)
+			if err != nil {
+				t.Fatalf("创建缠论V2引擎失败: %v", err)
+			}
+			if tt.warmup != nil {
+				tt.warmup(engine, tt.ctx)
+			}
+			d := engine.evaluateV2PositionManagement(tt.ctx, tt.ctx.Positions[0], map[string]string{"trade": "1h", "sub": "15m", "micro": "3m"})
+			if d.Action != tt.want {
+				t.Fatalf("持仓管理动作错误: want=%s got=%+v", tt.want, d)
+			}
+			valid, rejections := engine.validateChanlunV2Decisions(tt.ctx, []decision.Decision{d}, nil)
+			if len(valid) != 1 || len(rejections) != 0 {
+				t.Fatalf("risk-reducing动作应通过专用验证: valid=%+v rejections=%+v", valid, rejections)
+			}
+		})
+	}
+}
+
 func chanlunV2ValidationContext(equity float64) *decision.Context {
 	return &decision.Context{
 		TraderID:        "t1",
@@ -497,4 +834,81 @@ func chanlunV2ValidationMarketData(symbol string, price float64) *market.Data {
 			DIMinus:   []float64{10},
 		},
 	}
+}
+
+func v2TestKline(closeTime int64, open, close, high, low float64) market.Kline {
+	return market.Kline{
+		OpenTime:  closeTime - int64(15*time.Minute/time.Millisecond) + 1,
+		CloseTime: closeTime,
+		Open:      open,
+		Close:     close,
+		High:      high,
+		Low:       low,
+		Volume:    1000,
+	}
+}
+
+func chanlunV2EntryMarketData(symbol string, klines []market.Kline) *market.Data {
+	price := 0.0
+	if len(klines) > 0 {
+		price = klines[len(klines)-1].Close
+	}
+	data := chanlunV2ValidationMarketData(symbol, price)
+	data.MidTermSeries15m = &market.MidTermData15m{ATRValues: []float64{2}}
+	data.Klines = map[string][]market.Kline{
+		"15m": klines,
+		"1h":  klines,
+		"3m":  klines,
+	}
+	return data
+}
+
+func chanlunV2QualityResult(base int64, centerID int, direction string) *multiLevelResult {
+	center := Center{
+		ID:        centerID,
+		ZG:        100,
+		ZD:        100,
+		High:      103,
+		Low:       97,
+		StartTime: base - int64(2*time.Hour/time.Millisecond),
+		EndTime:   base - int64(time.Hour/time.Millisecond),
+	}
+	if direction == "short" {
+		center.ZG = 102
+		center.ZD = 100
+	}
+	return &multiLevelResult{
+		Symbol: "BNBUSDT",
+		Results: map[string]*AnalysisResult{
+			"trade": {
+				Centers: []Center{center},
+			},
+		},
+		LastClosedByLevel: map[string]int64{"trade": base},
+	}
+}
+
+func chanlunV2PositionContext(symbol, side string, entry, current, stop float64, structureKlines []market.Kline) *decision.Context {
+	ctx := chanlunV2ValidationContext(1000)
+	ctx.Positions = []decision.PositionInfo{{
+		Symbol:     symbol,
+		Side:       side,
+		EntryPrice: entry,
+		MarkPrice:  current,
+		StopLoss:   stop,
+		Quantity:   1,
+		Leverage:   5,
+	}}
+	data := chanlunV2ValidationMarketData(symbol, current)
+	if len(structureKlines) > 0 {
+		data.Klines = map[string][]market.Kline{"15m": structureKlines, "1h": structureKlines, "3m": structureKlines}
+	} else {
+		now := int64(1710000000000)
+		data.Klines = map[string][]market.Kline{"15m": []market.Kline{
+			v2TestKline(now, current, current, current*1.01, current*0.99),
+			v2TestKline(now+int64(15*time.Minute/time.Millisecond), current, current, current*1.01, current*0.99),
+		}}
+	}
+	ctx.MarketDataMap[market.Normalize(symbol)] = data
+	return ctx
 }

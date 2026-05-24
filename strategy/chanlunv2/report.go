@@ -214,6 +214,14 @@ func (e *Engine) signalToReportSignal(symbol, timeframe string, sig Signal) chan
 	closeTime := normalizeV2EpochMillis(sig.Timestamp)
 	signalID := v2SignalID(symbol, timeframe, sig)
 	centerID := signalCenterID(sig)
+	sourceLayer := "trade_action"
+	status := "ready"
+	reasonCode := "chanlun_v2_signal"
+	if e.Config.EntryTiming.Enabled == nil || *e.Config.EntryTiming.Enabled {
+		sourceLayer = v2LayerParentStructure
+		status = "background"
+		reasonCode = "structure_background_only"
+	}
 	return chanlun.ChanlunSignal{
 		SignalID:          signalID,
 		StructureKey:      v2StructureKey(symbol, timeframe, sig),
@@ -236,9 +244,9 @@ func (e *Engine) signalToReportSignal(symbol, timeframe string, sig Signal) chan
 		SignalCloseTime:   closeTime,
 		DecisionCloseTime: closeTime,
 		SegmentEndTime:    closeTime,
-		Status:            "ready",
-		SourceLayer:       "trade_action",
-		ReasonCode:        "chanlun_v2_signal",
+		Status:            status,
+		SourceLayer:       sourceLayer,
+		ReasonCode:        reasonCode,
 		Diagnostics: chanlun.SignalDiagnostics{
 			Reasons: []string{fmt.Sprintf("缠论V2 %s 置信度%d", sig.SignalType, sig.Confidence)},
 			Metrics: map[string]any{
@@ -260,10 +268,20 @@ func signalToV2Marker(signal chanlun.ChanlunSignal, status, action, reason strin
 	if status == "" {
 		status = "ready"
 	}
-	if action == "" {
+	sourceLayer := firstNonEmptyString(signal.SourceLayer, "trade_action")
+	displayCategory := "trade_action"
+	displayPriority := 90
+	if sourceLayer == v2LayerParentStructure || sourceLayer == "structure" {
+		displayCategory = "structure_background"
+		displayPriority = 45
+		if status == "ready" {
+			status = "background"
+		}
+	}
+	if action == "" && displayCategory == "trade_action" {
 		action = signal.ActionHint
 	}
-	return chanlun.SignalMarker{
+	marker := chanlun.SignalMarker{
 		Symbol:              signal.Symbol,
 		Timeframe:           signal.AnalysisTF,
 		CloseTime:           closeTime,
@@ -274,20 +292,22 @@ func signalToV2Marker(signal chanlun.ChanlunSignal, status, action, reason strin
 		SignalType:          signal.SignalType,
 		Direction:           signal.Direction,
 		Level:               signal.Level,
-		SourceLayer:         "trade_action",
+		SourceLayer:         sourceLayer,
 		Status:              status,
 		SignalID:            signal.SignalID,
 		StructureKey:        signal.StructureKey,
 		LifecycleKey:        signal.LifecycleKey,
 		ReasonCode:          signal.ReasonCode,
-		DisplayCategory:     "trade_action",
-		DisplayPriority:     90,
+		DisplayCategory:     displayCategory,
+		DisplayPriority:     displayPriority,
 		Action:              action,
 		FinalAction:         action,
 		TradeIntent:         action,
 		Price:               signal.Price,
 		Reason:              reason,
 	}
+	copyChanlunSignalQualityToMarker(&marker, signal)
+	return marker
 }
 
 func decisionToV2Marker(d decision.Decision) chanlun.SignalMarker {
@@ -311,38 +331,43 @@ func decisionToV2Marker(d decision.Decision) chanlun.SignalMarker {
 		direction = "short"
 	}
 	return chanlun.SignalMarker{
-		Symbol:              market.Normalize(d.Symbol),
-		Timeframe:           timeframe,
-		CloseTime:           closeTime,
-		SignalCloseTime:     closeTime,
-		DecisionCloseTime:   decisionCloseTime,
-		DisplayCloseTime:    decisionCloseTime,
-		EvaluationCloseTime: evaluationCloseTime,
-		ActionTimestamp:     metadataInt64(d.StrategyMetadata, "action_timestamp"),
-		SignalType:          signalType,
-		Direction:           direction,
-		Level:               "position",
-		SourceLayer:         "position_management",
-		Status:              "ready",
-		SignalID:            signalID,
-		LifecycleKey:        signalID,
-		ReasonCode:          firstNonEmptyString(metadataString(d.StrategyMetadata, "reason_code"), "chanlun_v2_position_management"),
-		DisplayCategory:     "position_management",
-		DisplayPriority:     70,
-		Action:              d.Action,
-		FinalAction:         d.Action,
-		TradeIntent:         d.Action,
-		PositionSide:        metadataString(d.StrategyMetadata, "position_side"),
-		Reason:              d.Reasoning,
-		RemainingNetRR:      metadataFloat64(d.StrategyMetadata, "remaining_net_rr"),
-		FreshnessState:      metadataString(d.StrategyMetadata, "freshness_state"),
-		AgeCandles:          metadataInt(d.StrategyMetadata, "age_candles"),
-		StaleReason:         metadataString(d.StrategyMetadata, "stale_reason"),
+		Symbol:                    market.Normalize(d.Symbol),
+		Timeframe:                 timeframe,
+		CloseTime:                 closeTime,
+		SignalCloseTime:           closeTime,
+		DecisionCloseTime:         decisionCloseTime,
+		DisplayCloseTime:          decisionCloseTime,
+		EvaluationCloseTime:       evaluationCloseTime,
+		ActionTimestamp:           metadataInt64(d.StrategyMetadata, "action_timestamp"),
+		SignalType:                signalType,
+		Direction:                 direction,
+		Level:                     "position",
+		SourceLayer:               "position_management",
+		Status:                    "ready",
+		SignalID:                  signalID,
+		LifecycleKey:              signalID,
+		ReasonCode:                firstNonEmptyString(metadataString(d.StrategyMetadata, "reason_code"), "chanlun_v2_position_management"),
+		DisplayCategory:           "position_management",
+		DisplayPriority:           70,
+		Action:                    d.Action,
+		FinalAction:               d.Action,
+		TradeIntent:               d.Action,
+		PositionSide:              metadataString(d.StrategyMetadata, "position_side"),
+		Reason:                    d.Reasoning,
+		RemainingNetRR:            metadataFloat64(d.StrategyMetadata, "remaining_net_rr"),
+		ThirdPointQualityCategory: metadataString(d.StrategyMetadata, "third_point_quality_category"),
+		SupportGapPct:             metadataFloat64(d.StrategyMetadata, "support_gap_pct"),
+		SupportGapATR:             metadataFloat64(d.StrategyMetadata, "support_gap_atr"),
+		RetracementRatio:          metadataFloat64(d.StrategyMetadata, "retracement_ratio"),
+		PullbackCandles:           metadataInt(d.StrategyMetadata, "pullback_candles"),
+		FreshnessState:            metadataString(d.StrategyMetadata, "freshness_state"),
+		AgeCandles:                metadataInt(d.StrategyMetadata, "age_candles"),
+		StaleReason:               metadataString(d.StrategyMetadata, "stale_reason"),
 	}
 }
 
 func preserveTerminalV2Markers(report, existing *chanlun.SignalReport) {
-	if report == nil || existing == nil || len(existing.SignalMarkers) == 0 || len(report.SignalMarkers) == 0 {
+	if report == nil || existing == nil || len(existing.SignalMarkers) == 0 {
 		return
 	}
 	terminalBySignalID := map[string]chanlun.SignalMarker{}
@@ -355,12 +380,23 @@ func preserveTerminalV2Markers(report, existing *chanlun.SignalReport) {
 	if len(terminalBySignalID) == 0 {
 		return
 	}
+	mergedIDs := map[string]bool{}
 	for i := range report.SignalMarkers {
 		terminal, ok := terminalBySignalID[report.SignalMarkers[i].SignalID]
 		if !ok {
 			continue
 		}
 		report.SignalMarkers[i] = mergeTerminalV2Marker(report.SignalMarkers[i], terminal)
+		mergedIDs[report.SignalMarkers[i].SignalID] = true
+	}
+	for signalID, terminal := range terminalBySignalID {
+		if mergedIDs[signalID] {
+			continue
+		}
+		report.SignalMarkers = append(report.SignalMarkers, terminal)
+		if len(report.SignalMarkers) > maxChanlunV2ReportMarkers {
+			report.SignalMarkers = report.SignalMarkers[len(report.SignalMarkers)-maxChanlunV2ReportMarkers:]
+		}
 	}
 }
 
@@ -395,6 +431,7 @@ func mergeTerminalV2Marker(base, terminal chanlun.SignalMarker) chanlun.SignalMa
 	if terminal.RemainingNetRR > 0 {
 		merged.RemainingNetRR = terminal.RemainingNetRR
 	}
+	copyTerminalQualityToV2Marker(&merged, terminal)
 	merged.LastUpdatedAt = firstPositiveInt64(terminal.LastUpdatedAt, merged.DecisionCloseTime, merged.DisplayCloseTime, base.LastUpdatedAt)
 	return merged
 }
@@ -437,7 +474,81 @@ func applyOpenRejectionToV2Marker(marker *chanlun.SignalMarker, d decision.Decis
 	} else if remainingRR := metadataFloat64(d.StrategyMetadata, "remaining_net_rr"); remainingRR > 0 {
 		marker.RemainingNetRR = remainingRR
 	}
+	copyV2LineageAndQualityToMarker(marker, d.StrategyMetadata)
+	copyV2LineageAndQualityToMarker(marker, rejection.StrategyMetadata)
 	marker.LastUpdatedAt = actionTimestamp
+}
+
+func copyChanlunSignalQualityToMarker(marker *chanlun.SignalMarker, signal chanlun.ChanlunSignal) {
+	if marker == nil {
+		return
+	}
+	marker.ThirdPointQualityCategory = signal.ThirdPointQualityCategory
+	marker.SupportGapPct = signal.SupportGapPct
+	marker.SupportGapATR = signal.SupportGapATR
+	marker.RetracementRatio = signal.RetracementRatio
+	marker.PullbackCandles = signal.PullbackCandles
+}
+
+func copyTerminalQualityToV2Marker(marker *chanlun.SignalMarker, terminal chanlun.SignalMarker) {
+	if marker == nil {
+		return
+	}
+	if terminal.ThirdPointQualityCategory != "" {
+		marker.ThirdPointQualityCategory = terminal.ThirdPointQualityCategory
+	}
+	if terminal.SupportGapPct != 0 {
+		marker.SupportGapPct = terminal.SupportGapPct
+	}
+	if terminal.SupportGapATR != 0 {
+		marker.SupportGapATR = terminal.SupportGapATR
+	}
+	if terminal.RetracementRatio != 0 {
+		marker.RetracementRatio = terminal.RetracementRatio
+	}
+	if terminal.PullbackCandles != 0 {
+		marker.PullbackCandles = terminal.PullbackCandles
+	}
+}
+
+func copyV2LineageAndQualityToMarker(marker *chanlun.SignalMarker, metadata map[string]any) {
+	if marker == nil || len(metadata) == 0 {
+		return
+	}
+	if value := metadataString(metadata, "parent_signal_id"); value != "" {
+		marker.ParentSignalID = value
+	}
+	if value := metadataString(metadata, "entry_trigger_id"); value != "" {
+		marker.EntryTriggerID = value
+		marker.SignalID = firstNonEmptyString(marker.SignalID, value)
+	}
+	if value := metadataString(metadata, "entry_trigger_type"); value != "" {
+		marker.EntryTriggerType = value
+	}
+	if value := metadataString(metadata, "entry_trigger_timeframe"); value != "" {
+		marker.EntryTriggerTF = value
+	}
+	if value := metadataInt64(metadata, "entry_trigger_close_time"); value > 0 {
+		marker.EntryTriggerClose = value
+	}
+	if value := metadataInt(metadata, "structure_to_trigger_latency_candles"); value > 0 {
+		marker.StructureToTriggerLatencyCandles = value
+	}
+	if value := metadataString(metadata, "third_point_quality_category"); value != "" {
+		marker.ThirdPointQualityCategory = value
+	}
+	if value := metadataFloat64(metadata, "support_gap_pct"); value != 0 {
+		marker.SupportGapPct = value
+	}
+	if value := metadataFloat64(metadata, "support_gap_atr"); value != 0 {
+		marker.SupportGapATR = value
+	}
+	if value := metadataFloat64(metadata, "retracement_ratio"); value != 0 {
+		marker.RetracementRatio = value
+	}
+	if value := metadataInt(metadata, "pullback_candles"); value != 0 {
+		marker.PullbackCandles = value
+	}
 }
 
 func openRejectionReason(rejection decision.OpenRejection) string {
