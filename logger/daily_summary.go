@@ -58,8 +58,11 @@ func WriteDailySummary(traderID string, date time.Time, logDir string) error {
 			sawBalance = true
 		}
 		summary.AccountStartEnd[1] = record.AccountState.TotalBalance
-		signalCount := strategyPerCandidateCount(record.StrategyDiagnostics)
-		if signalCount == 0 {
+		signalCount, ok := strategySignalCount(record.StrategyDiagnostics)
+		if !ok {
+			signalCount, ok = strategyPerCandidateCount(record.StrategyDiagnostics)
+		}
+		if !ok {
 			signalCount = len(record.CandidateDetails)
 		}
 		summary.SignalCount += signalCount
@@ -93,16 +96,40 @@ func WriteDailySummary(traderID string, date time.Time, logDir string) error {
 	return os.WriteFile(outPath, data, 0644)
 }
 
-func strategyPerCandidateCount(diagnostics map[string]any) int {
+func strategySignalCount(diagnostics map[string]any) (int, bool) {
 	if len(diagnostics) == 0 {
-		return 0
+		return 0, false
+	}
+	value, ok := diagnostics["signal_count"]
+	if !ok {
+		return 0, false
+	}
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int64:
+		return int(typed), true
+	case int32:
+		return int(typed), true
+	case float64:
+		return int(typed), true
+	case float32:
+		return int(typed), true
+	default:
+		return 0, false
+	}
+}
+
+func strategyPerCandidateCount(diagnostics map[string]any) (int, bool) {
+	if len(diagnostics) == 0 {
+		return 0, false
 	}
 	switch values := diagnostics["per_candidate"].(type) {
 	case []any:
-		return len(values)
+		return len(values), true
 	case []map[string]any:
-		return len(values)
+		return len(values), true
 	default:
-		return 0
+		return 0, false
 	}
 }

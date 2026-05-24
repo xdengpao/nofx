@@ -79,6 +79,39 @@ func TestWriteDailySummaryAggregatesTraderRecords(t *testing.T) {
 	}
 }
 
+func TestWriteDailySummaryHonorsExplicitZeroSignalCount(t *testing.T) {
+	dir := t.TempDir()
+	day := time.Date(2026, 5, 24, 0, 0, 0, 0, time.UTC)
+
+	writeDecisionRecord(t, dir, "decision_20260524_010000_cycle1.json", DecisionRecord{
+		Timestamp:           day.Add(time.Hour),
+		AccountState:        AccountSnapshot{TotalBalance: 100},
+		CandidateDetails:    []CandidateSnapshot{{Symbol: "BTCUSDT"}, {Symbol: "ETHUSDT"}},
+		StrategyDiagnostics: map[string]any{"signal_count": 0},
+	})
+	writeDecisionRecord(t, dir, "decision_20260524_020000_cycle2.json", DecisionRecord{
+		Timestamp:           day.Add(2 * time.Hour),
+		AccountState:        AccountSnapshot{TotalBalance: 100},
+		CandidateDetails:    []CandidateSnapshot{{Symbol: "SOLUSDT"}, {Symbol: "BNBUSDT"}},
+		StrategyDiagnostics: map[string]any{"signal_count": float64(2)},
+	})
+
+	if err := WriteDailySummary("", day, dir); err != nil {
+		t.Fatalf("生成daily summary失败: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "daily_summary_20260524.json"))
+	if err != nil {
+		t.Fatalf("读取daily summary失败: %v", err)
+	}
+	var summary DailySummary
+	if err := json.Unmarshal(data, &summary); err != nil {
+		t.Fatalf("解析daily summary失败: %v", err)
+	}
+	if summary.SignalCount != 2 {
+		t.Fatalf("显式signal_count=0不应回退到候选币数量: %+v", summary)
+	}
+}
+
 func writeDecisionRecord(t *testing.T, dir, name string, record DecisionRecord) {
 	t.Helper()
 	data, err := json.MarshalIndent(record, "", "  ")

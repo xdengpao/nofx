@@ -252,6 +252,56 @@ func TestApplyChanlunV2FreshnessGuardRejectsExpired(t *testing.T) {
 	}
 }
 
+func TestDowngradeExpiredChanlunV2SignalMarksDiagnosticWithoutOpenRejection(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	ctx.MarketDataMap["BNBUSDT"] = chanlunV2ValidationMarketData("BNBUSDT", 100)
+	signalClose := int64(1710000000000)
+	evaluationClose := signalClose + int64(3*time.Hour/time.Millisecond)
+	sig := Signal{SignalType: "buy2", Direction: "long", Price: 100, StopLoss: 95, TakeProfit: 120, Confidence: 90, Timestamp: signalClose}
+	mr := &multiLevelResult{LastClosedByLevel: map[string]int64{"trade": evaluationClose}}
+	engine.setLatestReport(ctx.TraderID, "BNBUSDT", mr, []Signal{sig}, nil)
+	d := engine.signalToDecision(ctx, "BNBUSDT", sig, "1h", evaluationClose)
+
+	downgraded, diagnostic := engine.downgradeExpiredChanlunV2Signal(ctx, d, "1h")
+	if !downgraded || !strings.Contains(diagnostic, "已降级为过期诊断") {
+		t.Fatalf("硬过期信号应前置降级为诊断: downgraded=%v diagnostic=%q", downgraded, diagnostic)
+	}
+	report, ok := engine.LatestSignalsWithOptions(ctx.TraderID, "BNBUSDT", chanlun.SignalReportOptions{})
+	if !ok || len(report.SignalMarkers) != 1 {
+		t.Fatalf("应保留信号marker: ok=%v report=%+v", ok, report)
+	}
+	marker := report.SignalMarkers[0]
+	if marker.Status != "rejected" || marker.ReasonCode != "freshness_gate.signal_expired" {
+		t.Fatalf("前置降级应把marker标记为过期拒绝: %+v", marker)
+	}
+	if marker.SignalCloseTime != signalClose || marker.DisplayCloseTime != evaluationClose || marker.AgeCandles != 3 {
+		t.Fatalf("marker时序和age应来自freshness评估: %+v", marker)
+	}
+
+	downgraded, diagnostic = engine.downgradeExpiredChanlunV2Signal(ctx, d, "1h")
+	if !downgraded || !strings.Contains(diagnostic, "重复过期信号已静默") {
+		t.Fatalf("重复硬过期信号应复用静默诊断: downgraded=%v diagnostic=%q", downgraded, diagnostic)
+	}
+}
+
+func TestDowngradeExpiredChanlunV2SignalKeepsFreshSignalExecutable(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	signalClose := int64(1710000000000)
+	fresh := chanlunV2DecisionFixture(engine, ctx, "BNBUSDT", "buy2", "open_long", signalClose, signalClose, 90, 95, 120)
+	downgraded, diagnostic := engine.downgradeExpiredChanlunV2Signal(ctx, fresh, "1h")
+	if downgraded || diagnostic != "" {
+		t.Fatalf("fresh信号不应被前置降级: downgraded=%v diagnostic=%q", downgraded, diagnostic)
+	}
+}
+
 func TestApplyChanlunV2FreshnessGuardSuppressesRepeatedTerminalStaleSignal(t *testing.T) {
 	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
 	if err != nil {

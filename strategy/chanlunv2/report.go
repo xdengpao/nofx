@@ -168,6 +168,31 @@ func (e *Engine) markRejectedOpenMarkers(ctx *decision.Context, candidates, vali
 	}
 }
 
+func (e *Engine) markDiagnosticRejectedOpenMarker(ctx *decision.Context, d decision.Decision, rejection decision.OpenRejection, reason string) {
+	if ctx == nil || !decision.IsOpenLikeAction(d.Action) || d.SignalID == "" {
+		return
+	}
+	key := ctx.TraderID + "|" + market.Normalize(d.Symbol)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	report := e.latestSignals[key]
+	if report == nil {
+		return
+	}
+	for i := range report.SignalMarkers {
+		if report.SignalMarkers[i].SignalID != d.SignalID {
+			continue
+		}
+		applyOpenRejectionToV2Marker(&report.SignalMarkers[i], d, rejection, reason)
+	}
+	if report.LatestDiagnostics == nil {
+		report.LatestDiagnostics = map[string]any{}
+	}
+	report.LatestDiagnostics["stale_diagnostic"] = reason
+	report.MarkerSummary = buildChanlunV2MarkerSummary(report.SignalMarkers, report.SignalMarkers)
+	e.latestSignals[key] = report
+}
+
 func (e *Engine) baseSignalReport(traderID, symbol string) *chanlun.SignalReport {
 	timeframes := e.resolveTimeframes()
 	return &chanlun.SignalReport{

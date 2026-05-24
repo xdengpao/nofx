@@ -37,6 +37,19 @@ type chanlunV2StaleSuppression struct {
 	DedupeKeys          map[string]bool
 }
 
+type chanlunV2FreshnessEvaluation struct {
+	TradeTimeframe      string
+	SignalCloseTime     int64
+	DecisionCloseTime   int64
+	EvaluationCloseTime int64
+	AgeCandles          int
+	SoftAgeCandles      int
+	MaxLifetimeCandles  int
+	FreshnessState      string
+	CurrentPrice        float64
+	MinRemainingNetRR   float64
+}
+
 // NewEngine 创建缠论V2引擎
 func NewEngine(cfg config.ChanlunV2StrategyConfig) (*Engine, error) {
 	cfg = config.NormalizeChanlunV2StrategyConfig(cfg)
@@ -73,6 +86,9 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 
 	var allDecisions []decision.Decision
 	var diagnostics []string
+	var downgradedStaleSignals []string
+	rawSignalCount := 0
+	activeSignalCount := 0
 
 	// 对每个标的进行多级别分析
 	for _, symbol := range symbols {
@@ -93,6 +109,7 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 			e.setLatestReport(ctx.TraderID, symbol, multiResult, nil, symbolDiagnostics)
 			continue
 		}
+		rawSignalCount += len(signals)
 		e.setLatestReport(ctx.TraderID, symbol, multiResult, signals, symbolDiagnostics)
 
 		// 信号转 Decision
@@ -100,7 +117,15 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		for _, sig := range signals {
 			d := e.signalToDecision(ctx, symbol, sig, timeframes["trade"], decisionCloseTime)
 			if d.Action != "" {
+				if downgraded, diagnostic := e.downgradeExpiredChanlunV2Signal(ctx, d, timeframes["trade"]); downgraded {
+					if diagnostic != "" {
+						diagnostics = append(diagnostics, diagnostic)
+						downgradedStaleSignals = append(downgradedStaleSignals, diagnostic)
+					}
+					continue
+				}
 				allDecisions = append(allDecisions, d)
+				activeSignalCount++
 				diagnostics = append(diagnostics, fmt.Sprintf("%s %s 置信度%d", symbol, sig.SignalType, sig.Confidence))
 			}
 		}
@@ -123,6 +148,8 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		reason := "缠论V2策略未发现可执行信号"
 		if len(openRejections) > 0 {
 			reason = "缠论V2开仓信号已全部被过滤: " + strings.Join(chanlunV2OpenRejectionReasons(openRejections), "; ")
+		} else if len(downgradedStaleSignals) > 0 {
+			reason = "缠论V2过期信号已降级为诊断: " + strings.Join(downgradedStaleSignals, "; ")
 		} else if len(freshnessSuppressed) > 0 {
 			reason = "缠论V2重复过期信号已静默: " + strings.Join(freshnessSuppressed, "; ")
 		}
@@ -160,13 +187,16 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		ConfigHash:      e.configHash,
 		OpenRejections:  openRejections,
 		StrategyDiagnostics: map[string]any{
-			"messages":              diagnostics,
-			"timeframes":            timeframes,
-			"symbols":               symbols,
-			"open_rejections":       chanlunV2OpenRejectionReasons(openRejections),
-			"freshness_rejections":  chanlunV2OpenRejectionReasons(freshnessRejections),
-			"freshness_suppressed":  append([]string(nil), freshnessSuppressed...),
-			"validation_rejections": chanlunV2OpenRejectionReasons(validationRejections),
+			"messages":                 diagnostics,
+			"timeframes":               timeframes,
+			"symbols":                  symbols,
+			"raw_signal_count":         rawSignalCount,
+			"signal_count":             activeSignalCount,
+			"downgraded_stale_signals": append([]string(nil), downgradedStaleSignals...),
+			"open_rejections":          chanlunV2OpenRejectionReasons(openRejections),
+			"freshness_rejections":     chanlunV2OpenRejectionReasons(freshnessRejections),
+			"freshness_suppressed":     append([]string(nil), freshnessSuppressed...),
+			"validation_rejections":    chanlunV2OpenRejectionReasons(validationRejections),
 		},
 	}, nil
 }
@@ -372,6 +402,98 @@ func (e *Engine) signalToDecision(ctx *decision.Context, symbol string, sig Sign
 	}
 }
 
+func (e *Engine) downgradeExpiredChanlunV2Signal(ctx *decision.Context, d decision.Decision, tradeTF string) (bool, string) {
+	if !decision.IsOpenLikeAction(d.Action) {
+		return false, ""
+	}
+	policy := config.NormalizeChanlunV2SignalFreshness(e.Config.SignalFreshness)
+	if policy.Enabled != nil && !*policy.Enabled {
+		return false, ""
+	}
+	d, eval := e.enrichChanlunV2FreshnessMetadata(ctx, d, policy, tradeTF)
+	if eval.FreshnessState != "expired" {
+		return false, ""
+	}
+
+	reasonCode := "freshness_gate.signal_expired"
+	reason := fmt.Sprintf("%s %s 被前置降级为过期诊断: 信号已过期，年龄%d根%s超过硬上限%d根，结构时间=%d 评估K线=%d",
+		d.Symbol, d.Action, eval.AgeCandles, eval.TradeTimeframe, eval.MaxLifetimeCandles, eval.SignalCloseTime, eval.DecisionCloseTime)
+	d.StrategyMetadata["guard_reason_code"] = reasonCode
+	d.StrategyMetadata["reason_code"] = reasonCode
+	d.StrategyMetadata["stale_reason"] = reason
+	d.StrategyMetadata["action_timestamp"] = time.Now().UnixMilli()
+
+	rejection := decision.NewOpenRejectionFromDecision(d, reason)
+	rejection.GateState = "blocked"
+	rejection.GateReasons = []string{reasonCode}
+	rejection.GateDiagnostics = map[string]any{
+		"source":                "freshness_gate",
+		"reason_code":           reasonCode,
+		"freshness_state":       eval.FreshnessState,
+		"age_candles":           eval.AgeCandles,
+		"soft_age_candles":      eval.SoftAgeCandles,
+		"max_lifetime_candles":  eval.MaxLifetimeCandles,
+		"signal_close_time":     eval.SignalCloseTime,
+		"decision_close_time":   eval.DecisionCloseTime,
+		"evaluation_close_time": eval.EvaluationCloseTime,
+		"current_price":         eval.CurrentPrice,
+		"min_remaining_net_rr":  eval.MinRemainingNetRR,
+		"downgraded":            true,
+	}
+	e.markDiagnosticRejectedOpenMarker(ctx, d, rejection, reason)
+
+	suppressed, diagnostic := e.rememberOrSuppressTerminalFreshnessRejection(ctx, d, reasonCode, eval.FreshnessState, eval.SignalCloseTime, eval.DecisionCloseTime, reason)
+	if suppressed && diagnostic != "" {
+		return true, diagnostic
+	}
+	label := firstNonEmptyString(d.SignalType, d.Action, "signal")
+	return true, fmt.Sprintf("%s %s 已降级为过期诊断: %s 年龄%d根%s超过硬上限%d根",
+		market.Normalize(d.Symbol), label, reasonCode, eval.AgeCandles, eval.TradeTimeframe, eval.MaxLifetimeCandles)
+}
+
+func (e *Engine) enrichChanlunV2FreshnessMetadata(ctx *decision.Context, d decision.Decision, policy config.ChanlunV2SignalFreshnessConfig, tradeTF string) (decision.Decision, chanlunV2FreshnessEvaluation) {
+	tradeTF = firstNonEmptyString(tradeTF, "1h")
+	if d.StrategyMetadata == nil {
+		d.StrategyMetadata = map[string]any{}
+	}
+	signalClose := firstPositiveInt64(metadataInt64(d.StrategyMetadata, "signal_close_time"), metadataInt64(d.StrategyMetadata, "trigger_close_time"), metadataInt64(d.StrategyMetadata, "segment_end_time"))
+	decisionClose := firstPositiveInt64(metadataInt64(d.StrategyMetadata, "decision_close_time"), metadataInt64(d.StrategyMetadata, "evaluation_close_time"), signalClose)
+	if decisionClose > 0 && signalClose > 0 && decisionClose < signalClose {
+		decisionClose = signalClose
+	}
+	ageCandles := signalAgeCandles(signalClose, decisionClose, tradeTF)
+	softAge, maxLifetime := e.chanlunV2FreshnessLimits(policy, d.SignalType)
+	freshnessState := "fresh"
+	if ageCandles > maxLifetime {
+		freshnessState = "expired"
+	} else if ageCandles > softAge {
+		freshnessState = "aged"
+	}
+	currentPrice := currentPriceForV2Guard(ctx, d.Symbol, tradeTF)
+	minRR := e.minRemainingNetRR(ctx, policy)
+	d.StrategyMetadata["signal_close_time"] = signalClose
+	d.StrategyMetadata["decision_close_time"] = decisionClose
+	d.StrategyMetadata["evaluation_close_time"] = decisionClose
+	d.StrategyMetadata["freshness_state"] = freshnessState
+	d.StrategyMetadata["age_candles"] = ageCandles
+	d.StrategyMetadata["soft_age_candles"] = softAge
+	d.StrategyMetadata["max_lifetime_candles"] = maxLifetime
+	d.StrategyMetadata["current_price"] = currentPrice
+	d.StrategyMetadata["min_remaining_net_rr"] = minRR
+	return d, chanlunV2FreshnessEvaluation{
+		TradeTimeframe:      tradeTF,
+		SignalCloseTime:     signalClose,
+		DecisionCloseTime:   decisionClose,
+		EvaluationCloseTime: decisionClose,
+		AgeCandles:          ageCandles,
+		SoftAgeCandles:      softAge,
+		MaxLifetimeCandles:  maxLifetime,
+		FreshnessState:      freshnessState,
+		CurrentPrice:        currentPrice,
+		MinRemainingNetRR:   minRR,
+	}
+}
+
 func (e *Engine) managePositions(ctx *decision.Context, timeframes map[string]string) []decision.Decision {
 	if len(ctx.Positions) == 0 {
 		return nil
@@ -445,33 +567,15 @@ func (e *Engine) applyChanlunV2FreshnessGuard(ctx *decision.Context, decisions [
 			out = append(out, d)
 			continue
 		}
-		if d.StrategyMetadata == nil {
-			d.StrategyMetadata = map[string]any{}
-		}
-		signalClose := firstPositiveInt64(metadataInt64(d.StrategyMetadata, "signal_close_time"), metadataInt64(d.StrategyMetadata, "trigger_close_time"), metadataInt64(d.StrategyMetadata, "segment_end_time"))
-		decisionClose := firstPositiveInt64(metadataInt64(d.StrategyMetadata, "decision_close_time"), metadataInt64(d.StrategyMetadata, "evaluation_close_time"), signalClose)
-		if decisionClose > 0 && signalClose > 0 && decisionClose < signalClose {
-			decisionClose = signalClose
-		}
-		ageCandles := signalAgeCandles(signalClose, decisionClose, tradeTF)
-		softAge, maxLifetime := e.chanlunV2FreshnessLimits(policy, d.SignalType)
-		freshnessState := "fresh"
-		if ageCandles > maxLifetime {
-			freshnessState = "expired"
-		} else if ageCandles > softAge {
-			freshnessState = "aged"
-		}
-		currentPrice := currentPriceForV2Guard(ctx, d.Symbol, tradeTF)
-		minRR := e.minRemainingNetRR(ctx, policy)
-		d.StrategyMetadata["signal_close_time"] = signalClose
-		d.StrategyMetadata["decision_close_time"] = decisionClose
-		d.StrategyMetadata["evaluation_close_time"] = decisionClose
-		d.StrategyMetadata["freshness_state"] = freshnessState
-		d.StrategyMetadata["age_candles"] = ageCandles
-		d.StrategyMetadata["soft_age_candles"] = softAge
-		d.StrategyMetadata["max_lifetime_candles"] = maxLifetime
-		d.StrategyMetadata["current_price"] = currentPrice
-		d.StrategyMetadata["min_remaining_net_rr"] = minRR
+		d, eval := e.enrichChanlunV2FreshnessMetadata(ctx, d, policy, tradeTF)
+		signalClose := eval.SignalCloseTime
+		decisionClose := eval.DecisionCloseTime
+		ageCandles := eval.AgeCandles
+		softAge := eval.SoftAgeCandles
+		maxLifetime := eval.MaxLifetimeCandles
+		freshnessState := eval.FreshnessState
+		currentPrice := eval.CurrentPrice
+		minRR := eval.MinRemainingNetRR
 
 		if isSuppressed, diagnostic := e.suppressKnownTerminalFreshnessSignal(ctx, d, signalClose, decisionClose); isSuppressed {
 			if diagnostic != "" {

@@ -1694,13 +1694,55 @@ func countSignals24h(records []*logger.DecisionRecord, since time.Time) int {
 		if record == nil || (!since.IsZero() && record.Timestamp.Before(since)) {
 			continue
 		}
-		if diag, ok := record.StrategyDiagnostics["per_candidate"].([]any); ok {
-			count += len(diag)
+		if signalCount, ok := strategyDiagnosticSignalCount(record.StrategyDiagnostics); ok {
+			count += signalCount
+			continue
+		}
+		if perCandidateCount, ok := strategyDiagnosticPerCandidateCount(record.StrategyDiagnostics); ok {
+			count += perCandidateCount
 			continue
 		}
 		count += len(record.CandidateDetails)
 	}
 	return count
+}
+
+func strategyDiagnosticSignalCount(diagnostics map[string]any) (int, bool) {
+	if len(diagnostics) == 0 {
+		return 0, false
+	}
+	value, ok := diagnostics["signal_count"]
+	if !ok {
+		return 0, false
+	}
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int64:
+		return int(typed), true
+	case int32:
+		return int(typed), true
+	case float64:
+		return int(typed), true
+	case float32:
+		return int(typed), true
+	default:
+		return 0, false
+	}
+}
+
+func strategyDiagnosticPerCandidateCount(diagnostics map[string]any) (int, bool) {
+	if len(diagnostics) == 0 {
+		return 0, false
+	}
+	switch values := diagnostics["per_candidate"].(type) {
+	case []any:
+		return len(values), true
+	case []map[string]any:
+		return len(values), true
+	default:
+		return 0, false
+	}
 }
 
 func totalRealizedPnLSince(records []*logger.DecisionRecord, since time.Time) float64 {
