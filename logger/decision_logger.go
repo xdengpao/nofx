@@ -122,16 +122,30 @@ type LossModeSnapshot struct {
 
 // AccountSnapshot 账户状态快照
 type AccountSnapshot struct {
-	TotalBalance          float64 `json:"total_balance"`
-	AvailableBalance      float64 `json:"available_balance"`
-	TotalUnrealizedProfit float64 `json:"total_unrealized_profit"`
-	PositionCount         int     `json:"position_count"`
-	MarginUsedPct         float64 `json:"margin_used_pct"`
-	CostBasis             float64 `json:"cost_basis,omitempty"`
-	RealizedPnL           float64 `json:"realized_pnl,omitempty"`
-	PnLSource             string  `json:"pnl_source,omitempty"`
-	AccountTooSmall       bool    `json:"account_too_small,omitempty"`
-	TotalRealized24h      float64 `json:"total_realized_24h,omitempty"`
+	TotalBalance           float64 `json:"total_balance"`
+	AvailableBalance       float64 `json:"available_balance"`
+	TotalUnrealizedProfit  float64 `json:"total_unrealized_profit"`
+	PositionCount          int     `json:"position_count"`
+	MarginUsedPct          float64 `json:"margin_used_pct"`
+	CostBasis              float64 `json:"cost_basis,omitempty"`
+	RealizedPnL            float64 `json:"realized_pnl,omitempty"`
+	PnLSource              string  `json:"pnl_source,omitempty"`
+	StrategyBaseline       float64 `json:"strategy_baseline,omitempty"`
+	BaselineSource         string  `json:"baseline_source,omitempty"`
+	EquitySource           string  `json:"equity_source,omitempty"`
+	InitialBalance         float64 `json:"initial_balance,omitempty"`
+	InitialBalanceRole     string  `json:"initial_balance_role,omitempty"`
+	AllocationEnabled      bool    `json:"allocation_enabled,omitempty"`
+	AllocatedBalance       float64 `json:"allocated_balance,omitempty"`
+	AllocatedAvailable     float64 `json:"allocated_available_balance,omitempty"`
+	AllocatedUsedMargin    float64 `json:"allocated_used_margin,omitempty"`
+	SizingEquity           float64 `json:"sizing_equity,omitempty"`
+	SizingAvailableBalance float64 `json:"sizing_available_balance,omitempty"`
+	SizingEquitySource     string  `json:"sizing_equity_source,omitempty"`
+	RiskDenominator        float64 `json:"risk_denominator,omitempty"`
+	RiskDenominatorSource  string  `json:"risk_denominator_source,omitempty"`
+	AccountTooSmall        bool    `json:"account_too_small,omitempty"`
+	TotalRealized24h       float64 `json:"total_realized_24h,omitempty"`
 }
 
 // PositionSnapshot 持仓快照

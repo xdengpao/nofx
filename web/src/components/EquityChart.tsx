@@ -13,14 +13,7 @@ import useSWR from 'swr';
 import { api } from '../lib/api';
 import { useLanguage } from '../contexts/LanguageContext';
 import { t } from '../i18n/translations';
-
-interface EquityPoint {
-  timestamp: string;
-  total_equity: number;
-  pnl: number;
-  pnl_pct: number;
-  cycle_number: number;
-}
+import { buildEquityChartData, type EquityHistoryPoint } from '../utils/equityChart';
 
 interface EquityChartProps {
   traderId?: string;
@@ -30,7 +23,7 @@ export function EquityChart({ traderId }: EquityChartProps) {
   const { language } = useLanguage();
   const [displayMode, setDisplayMode] = useState<'dollar' | 'percent'>('dollar');
 
-  const { data: history, error } = useSWR<EquityPoint[]>(
+  const { data: history, error } = useSWR<EquityHistoryPoint[]>(
     traderId ? `equity-history-${traderId}` : 'equity-history',
     () => api.getEquityHistory(traderId),
     {
@@ -64,8 +57,14 @@ export function EquityChart({ traderId }: EquityChartProps) {
     );
   }
 
-  // 过滤掉无效数据：total_equity为0或小于1的数据点（API失败导致）
-  const validHistory = history?.filter(point => point.total_equity > 1) || [];
+  const MAX_DISPLAY_POINTS = 2000;
+  const {
+    validHistory,
+    chartData,
+    strategyBaseline,
+    currentValue,
+    latestReliable,
+  } = buildEquityChartData(history, account, displayMode, MAX_DISPLAY_POINTS);
 
   if (!validHistory || validHistory.length === 0) {
     return (
@@ -80,43 +79,17 @@ export function EquityChart({ traderId }: EquityChartProps) {
     );
   }
 
-  // 限制显示最近的数据点（性能优化）
-  // 如果数据超过2000个点，只显示最近2000个
-  const MAX_DISPLAY_POINTS = 2000;
-  const displayHistory = validHistory.length > MAX_DISPLAY_POINTS
-    ? validHistory.slice(-MAX_DISPLAY_POINTS)
-    : validHistory;
-
-  // 计算初始余额（使用第一个有效数据点，如果无数据则从account获取，最后才用默认值）
-  const initialBalance = validHistory[0]?.total_equity
-    || account?.total_equity
-    || 100;  // 默认值改为100，与常见配置一致
-
-  // 转换数据格式
-  const chartData = displayHistory.map((point) => {
-    const pnl = point.total_equity - initialBalance;
-    const pnlPct = ((pnl / initialBalance) * 100).toFixed(2);
-    return {
-      time: new Date(point.timestamp).toLocaleTimeString('zh-CN', {
-        hour: '2-digit',
-        minute: '2-digit',
-      }),
-      value: displayMode === 'dollar' ? point.total_equity : parseFloat(pnlPct),
-      cycle: point.cycle_number,
-      raw_equity: point.total_equity,
-      raw_pnl: pnl,
-      raw_pnl_pct: parseFloat(pnlPct),
-    };
-  });
-
-  const currentValue = chartData[chartData.length - 1];
-  const isProfit = currentValue.raw_pnl >= 0;
+  const currentEquity = account?.total_equity ?? currentValue?.raw_equity ?? 0;
+  const currentPnl = latestReliable?.raw_pnl ?? account?.total_pnl ?? 0;
+  const currentPnlPct = latestReliable?.raw_pnl_pct ?? account?.total_pnl_pct ?? 0;
+  const isProfit = currentPnl >= 0;
 
   // 计算Y轴范围
   const calculateYDomain = () => {
     if (displayMode === 'percent') {
       // 百分比模式：找到最大最小值，留20%余量
-      const values = chartData.map(d => d.value);
+      const values = chartData.map(d => d.value).filter((value): value is number => value !== null);
+      if (values.length === 0) return [-1, 1];
       const minVal = Math.min(...values);
       const maxVal = Math.max(...values);
       const range = Math.max(Math.abs(maxVal), Math.abs(minVal));
@@ -124,11 +97,11 @@ export function EquityChart({ traderId }: EquityChartProps) {
       return [Math.floor(minVal - padding), Math.ceil(maxVal + padding)];
     } else {
       // 美元模式：以初始余额为基准，上下留10%余量
-      const values = chartData.map(d => d.value);
-      const minVal = Math.min(...values, initialBalance);
-      const maxVal = Math.max(...values, initialBalance);
+      const values = chartData.map(d => d.value).filter((value): value is number => value !== null);
+      const minVal = Math.min(...values, strategyBaseline);
+      const maxVal = Math.max(...values, strategyBaseline);
       const range = maxVal - minVal;
-      const padding = Math.max(range * 0.15, initialBalance * 0.01); // 至少留1%余量
+      const padding = Math.max(range * 0.15, strategyBaseline * 0.01); // 至少留1%余量
       return [
         Math.floor(minVal - padding),
         Math.ceil(maxVal + padding)
@@ -146,14 +119,20 @@ export function EquityChart({ traderId }: EquityChartProps) {
           <div className="font-bold mono" style={{ color: '#EAECEF' }}>
             {data.raw_equity.toFixed(2)} USDT
           </div>
-          <div
-            className="text-sm mono font-bold"
-            style={{ color: data.raw_pnl >= 0 ? '#0ECB81' : '#F6465D' }}
-          >
-            {data.raw_pnl >= 0 ? '+' : ''}
-            {data.raw_pnl.toFixed(2)} USDT ({data.raw_pnl_pct >= 0 ? '+' : ''}
-            {data.raw_pnl_pct}%)
-          </div>
+          {data.raw_pnl === null || data.raw_pnl_pct === null ? (
+            <div className="text-sm mono font-bold" style={{ color: '#848E9C' }}>
+              {t('unreliableReturn', language)}
+            </div>
+          ) : (
+            <div
+              className="text-sm mono font-bold"
+              style={{ color: data.raw_pnl >= 0 ? '#0ECB81' : '#F6465D' }}
+            >
+              {data.raw_pnl >= 0 ? '+' : ''}
+              {data.raw_pnl.toFixed(2)} USDT ({data.raw_pnl_pct >= 0 ? '+' : ''}
+              {data.raw_pnl_pct.toFixed(2)}%)
+            </div>
+          )}
         </div>
       );
     }
@@ -168,7 +147,7 @@ export function EquityChart({ traderId }: EquityChartProps) {
           <h3 className="text-base sm:text-lg font-bold mb-2" style={{ color: '#EAECEF' }}>{t('accountEquityCurve', language)}</h3>
           <div className="flex flex-col sm:flex-row sm:items-baseline gap-2 sm:gap-4">
             <span className="text-2xl sm:text-3xl font-bold mono" style={{ color: '#EAECEF' }}>
-              {account?.total_equity.toFixed(2) || '0.00'}
+              {currentEquity.toFixed(2)}
               <span className="text-base sm:text-lg ml-1" style={{ color: '#848E9C' }}>USDT</span>
             </span>
             <div className="flex items-center gap-2 flex-wrap">
@@ -181,10 +160,10 @@ export function EquityChart({ traderId }: EquityChartProps) {
                 }}
               >
                 {isProfit ? '▲' : '▼'} {isProfit ? '+' : ''}
-                {currentValue.raw_pnl_pct}%
+                {currentPnlPct.toFixed(2)}%
               </span>
               <span className="text-xs sm:text-sm mono" style={{ color: '#848E9C' }}>
-                ({isProfit ? '+' : ''}{currentValue.raw_pnl.toFixed(2)} USDT)
+                ({isProfit ? '+' : ''}{currentPnl.toFixed(2)} USDT)
               </span>
             </div>
           </div>
@@ -247,11 +226,11 @@ export function EquityChart({ traderId }: EquityChartProps) {
           />
           <Tooltip content={<CustomTooltip />} />
           <ReferenceLine
-            y={displayMode === 'dollar' ? initialBalance : 0}
+            y={displayMode === 'dollar' ? strategyBaseline : 0}
             stroke="#474D57"
             strokeDasharray="3 3"
             label={{
-              value: displayMode === 'dollar' ? t('initialBalance', language).split(' ')[0] : '0%',
+              value: displayMode === 'dollar' ? t('strategyBaseline', language) : '0%',
               fill: '#848E9C',
               fontSize: 12,
             }}
@@ -272,9 +251,9 @@ export function EquityChart({ traderId }: EquityChartProps) {
       {/* Footer Stats */}
       <div className="mt-3 grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3 pt-3" style={{ borderTop: '1px solid #2B3139' }}>
         <div className="p-2 rounded transition-all hover:bg-opacity-50" style={{ background: 'rgba(240, 185, 11, 0.05)' }}>
-          <div className="text-xs mb-1 uppercase tracking-wider" style={{ color: '#848E9C' }}>{t('initialBalance', language)}</div>
+          <div className="text-xs mb-1 uppercase tracking-wider" style={{ color: '#848E9C' }}>{t('strategyBaseline', language)}</div>
           <div className="text-xs sm:text-sm font-bold mono" style={{ color: '#EAECEF' }}>
-            {initialBalance.toFixed(2)} USDT
+            {strategyBaseline.toFixed(2)} USDT
           </div>
         </div>
         <div className="p-2 rounded transition-all hover:bg-opacity-50" style={{ background: 'rgba(240, 185, 11, 0.05)' }}>

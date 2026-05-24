@@ -67,7 +67,8 @@ type AutoTraderConfig struct {
 	ScanInterval time.Duration // 扫描间隔（建议3分钟）
 
 	// 账户配置
-	InitialBalance float64 // 初始金额（用于计算盈亏，需手动设置）
+	InitialBalance    float64 // 初始金额（用于计算盈亏，需手动设置）
+	CapitalAllocation config.TraderCapitalAllocationConfig
 
 	// 杠杆配置
 	BTCETHLeverage  int // BTC和ETH的杠杆倍数
@@ -300,6 +301,9 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 	if config.InitialBalance <= 0 {
 		return nil, fmt.Errorf("初始金额必须大于0，请在配置中设置InitialBalance")
 	}
+	if config.CapitalAllocation.Enabled && config.CapitalAllocation.AllocatedBalance <= 0 {
+		return nil, fmt.Errorf("策略分配资金必须大于0")
+	}
 
 	// 初始化决策日志记录器（使用trader ID创建独立目录）
 	logDir := fmt.Sprintf("decision_logs/%s", config.ID)
@@ -501,15 +505,29 @@ func (at *AutoTrader) runCycle() error {
 
 	// 保存账户状态快照
 	record.AccountState = logger.AccountSnapshot{
-		TotalBalance:          ctx.Account.TotalEquity,
-		AvailableBalance:      ctx.Account.AvailableBalance,
-		TotalUnrealizedProfit: ctx.Account.TotalPnL,
-		PositionCount:         ctx.Account.PositionCount,
-		MarginUsedPct:         ctx.Account.MarginUsedPct,
-		CostBasis:             ctx.Account.CostBasis,
-		RealizedPnL:           ctx.Account.RealizedPnL,
-		PnLSource:             ctx.Account.PnLSource,
-		TotalRealized24h:      ctx.Account.TotalRealized24h,
+		TotalBalance:           ctx.Account.TotalEquity,
+		AvailableBalance:       ctx.Account.AvailableBalance,
+		TotalUnrealizedProfit:  ctx.Account.TotalPnL,
+		PositionCount:          ctx.Account.PositionCount,
+		MarginUsedPct:          ctx.Account.MarginUsedPct,
+		CostBasis:              ctx.Account.CostBasis,
+		RealizedPnL:            ctx.Account.RealizedPnL,
+		PnLSource:              ctx.Account.PnLSource,
+		StrategyBaseline:       ctx.Account.StrategyBaseline,
+		BaselineSource:         ctx.Account.BaselineSource,
+		EquitySource:           ctx.Account.EquitySource,
+		InitialBalance:         ctx.Account.InitialBalance,
+		InitialBalanceRole:     ctx.Account.InitialBalanceRole,
+		AllocationEnabled:      ctx.Account.AllocationEnabled,
+		AllocatedBalance:       ctx.Account.AllocatedBalance,
+		AllocatedAvailable:     ctx.Account.AllocatedAvailable,
+		AllocatedUsedMargin:    ctx.Account.AllocatedUsedMargin,
+		SizingEquity:           ctx.Account.SizingEquity,
+		SizingAvailableBalance: ctx.Account.SizingAvailableBalance,
+		SizingEquitySource:     ctx.Account.SizingEquitySource,
+		RiskDenominator:        ctx.Account.RiskDenominator,
+		RiskDenominatorSource:  ctx.Account.RiskDenominatorSource,
+		TotalRealized24h:       ctx.Account.TotalRealized24h,
 	}
 
 	// 保存持仓快照
@@ -1463,6 +1481,7 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	if totalEquity > 0 {
 		marginUsedPct = (totalMarginUsed / totalEquity) * 100
 	}
+	allocation := at.buildCapitalAllocationSnapshot(totalEquity, availableBalance, totalMarginUsed)
 
 	baseMaxRiskPerTrade := at.config.MaxRiskPerTrade
 	if baseMaxRiskPerTrade <= 0 {
@@ -1509,17 +1528,31 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		LossMode:                 lossMode,
 		StrategyRiskPolicy:       &at.config.StrategyRiskPolicy,
 		Account: decision.AccountInfo{
-			TotalEquity:      totalEquity,
-			AvailableBalance: availableBalance,
-			TotalPnL:         accountPnL.TotalPnL,
-			TotalPnLPct:      accountPnL.TotalPnLPct,
-			CostBasis:        accountPnL.CostBasis,
-			RealizedPnL:      accountPnL.RealizedPnL,
-			PnLSource:        accountPnL.Source,
-			TotalRealized24h: totalRealized24h,
-			MarginUsed:       totalMarginUsed,
-			MarginUsedPct:    marginUsedPct,
-			PositionCount:    len(positionInfos),
+			TotalEquity:            totalEquity,
+			AvailableBalance:       availableBalance,
+			TotalPnL:               accountPnL.TotalPnL,
+			TotalPnLPct:            accountPnL.TotalPnLPct,
+			CostBasis:              accountPnL.CostBasis,
+			RealizedPnL:            accountPnL.RealizedPnL,
+			PnLSource:              accountPnL.Source,
+			StrategyBaseline:       accountPnL.CostBasis,
+			BaselineSource:         accountPnL.Source,
+			EquitySource:           "exchange_balance",
+			InitialBalance:         at.initialBalance,
+			InitialBalanceRole:     "configured_baseline_fallback",
+			TotalRealized24h:       totalRealized24h,
+			MarginUsed:             totalMarginUsed,
+			MarginUsedPct:          marginUsedPct,
+			PositionCount:          len(positionInfos),
+			AllocationEnabled:      allocation.Enabled,
+			AllocatedBalance:       allocation.AllocatedBalance,
+			AllocatedAvailable:     allocation.AllocatedAvailable,
+			AllocatedUsedMargin:    allocation.AllocatedUsedMargin,
+			SizingEquity:           allocation.SizingEquity,
+			SizingAvailableBalance: allocation.SizingAvailableBalance,
+			SizingEquitySource:     allocation.SizingEquitySource,
+			RiskDenominator:        allocation.RiskDenominator,
+			RiskDenominatorSource:  allocation.RiskDenominatorSource,
 		},
 		Positions:           positionInfos,
 		CandidateCoins:      candidateCoins,
@@ -1763,6 +1796,52 @@ type accountPnLSummary struct {
 	RealizedPnL float64
 	CostBasis   float64
 	Source      string
+}
+
+type capitalAllocationSnapshot struct {
+	Enabled                bool
+	AllocatedBalance       float64
+	AllocatedAvailable     float64
+	AllocatedUsedMargin    float64
+	SizingEquity           float64
+	SizingAvailableBalance float64
+	SizingEquitySource     string
+	RiskDenominator        float64
+	RiskDenominatorSource  string
+}
+
+func (at *AutoTrader) buildCapitalAllocationSnapshot(totalEquity, exchangeAvailable, totalMarginUsed float64) capitalAllocationSnapshot {
+	snapshot := capitalAllocationSnapshot{
+		SizingEquity:           totalEquity,
+		SizingAvailableBalance: exchangeAvailable,
+		SizingEquitySource:     "exchange_equity",
+		RiskDenominator:        totalEquity,
+		RiskDenominatorSource:  "exchange_equity",
+	}
+	if at == nil || !at.config.CapitalAllocation.Enabled {
+		return snapshot
+	}
+
+	allocated := at.config.CapitalAllocation.AllocatedBalance
+	allocatedAvailable := allocated - totalMarginUsed
+	if allocatedAvailable < 0 {
+		allocatedAvailable = 0
+	}
+	sizingAvailable := allocatedAvailable
+	if exchangeAvailable > 0 && exchangeAvailable < sizingAvailable {
+		sizingAvailable = exchangeAvailable
+	}
+
+	snapshot.Enabled = true
+	snapshot.AllocatedBalance = allocated
+	snapshot.AllocatedAvailable = allocatedAvailable
+	snapshot.AllocatedUsedMargin = totalMarginUsed
+	snapshot.SizingEquity = allocated
+	snapshot.SizingAvailableBalance = sizingAvailable
+	snapshot.SizingEquitySource = "allocated_balance"
+	snapshot.RiskDenominator = allocated
+	snapshot.RiskDenominatorSource = "allocated_balance"
+	return snapshot
 }
 
 func computeAccountPnLSummary(records []*logger.DecisionRecord, totalEquity, totalUnrealizedPnL, configuredInitialBalance float64) accountPnLSummary {
@@ -3254,16 +3333,22 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
 	frequencyPolicy := at.effectiveFrequencyPolicy(frequencyState)
 
 	return map[string]interface{}{
-		"trader_id":        at.id,
-		"trader_name":      at.name,
-		"ai_model":         at.aiModel,
-		"decision_mode":    at.GetDecisionMode(),
-		"exchange":         at.exchange,
-		"is_running":       at.isRunning,
-		"start_time":       at.startTime.Format(time.RFC3339),
-		"runtime_minutes":  int(time.Since(at.startTime).Minutes()),
-		"call_count":       at.callCount,
-		"initial_balance":  at.initialBalance,
+		"trader_id":          at.id,
+		"trader_name":        at.name,
+		"ai_model":           at.aiModel,
+		"decision_mode":      at.GetDecisionMode(),
+		"exchange":           at.exchange,
+		"is_running":         at.isRunning,
+		"start_time":         at.startTime.Format(time.RFC3339),
+		"runtime_minutes":    int(time.Since(at.startTime).Minutes()),
+		"call_count":         at.callCount,
+		"initial_balance":    at.initialBalance,
+		"allocation_enabled": at.config.CapitalAllocation.Enabled,
+		"allocated_balance":  at.config.CapitalAllocation.AllocatedBalance,
+		"capital_allocation": map[string]interface{}{
+			"enabled":           at.config.CapitalAllocation.Enabled,
+			"allocated_balance": at.config.CapitalAllocation.AllocatedBalance,
+		},
 		"scan_interval":    at.config.ScanInterval.String(),
 		"stop_until":       at.stopUntil.Format(time.RFC3339),
 		"last_reset_time":  at.lastResetTime.Format(time.RFC3339),
@@ -3377,6 +3462,7 @@ func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
 	if totalEquity > 0 {
 		marginUsedPct = (totalMarginUsed / totalEquity) * 100
 	}
+	allocation := at.buildCapitalAllocationSnapshot(totalEquity, availableBalance, totalMarginUsed)
 
 	return map[string]interface{}{
 		// 核心字段
@@ -3384,21 +3470,36 @@ func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
 		"wallet_balance":    totalWalletBalance,    // 钱包余额（不含未实现盈亏）
 		"unrealized_profit": totalUnrealizedProfit, // 未实现盈亏（从API）
 		"available_balance": availableBalance,      // 可用余额
+		"equity_source":     "exchange_balance",
 
 		// 盈亏统计
 		"total_pnl":            accountPnL.TotalPnL,    // 交易盈亏 = 已实现 + 未实现，不把投入本金算作利润
 		"total_pnl_pct":        accountPnL.TotalPnLPct, // 相对成本基准的交易收益率
 		"cost_basis":           accountPnL.CostBasis,   // 成本基准 = 当前净值 - 交易盈亏
+		"strategy_baseline":    accountPnL.CostBasis,
+		"baseline_source":      accountPnL.Source,
 		"realized_pnl":         accountPnL.RealizedPnL, // 决策日志可对账的已实现盈亏
 		"pnl_source":           accountPnL.Source,
 		"total_unrealized_pnl": totalUnrealizedPnL, // 未实现盈亏（从持仓计算）
 		"initial_balance":      at.initialBalance,  // 初始余额
-		"daily_pnl":            at.dailyPnL,        // 日盈亏
+		"initial_balance_role": "configured_baseline_fallback",
+		"daily_pnl":            at.dailyPnL, // 日盈亏
 
 		// 持仓信息
 		"position_count":  len(positions),  // 持仓数量
 		"margin_used":     totalMarginUsed, // 保证金占用
 		"margin_used_pct": marginUsedPct,   // 保证金使用率
+
+		// 策略资金分配
+		"allocation_enabled":          allocation.Enabled,
+		"allocated_balance":           allocation.AllocatedBalance,
+		"allocated_available_balance": allocation.AllocatedAvailable,
+		"allocated_used_margin":       allocation.AllocatedUsedMargin,
+		"sizing_equity":               allocation.SizingEquity,
+		"sizing_available_balance":    allocation.SizingAvailableBalance,
+		"sizing_equity_source":        allocation.SizingEquitySource,
+		"risk_denominator":            allocation.RiskDenominator,
+		"risk_denominator_source":     allocation.RiskDenominatorSource,
 	}, nil
 }
 

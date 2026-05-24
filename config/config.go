@@ -44,8 +44,15 @@ type TraderConfig struct {
 	CustomAPIKey    string `json:"custom_api_key,omitempty"`
 	CustomModelName string `json:"custom_model_name,omitempty"`
 
-	InitialBalance      float64 `json:"initial_balance"`
-	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
+	InitialBalance      float64                       `json:"initial_balance"`
+	CapitalAllocation   TraderCapitalAllocationConfig `json:"capital_allocation,omitempty"`
+	ScanIntervalMinutes int                           `json:"scan_interval_minutes"`
+}
+
+// TraderCapitalAllocationConfig 控制单个 trader 是否只按指定策略资金参与 sizing 和风险预算。
+type TraderCapitalAllocationConfig struct {
+	Enabled          bool    `json:"enabled,omitempty"`
+	AllocatedBalance float64 `json:"allocated_balance,omitempty"`
 }
 
 // LeverageConfig 杠杆配置
@@ -1268,6 +1275,9 @@ func (c *Config) Validate() error {
 		}
 		if trader.InitialBalance <= 0 {
 			return fmt.Errorf("trader[%d]: initial_balance必须大于0", i)
+		}
+		if trader.CapitalAllocation.Enabled && trader.CapitalAllocation.AllocatedBalance <= 0 {
+			return fmt.Errorf("trader[%d]: capital_allocation.allocated_balance必须大于0", i)
 		}
 		if trader.ScanIntervalMinutes <= 0 {
 			trader.ScanIntervalMinutes = 3 // 默认3分钟

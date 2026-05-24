@@ -146,6 +146,59 @@ func parseJSONArray(t *testing.T, w *httptest.ResponseRecorder) []interface{} {
 	return result
 }
 
+func TestBuildEquityHistoryPoints_MarksLegacyMissingCostBasisUnreliable(t *testing.T) {
+	records := []*logger.DecisionRecord{{
+		Timestamp:   time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC),
+		CycleNumber: 1,
+		AccountState: logger.AccountSnapshot{
+			TotalBalance:          44.48,
+			AvailableBalance:      44.47,
+			TotalUnrealizedProfit: 34.48,
+		},
+	}}
+
+	points := buildEquityHistoryPoints(records, 10)
+	if len(points) != 1 {
+		t.Fatalf("期望1个历史点，实际=%d", len(points))
+	}
+	if points[0].ReturnReliable {
+		t.Fatalf("缺少cost_basis的旧记录不应标记为可靠: %+v", points[0])
+	}
+	if points[0].TotalPnLPct != 0 {
+		t.Fatalf("不可靠旧记录不应发布误导性收益率: %+v", points[0])
+	}
+	if points[0].CostBasis != 10 {
+		t.Fatalf("旧记录仍可保留兜底成本基准用于对账: %+v", points[0])
+	}
+}
+
+func TestBuildEquityHistoryPoints_UsesBackendCostBasis(t *testing.T) {
+	records := []*logger.DecisionRecord{{
+		Timestamp:   time.Date(2026, 5, 24, 12, 0, 0, 0, time.UTC),
+		CycleNumber: 2,
+		AccountState: logger.AccountSnapshot{
+			TotalBalance:          44.48471397,
+			AvailableBalance:      44.47581791,
+			TotalUnrealizedProfit: 0.0717623067,
+			CostBasis:             44.4129516633,
+			StrategyBaseline:      44.4129516633,
+			BaselineSource:        "trade_logs_plus_unrealized",
+			EquitySource:          "exchange_balance",
+		},
+	}}
+
+	points := buildEquityHistoryPoints(records, 10)
+	if len(points) != 1 || !points[0].ReturnReliable {
+		t.Fatalf("带cost_basis的记录应可靠: %+v", points)
+	}
+	if points[0].CostBasis != 44.4129516633 || points[0].StrategyBaseline != 44.4129516633 {
+		t.Fatalf("应使用后端成本基准: %+v", points[0])
+	}
+	if points[0].TotalPnLPct < 0.16 || points[0].TotalPnLPct > 0.17 {
+		t.Fatalf("收益率应按后端cost_basis计算: %+v", points[0])
+	}
+}
+
 // ============================================================================
 // 需求 12.1: CORS 中间件测试
 // ============================================================================

@@ -10,15 +10,22 @@ export interface SystemStatus {
   last_reset_time: string;
   ai_provider: string;
   decision_mode?: string;
+  allocation_enabled?: boolean;
+  allocated_balance?: number;
 }
 
 // 账户信息
 export interface AccountInfo {
   total_equity: number;
+  wallet_balance?: number;
+  unrealized_profit?: number;
   available_balance: number;
   total_pnl: number;
   total_pnl_pct: number;
   cost_basis?: number;
+  strategy_baseline?: number;
+  baseline_source?: string;
+  equity_source?: string;
   realized_pnl?: number;
   pnl_source?: string;
   total_unrealized_pnl: number;
@@ -26,7 +33,17 @@ export interface AccountInfo {
   margin_used_pct: number;
   position_count: number;
   initial_balance: number;
+  initial_balance_role?: string;
   daily_pnl: number;
+  allocation_enabled?: boolean;
+  allocated_balance?: number;
+  allocated_available_balance?: number;
+  allocated_used_margin?: number;
+  sizing_equity?: number;
+  sizing_available_balance?: number;
+  sizing_equity_source?: string;
+  risk_denominator?: number;
+  risk_denominator_source?: string;
 }
 
 // 持仓信息
@@ -214,6 +231,17 @@ export interface DecisionRecord {
     total_unrealized_profit: number;
     position_count: number;
     margin_used_pct: number;
+    cost_basis?: number;
+    strategy_baseline?: number;
+    baseline_source?: string;
+    equity_source?: string;
+    allocation_enabled?: boolean;
+    allocated_balance?: number;
+    allocated_available_balance?: number;
+    allocated_used_margin?: number;
+    sizing_equity?: number;
+    sizing_available_balance?: number;
+    sizing_equity_source?: string;
     account_too_small?: boolean;
     total_realized_24h?: number;
   };

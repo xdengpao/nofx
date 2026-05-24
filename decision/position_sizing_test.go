@@ -81,3 +81,47 @@ func TestCalculatePositionSizing_CannotPartialExit(t *testing.T) {
 		t.Fatalf("小仓位不应支持分批退出: %+v", result)
 	}
 }
+
+func TestCalculatePositionSizing_AllocationDisabledPreservesExchangeSizing(t *testing.T) {
+	result := CalculatePositionSizing(PositionSizingInput{
+		AccountEquity:            10000,
+		AvailableBalance:         10000,
+		CurrentPrice:             100,
+		StopLoss:                 99,
+		Leverage:                 5,
+		EffectiveRiskPct:         0.02,
+		RequestedPositionSizeUSD: 10000,
+		MinOrderValueUSDT:        10,
+	})
+
+	if !result.Executable {
+		t.Fatalf("未启用allocation时应保持交易所资金sizing行为: %+v", result)
+	}
+	if result.PositionSizeUSD < 9999 {
+		t.Fatalf("未启用allocation时不应被小资金上限压缩: %+v", result)
+	}
+}
+
+func TestCalculatePositionSizing_AllocationInsufficientReasonCode(t *testing.T) {
+	result := CalculatePositionSizing(PositionSizingInput{
+		AccountEquity:            100,
+		AvailableBalance:         2,
+		ExchangeAvailableBalance: 10000,
+		AllocationEnabled:        true,
+		AllocatedBalance:         100,
+		AllocatedAvailable:       2,
+		CurrentPrice:             100,
+		StopLoss:                 99,
+		Leverage:                 5,
+		EffectiveRiskPct:         0.02,
+		RequestedPositionSizeUSD: 10000,
+		MinOrderValueUSDT:        10,
+	})
+
+	if result.Executable {
+		t.Fatalf("分配资金不足时不应可执行: %+v", result)
+	}
+	if result.ReasonCode != "position_sizing.allocation_insufficient" {
+		t.Fatalf("应输出allocation结构化拒绝码: %+v", result)
+	}
+}

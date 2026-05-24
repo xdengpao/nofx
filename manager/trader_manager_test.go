@@ -129,6 +129,31 @@ func TestAddTraderWithFrequency_PassesPolicy(t *testing.T) {
 	}
 }
 
+func TestAddTrader_PassesCapitalAllocation(t *testing.T) {
+	tm := NewTraderManager()
+	defer tm.StopOrderTracking()
+
+	cfg := makeTestTraderConfig("allocation-trader", "Allocation Trader")
+	cfg.CapitalAllocation = config.TraderCapitalAllocationConfig{
+		Enabled:          true,
+		AllocatedBalance: 10,
+	}
+	if err := tm.AddTrader(cfg, "", 10.0, 20.0, 30, defaultLeverage); err != nil {
+		t.Fatalf("添加带capital allocation的trader失败: %v", err)
+	}
+	at, err := tm.GetTrader("allocation-trader")
+	if err != nil {
+		t.Fatalf("获取trader失败: %v", err)
+	}
+	status := at.GetStatus()
+	if status["allocation_enabled"] != true {
+		t.Fatalf("status应输出allocation_enabled=true: %+v", status)
+	}
+	if status["allocated_balance"] != 10.0 {
+		t.Fatalf("status应输出allocated_balance=10: %+v", status)
+	}
+}
+
 func TestAddTraderWithPolicies_PassesStrategyRiskPolicy(t *testing.T) {
 	tm := NewTraderManager()
 	defer tm.StopOrderTracking()

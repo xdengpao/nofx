@@ -143,7 +143,8 @@ func (rc *RiskCalculator) CalculatePositionRisk(
 
 // CalculateTotalRisk 计算总风险
 func CalculateTotalRisk(ctx *Context) (totalRisk float64, riskDetails []*PositionRisk) {
-	if ctx.Account.TotalEquity <= 0 {
+	riskDenominator := AccountRiskDenominator(ctx.Account)
+	if riskDenominator <= 0 {
 		return 0, nil
 	}
 
@@ -180,7 +181,7 @@ func CalculateTotalRisk(ctx *Context) (totalRisk float64, riskDetails []*Positio
 			inaccurateCount, (safetyMargin-1)*100)
 	}
 
-	totalRisk = totalRiskUSD / ctx.Account.TotalEquity
+	totalRisk = totalRiskUSD / riskDenominator
 	return totalRisk, riskDetails
 }
 

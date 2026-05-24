@@ -495,6 +495,22 @@ func (s *Server) handleStatistics(c *gin.Context) {
 	c.JSON(http.StatusOK, stats)
 }
 
+type EquityHistoryPoint struct {
+	Timestamp        string  `json:"timestamp"`
+	TotalEquity      float64 `json:"total_equity"`      // 账户净值（wallet + unrealized）
+	AvailableBalance float64 `json:"available_balance"` // 可用余额
+	TotalPnL         float64 `json:"total_pnl"`         // 交易盈亏（已实现 + 未实现）
+	TotalPnLPct      float64 `json:"total_pnl_pct"`     // 相对成本基准的盈亏百分比
+	CostBasis        float64 `json:"cost_basis,omitempty"`
+	StrategyBaseline float64 `json:"strategy_baseline,omitempty"`
+	BaselineSource   string  `json:"baseline_source,omitempty"`
+	EquitySource     string  `json:"equity_source,omitempty"`
+	ReturnReliable   bool    `json:"return_reliable"`
+	PositionCount    int     `json:"position_count"`  // 持仓数量
+	MarginUsedPct    float64 `json:"margin_used_pct"` // 保证金使用率
+	CycleNumber      int     `json:"cycle_number"`
+}
+
 // handleEquityHistory 收益率历史数据
 func (s *Server) handleEquityHistory(c *gin.Context) {
 	_, traderID, err := s.getTraderFromQuery(c)
@@ -519,19 +535,6 @@ func (s *Server) handleEquityHistory(c *gin.Context) {
 		return
 	}
 
-	// 构建收益率历史数据点
-	type EquityPoint struct {
-		Timestamp        string  `json:"timestamp"`
-		TotalEquity      float64 `json:"total_equity"`      // 账户净值（wallet + unrealized）
-		AvailableBalance float64 `json:"available_balance"` // 可用余额
-		TotalPnL         float64 `json:"total_pnl"`         // 交易盈亏（已实现 + 未实现）
-		TotalPnLPct      float64 `json:"total_pnl_pct"`     // 相对成本基准的盈亏百分比
-		CostBasis        float64 `json:"cost_basis,omitempty"`
-		PositionCount    int     `json:"position_count"`  // 持仓数量
-		MarginUsedPct    float64 `json:"margin_used_pct"` // 保证金使用率
-		CycleNumber      int     `json:"cycle_number"`
-	}
-
 	// 从AutoTrader获取初始余额（用于计算盈亏百分比）
 	initialBalance := 0.0
 	if status := trader.GetStatus(); status != nil {
@@ -554,41 +557,74 @@ func (s *Server) handleEquityHistory(c *gin.Context) {
 		return
 	}
 
-	var history []EquityPoint
+	history := buildEquityHistoryPoints(records, initialBalance)
+
+	c.JSON(http.StatusOK, history)
+}
+
+func buildEquityHistoryPoints(records []*logger.DecisionRecord, initialBalance float64) []EquityHistoryPoint {
+	history := make([]EquityHistoryPoint, 0, len(records))
 	for _, record := range records {
-		// TotalBalance字段实际存储的是TotalEquity
+		if record == nil {
+			continue
+		}
 		totalEquity := record.AccountState.TotalBalance
-		// TotalUnrealizedProfit字段历史上承载总盈亏，当前为交易盈亏。
 		totalPnL := record.AccountState.TotalUnrealizedProfit
-
 		costBasis := record.AccountState.CostBasis
-		if costBasis <= 0 {
-			costBasis = initialBalance
+		strategyBaseline := record.AccountState.StrategyBaseline
+		baselineSource := record.AccountState.BaselineSource
+		if baselineSource == "" {
+			baselineSource = record.AccountState.PnLSource
 		}
-		if costBasis <= 0 && totalEquity > 0 {
-			costBasis = totalEquity - totalPnL
+		equitySource := record.AccountState.EquitySource
+		if equitySource == "" && totalEquity > 0 {
+			equitySource = "exchange_balance"
 		}
 
-		// 计算盈亏百分比
+		returnReliable := true
+		if record.Timestamp.IsZero() {
+			returnReliable = false
+			baselineSource = "legacy_zero_timestamp"
+		}
+		if costBasis <= 0 {
+			returnReliable = false
+			if baselineSource == "" {
+				baselineSource = "legacy_missing_cost_basis"
+			} else if !strings.HasPrefix(baselineSource, "legacy_") {
+				baselineSource = "legacy_" + baselineSource
+			}
+			if initialBalance > 0 {
+				costBasis = initialBalance
+			} else if totalEquity > 0 && totalEquity-totalPnL > 0 {
+				costBasis = totalEquity - totalPnL
+			}
+		}
+		if strategyBaseline <= 0 && costBasis > 0 {
+			strategyBaseline = costBasis
+		}
+
 		totalPnLPct := 0.0
-		if costBasis > 0 {
+		if returnReliable && costBasis > 0 {
 			totalPnLPct = (totalPnL / costBasis) * 100
 		}
 
-		history = append(history, EquityPoint{
+		history = append(history, EquityHistoryPoint{
 			Timestamp:        record.Timestamp.Format("2006-01-02 15:04:05"),
 			TotalEquity:      totalEquity,
 			AvailableBalance: record.AccountState.AvailableBalance,
 			TotalPnL:         totalPnL,
 			TotalPnLPct:      totalPnLPct,
 			CostBasis:        costBasis,
+			StrategyBaseline: strategyBaseline,
+			BaselineSource:   baselineSource,
+			EquitySource:     equitySource,
+			ReturnReliable:   returnReliable,
 			PositionCount:    record.AccountState.PositionCount,
 			MarginUsedPct:    record.AccountState.MarginUsedPct,
 			CycleNumber:      record.CycleNumber,
 		})
 	}
-
-	c.JSON(http.StatusOK, history)
+	return history
 }
 
 // handlePerformance AI历史表现分析（用于展示AI学习和反思）

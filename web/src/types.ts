@@ -12,6 +12,8 @@ export interface SystemStatus {
   stop_until: string;
   last_reset_time: string;
   ai_provider: string;
+  allocation_enabled?: boolean;
+  allocated_balance?: number;
 }
 
 export interface AccountInfo {
@@ -22,14 +24,27 @@ export interface AccountInfo {
   total_pnl: number;
   total_pnl_pct: number;
   cost_basis?: number;
+  strategy_baseline?: number;
+  baseline_source?: string;
+  equity_source?: string;
   realized_pnl?: number;
   pnl_source?: string;
   total_unrealized_pnl: number;
   initial_balance: number;
+  initial_balance_role?: string;
   daily_pnl: number;
   position_count: number;
   margin_used: number;
   margin_used_pct: number;
+  allocation_enabled?: boolean;
+  allocated_balance?: number;
+  allocated_available_balance?: number;
+  allocated_used_margin?: number;
+  sizing_equity?: number;
+  sizing_available_balance?: number;
+  sizing_equity_source?: string;
+  risk_denominator?: number;
+  risk_denominator_source?: string;
 }
 
 export interface Position {

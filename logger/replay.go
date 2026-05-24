@@ -28,6 +28,7 @@ type ReplayReport struct {
 	FirstBalance                  float64                     `json:"first_balance,omitempty"`
 	LastBalance                   float64                     `json:"last_balance,omitempty"`
 	BalanceDelta                  float64                     `json:"balance_delta,omitempty"`
+	AccountSemantics              *AccountSemanticsSummary    `json:"account_semantics,omitempty"`
 	ExecutionFailureRate          float64                     `json:"execution_failure_rate"`
 	UnmatchedCount                int                         `json:"unmatched_count"`
 	TradeCount                    int                         `json:"trade_count"`
@@ -49,6 +50,23 @@ type ReplayReport struct {
 	ReportOnlySimulationSymbols   map[string]int              `json:"report_only_simulation_symbols,omitempty"`
 	Notes                         []string                    `json:"notes,omitempty"`
 	RecentOpenRejectionText       []string                    `json:"recent_open_rejection_text,omitempty"`
+}
+
+// AccountSemanticsSummary 汇总回放日志中的资金基准和策略分配语义。
+type AccountSemanticsSummary struct {
+	FirstStrategyBaseline     float64 `json:"first_strategy_baseline,omitempty"`
+	LastStrategyBaseline      float64 `json:"last_strategy_baseline,omitempty"`
+	BaselineSource            string  `json:"baseline_source,omitempty"`
+	EquitySource              string  `json:"equity_source,omitempty"`
+	AllocationEnabled         bool    `json:"allocation_enabled,omitempty"`
+	AllocatedBalance          float64 `json:"allocated_balance,omitempty"`
+	AllocatedAvailableBalance float64 `json:"allocated_available_balance,omitempty"`
+	AllocatedUsedMargin       float64 `json:"allocated_used_margin,omitempty"`
+	SizingEquity              float64 `json:"sizing_equity,omitempty"`
+	SizingAvailableBalance    float64 `json:"sizing_available_balance,omitempty"`
+	SizingEquitySource        string  `json:"sizing_equity_source,omitempty"`
+	RiskDenominator           float64 `json:"risk_denominator,omitempty"`
+	RiskDenominatorSource     string  `json:"risk_denominator_source,omitempty"`
 }
 
 // OpenRejectionDailyReport 汇总开仓被拒和接近放行的诊断。
@@ -305,6 +323,7 @@ func BuildReplayReport(records []*DecisionRecord, reportOnly bool, dryRun bool) 
 	}
 	report.StrategyDisease = BuildStrategyDiseaseReport(records)
 	report.FirstBalance, report.LastBalance, report.BalanceDelta = extractBalanceDelta(records)
+	report.AccountSemantics = extractAccountSemantics(records)
 	closeSummary := buildCloseDedupeSummary(records)
 	report.RawCloseActions = closeSummary.rawCloseActions
 	report.DeduplicatedCloseActions = closeSummary.deduplicatedCloseActions
@@ -1326,6 +1345,50 @@ func extractBalanceDelta(records []*DecisionRecord) (float64, float64, float64) 
 		return first, last, 0
 	}
 	return first, last, last - first
+}
+
+func extractAccountSemantics(records []*DecisionRecord) *AccountSemanticsSummary {
+	sortedRecords := sortedReplayRecords(records)
+	var summary AccountSemanticsSummary
+	for _, record := range sortedRecords {
+		if record == nil {
+			continue
+		}
+		snapshot := record.AccountState
+		baseline := snapshot.StrategyBaseline
+		if baseline <= 0 {
+			baseline = snapshot.CostBasis
+		}
+		if baseline > 0 {
+			if summary.FirstStrategyBaseline == 0 {
+				summary.FirstStrategyBaseline = baseline
+			}
+			summary.LastStrategyBaseline = baseline
+		}
+		if snapshot.BaselineSource != "" {
+			summary.BaselineSource = snapshot.BaselineSource
+		} else if snapshot.PnLSource != "" && summary.BaselineSource == "" {
+			summary.BaselineSource = snapshot.PnLSource
+		}
+		if snapshot.EquitySource != "" {
+			summary.EquitySource = snapshot.EquitySource
+		}
+		if snapshot.AllocationEnabled {
+			summary.AllocationEnabled = true
+			summary.AllocatedBalance = snapshot.AllocatedBalance
+			summary.AllocatedAvailableBalance = snapshot.AllocatedAvailable
+			summary.AllocatedUsedMargin = snapshot.AllocatedUsedMargin
+			summary.SizingEquity = snapshot.SizingEquity
+			summary.SizingAvailableBalance = snapshot.SizingAvailableBalance
+			summary.SizingEquitySource = snapshot.SizingEquitySource
+			summary.RiskDenominator = snapshot.RiskDenominator
+			summary.RiskDenominatorSource = snapshot.RiskDenominatorSource
+		}
+	}
+	if summary.FirstStrategyBaseline == 0 && summary.BaselineSource == "" && summary.EquitySource == "" && !summary.AllocationEnabled {
+		return nil
+	}
+	return &summary
 }
 
 func classifyRejectionBucket(reason string, action DecisionAction) string {

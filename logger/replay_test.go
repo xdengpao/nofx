@@ -46,6 +46,50 @@ func TestBuildReplayReport_OpenRejectionAndPnL(t *testing.T) {
 	}
 }
 
+func TestBuildReplayReport_AccountSemanticsMixedOldNewLogs(t *testing.T) {
+	now := time.Now()
+	records := []*DecisionRecord{
+		{
+			Timestamp:    now.Add(-time.Hour),
+			AccountState: AccountSnapshot{TotalBalance: 100},
+		},
+		{
+			Timestamp: now,
+			AccountState: AccountSnapshot{
+				TotalBalance:           110,
+				CostBasis:              108,
+				StrategyBaseline:       108,
+				BaselineSource:         "trade_logs_plus_unrealized",
+				EquitySource:           "exchange_balance",
+				AllocationEnabled:      true,
+				AllocatedBalance:       50,
+				AllocatedAvailable:     40,
+				AllocatedUsedMargin:    10,
+				SizingEquity:           50,
+				SizingAvailableBalance: 40,
+				SizingEquitySource:     "allocated_balance",
+				RiskDenominator:        50,
+				RiskDenominatorSource:  "allocated_balance",
+			},
+		},
+	}
+
+	report := BuildReplayReport(records, false, false)
+	if report.AccountSemantics == nil {
+		t.Fatal("应输出account_semantics摘要")
+	}
+	if report.AccountSemantics.LastStrategyBaseline != 108 ||
+		report.AccountSemantics.BaselineSource != "trade_logs_plus_unrealized" ||
+		report.AccountSemantics.EquitySource != "exchange_balance" {
+		t.Fatalf("baseline/equity语义摘要错误: %+v", report.AccountSemantics)
+	}
+	if !report.AccountSemantics.AllocationEnabled ||
+		report.AccountSemantics.AllocatedBalance != 50 ||
+		report.AccountSemantics.SizingEquitySource != "allocated_balance" {
+		t.Fatalf("allocation语义摘要错误: %+v", report.AccountSemantics)
+	}
+}
+
 func TestBuildOpenRejectionDailyReport(t *testing.T) {
 	now := time.Date(2026, 5, 19, 17, 0, 0, 0, time.UTC)
 	records := []*DecisionRecord{{

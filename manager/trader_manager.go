@@ -107,6 +107,7 @@ func (tm *TraderManager) AddTraderWithPolicies(cfg config.TraderConfig, coinPool
 		CustomModelName:         cfg.CustomModelName,
 		ScanInterval:            cfg.GetScanInterval(),
 		InitialBalance:          cfg.InitialBalance,
+		CapitalAllocation:       cfg.CapitalAllocation,
 		BTCETHLeverage:          leverage.BTCETHLeverage,  // 使用配置的杠杆倍数
 		AltcoinLeverage:         leverage.AltcoinLeverage, // 使用配置的杠杆倍数
 		MaxDailyLoss:            maxDailyLoss,

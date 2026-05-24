@@ -76,6 +76,27 @@ func TestLoadConfig_ValidFile_ReturnsConfig(t *testing.T) {
 	}
 }
 
+func TestConfigValidate_CapitalAllocationOptionalAndValid(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].CapitalAllocation = TraderCapitalAllocationConfig{
+		Enabled:          true,
+		AllocatedBalance: 10,
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("有效capital_allocation不应报错: %v", err)
+	}
+}
+
+func TestConfigValidate_CapitalAllocationEnabledRequiresPositiveBalance(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].CapitalAllocation = TraderCapitalAllocationConfig{Enabled: true}
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("启用capital_allocation但allocated_balance<=0应报错")
+	}
+}
+
 // 需求 1.10: 文件不存在时返回错误
 func TestLoadConfig_MissingFile_ReturnsError(t *testing.T) {
 	_, err := LoadConfig("/nonexistent/path/config.json")

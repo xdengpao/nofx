@@ -1347,7 +1347,11 @@ func validateOpenDecisionWithOptions(d *Decision, ctx *Context, opts openValidat
 
 	// 检查风险预算
 	remainingBudget := calculateRemainingRiskBudget(ctx)
-	estimatedRisk := d.RiskUSD / ctx.Account.TotalEquity
+	riskDenominator := AccountRiskDenominator(ctx.Account)
+	if riskDenominator <= 0 {
+		return fmt.Errorf("风险预算分母无效")
+	}
+	estimatedRisk := d.RiskUSD / riskDenominator
 	if estimatedRisk > remainingBudget {
 		return fmt.Errorf("风险预算不足: 需要%.2f%%, 剩余%.2f%%", estimatedRisk*100, remainingBudget*100)
 	}
@@ -1370,7 +1374,8 @@ func validateOpenDecisionWithOptions(d *Decision, ctx *Context, opts openValidat
 		d.RequestedPositionSizeUSD = originalRequestedSize
 	}
 
-	maxPositionValue := ctx.Account.AvailableBalance * float64(maxLeverage) * 0.9
+	sizingAvailable := AccountSizingAvailableBalance(ctx.Account)
+	maxPositionValue := sizingAvailable * float64(maxLeverage) * 0.9
 	if d.PositionSizeUSD > maxPositionValue {
 		log.Printf("⚠️ 自动调整仓位: %.0f → %.0f USD", d.PositionSizeUSD, maxPositionValue*0.9)
 		d.PositionSizeUSD = maxPositionValue * 0.9
@@ -1427,9 +1432,14 @@ func validateOpenDecisionWithOptions(d *Decision, ctx *Context, opts openValidat
 	if StrategyRiskActive(ctx.StrategyRiskPolicy) && strategyProfile.MinOrderValueUSDT > 0 {
 		minOrderValue = strategyProfile.MinOrderValueUSDT
 	}
+	sizingEquity := AccountSizingEquity(ctx.Account)
 	sizing := CalculatePositionSizing(PositionSizingInput{
-		AccountEquity:            ctx.Account.TotalEquity,
-		AvailableBalance:         ctx.Account.AvailableBalance,
+		AccountEquity:            sizingEquity,
+		AvailableBalance:         sizingAvailable,
+		ExchangeAvailableBalance: ctx.Account.AvailableBalance,
+		AllocationEnabled:        ctx.Account.AllocationEnabled,
+		AllocatedBalance:         ctx.Account.AllocatedBalance,
+		AllocatedAvailable:       ctx.Account.AllocatedAvailable,
 		CurrentPrice:             currentPrice,
 		StopLoss:                 d.StopLoss,
 		Leverage:                 d.Leverage,
@@ -1461,15 +1471,43 @@ func validateOpenDecisionWithOptions(d *Decision, ctx *Context, opts openValidat
 			d.SizingReason = "单笔风险超限，已缩小到最大可执行仓位"
 			return nil
 		}
-		return fmt.Errorf("单笔风险(%.2f USD)超过上限(%.2f USD)", d.PositionSizeUSD*(riskPct/100), ctx.Account.TotalEquity*effectiveRiskForSizing)
+		return fmt.Errorf("单笔风险(%.2f USD)超过上限(%.2f USD)", d.PositionSizeUSD*(riskPct/100), sizingEquity*effectiveRiskForSizing)
 	}
 	if !sizing.Executable && sizing.PositionSizeUSD < minOrderValue {
+		attachPositionSizingDiagnostics(d, sizing, ctx)
+		if sizing.ReasonCode != "" {
+			return fmt.Errorf("%s: %s", sizing.ReasonCode, strings.Join(sizing.Reasons, "; "))
+		}
 		return fmt.Errorf("仓位sizing不可执行: %s", strings.Join(sizing.Reasons, "; "))
 	}
 
 	d.RiskUSD = sizing.RiskUSD
 	d.AdjustedPositionSizeUSD = sizing.PositionSizeUSD
 	return nil
+}
+
+func attachPositionSizingDiagnostics(d *Decision, sizing PositionSizingResult, ctx *Context) {
+	if d == nil {
+		return
+	}
+	if d.StrategyMetadata == nil {
+		d.StrategyMetadata = map[string]any{}
+	}
+	if sizing.ReasonCode != "" {
+		d.StrategyMetadata["position_sizing_reason_code"] = sizing.ReasonCode
+	}
+	d.StrategyMetadata["position_sizing_reasons"] = append([]string(nil), sizing.Reasons...)
+	d.StrategyMetadata["position_sizing_executable"] = sizing.Executable
+	d.StrategyMetadata["position_sizing_max_position_size_usd"] = sizing.MaxPositionSizeUSD
+	d.StrategyMetadata["position_sizing_margin_required_usd"] = sizing.MarginRequiredUSD
+	if ctx != nil {
+		d.StrategyMetadata["allocation_enabled"] = ctx.Account.AllocationEnabled
+		d.StrategyMetadata["allocated_balance"] = ctx.Account.AllocatedBalance
+		d.StrategyMetadata["allocated_available_balance"] = ctx.Account.AllocatedAvailable
+		d.StrategyMetadata["exchange_available_balance"] = ctx.Account.AvailableBalance
+		d.StrategyMetadata["sizing_equity"] = AccountSizingEquity(ctx.Account)
+		d.StrategyMetadata["sizing_available_balance"] = AccountSizingAvailableBalance(ctx.Account)
+	}
 }
 
 func openGateConfidenceReason(gate OpenGateResult) string {
@@ -2806,7 +2844,7 @@ func buildUserPrompt(ctx *Context, remainingBudget float64) string {
 			riskForSizing = ctx.LossMode.MaxRiskPerTrade
 		}
 		suggestedSize, stopDist := market.CalculateAdaptivePositionSize(
-			ctx.Account.TotalEquity,
+			AccountSizingEquity(ctx.Account),
 			atr14,
 			marketData.CurrentPrice,
 			riskForSizing,
@@ -3229,6 +3267,10 @@ func DebugContext(ctx *Context) string {
 	sb.WriteString("=== 账户状态 ===\n")
 	sb.WriteString(fmt.Sprintf("净值: %.2f USDT\n", ctx.Account.TotalEquity))
 	sb.WriteString(fmt.Sprintf("可用: %.2f USDT\n", ctx.Account.AvailableBalance))
+	if ctx.Account.AllocationEnabled {
+		sb.WriteString(fmt.Sprintf("策略分配资金: %.2f USDT\n", ctx.Account.AllocatedBalance))
+		sb.WriteString(fmt.Sprintf("策略可用资金: %.2f USDT\n", ctx.Account.AllocatedAvailable))
+	}
 	sb.WriteString(fmt.Sprintf("保证金使用率: %.1f%%\n", ctx.Account.MarginUsedPct))
 	sb.WriteString(fmt.Sprintf("持仓数: %d\n\n", ctx.Account.PositionCount))
 

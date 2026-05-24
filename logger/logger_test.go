@@ -945,11 +945,21 @@ func TestLogDecision_AccountState_RoundTrip(t *testing.T) {
 
 	r := newRecord(true)
 	r.AccountState = AccountSnapshot{
-		TotalBalance:          12345.67,
-		AvailableBalance:      9876.54,
-		TotalUnrealizedProfit: 100.0,
-		PositionCount:         2,
-		MarginUsedPct:         15.5,
+		TotalBalance:           12345.67,
+		AvailableBalance:       9876.54,
+		TotalUnrealizedProfit:  100.0,
+		PositionCount:          2,
+		MarginUsedPct:          15.5,
+		StrategyBaseline:       12000,
+		BaselineSource:         "trade_logs_plus_unrealized",
+		EquitySource:           "exchange_balance",
+		AllocationEnabled:      true,
+		AllocatedBalance:       1000,
+		AllocatedAvailable:     850,
+		AllocatedUsedMargin:    150,
+		SizingEquity:           1000,
+		SizingAvailableBalance: 850,
+		SizingEquitySource:     "allocated_balance",
 	}
 
 	if err := l.LogDecision(r); err != nil {
@@ -967,6 +977,12 @@ func TestLogDecision_AccountState_RoundTrip(t *testing.T) {
 	}
 	if snap.PositionCount != 2 {
 		t.Errorf("PositionCount 应为2, 实际=%d", snap.PositionCount)
+	}
+	if !snap.AllocationEnabled || snap.AllocatedBalance != 1000 || snap.SizingEquitySource != "allocated_balance" {
+		t.Errorf("allocation字段未正确往返: %+v", snap)
+	}
+	if snap.StrategyBaseline != 12000 || snap.BaselineSource != "trade_logs_plus_unrealized" || snap.EquitySource != "exchange_balance" {
+		t.Errorf("baseline字段未正确往返: %+v", snap)
 	}
 }
 

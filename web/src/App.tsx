@@ -517,7 +517,7 @@ function TraderDetailsPage({
       {account && (
         <div className="mb-4 p-3 rounded text-xs font-mono" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
           <div style={{ color: '#848E9C' }}>
-            🔄 Last Update: {lastUpdate} | Total Equity: {account.total_equity?.toFixed(2) || '0.00'} |
+            🔄 Last Update: {lastUpdate} | Exchange Equity: {account.total_equity?.toFixed(2) || '0.00'} |
             Available: {account.available_balance?.toFixed(2) || '0.00'} | P&L: {account.total_pnl?.toFixed(2) || '0.00'}{' '}
             ({account.total_pnl_pct?.toFixed(2) || '0.00'}%)
           </div>
@@ -525,9 +525,9 @@ function TraderDetailsPage({
       )}
 
       {/* Account Overview */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+      <div className="grid grid-cols-1 md:grid-cols-5 gap-4 mb-8">
         <StatCard
-          title={t('totalEquity', language)}
+          title={t('exchangeEquity', language)}
           value={`${account?.total_equity?.toFixed(2) || '0.00'} USDT`}
           change={account && Math.abs(account.total_pnl_pct || 0) > 0.0001 ? account.total_pnl_pct : undefined}
           positive={(account?.total_pnl ?? 0) >= 0}
@@ -542,7 +542,14 @@ function TraderDetailsPage({
           value={`${account?.total_pnl !== undefined && account.total_pnl >= 0 ? '+' : ''}${account?.total_pnl?.toFixed(2) || '0.00'} USDT`}
           change={account && Math.abs(account.total_pnl_pct || 0) > 0.0001 ? account.total_pnl_pct : undefined}
           positive={(account?.total_pnl ?? 0) >= 0}
-          subtitle={`成本基准 ${account?.cost_basis?.toFixed(2) || account?.total_equity?.toFixed(2) || '0.00'} USDT`}
+          subtitle={`${t('strategyBaseline', language)} ${account?.strategy_baseline?.toFixed(2) || account?.cost_basis?.toFixed(2) || account?.total_equity?.toFixed(2) || '0.00'} USDT`}
+        />
+        <StatCard
+          title={t('configuredInitialBalance', language)}
+          value={`${account?.initial_balance?.toFixed(2) || '0.00'} USDT`}
+          subtitle={account?.allocation_enabled
+            ? `${t('strategyAllocatedCapital', language)} ${account?.allocated_balance?.toFixed(2) || '0.00'} / ${account?.allocated_available_balance?.toFixed(2) || '0.00'} USDT`
+            : `${account?.initial_balance_role || 'configured_baseline_fallback'}`}
         />
         <StatCard
           title={t('positions', language)}

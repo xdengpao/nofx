@@ -10,7 +10,13 @@
       "hyperliquid_wallet_addr": "your_ethereum_address",
       "hyperliquid_testnet": false,
       "deepseek_key": "your_deepseek_api_key",
+      // initial_balance 是收益统计/兜底基准，不代表交易所钱包上限。
       "initial_balance": 1000,
+      // 如需让该 trader 只按指定策略资金做 sizing 和风险预算，启用 capital_allocation。
+      "capital_allocation": {
+        "enabled": false,
+        "allocated_balance": 1000
+      },
       "scan_interval_minutes": 3
     },
     {

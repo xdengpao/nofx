@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"nofx/config"
 	"nofx/decision"
 	"nofx/logger"
 	"nofx/market"
@@ -1730,6 +1731,128 @@ func TestGetAccountInfoTreatsCurrentEquityAsCostBasisWhenNoTrades(t *testing.T) 
 	}
 	if got := account["pnl_source"].(string); got != "current_equity_cost_basis_no_trades" {
 		t.Fatalf("pnl_source不符合预期: %s", got)
+	}
+}
+
+func TestGetAccountInfoExposesBaselineSemanticsWithTradeLogs(t *testing.T) {
+	logDir := t.TempDir()
+	decisionLogger := logger.NewDecisionLogger(logDir)
+	now := time.Now()
+	if err := decisionLogger.LogDecision(&logger.DecisionRecord{
+		Timestamp: now.Add(-2 * time.Hour),
+		Decisions: []logger.DecisionAction{{
+			Action:    "open_long",
+			Symbol:    "BNBUSDT",
+			Quantity:  1,
+			Price:     660,
+			Leverage:  5,
+			Timestamp: now.Add(-2 * time.Hour),
+			Success:   true,
+		}},
+		Success: true,
+	}); err != nil {
+		t.Fatalf("写入开仓日志失败: %v", err)
+	}
+	if err := decisionLogger.LogDecision(&logger.DecisionRecord{
+		Timestamp: now.Add(-time.Hour),
+		Decisions: []logger.DecisionAction{{
+			Action:    "close_long",
+			Symbol:    "BNBUSDT",
+			Quantity:  1,
+			Price:     660.0717623067,
+			Leverage:  5,
+			Timestamp: now.Add(-time.Hour),
+			Success:   true,
+		}},
+		Success: true,
+	}); err != nil {
+		t.Fatalf("写入平仓日志失败: %v", err)
+	}
+
+	at := &AutoTrader{
+		trader: &mockTrader{balance: map[string]interface{}{
+			"totalWalletBalance":    44.48471397,
+			"totalUnrealizedProfit": 0.0,
+			"availableBalance":      44.47581791,
+		}},
+		decisionLogger: decisionLogger,
+		initialBalance: 10,
+	}
+
+	account, err := at.GetAccountInfo()
+	if err != nil {
+		t.Fatalf("GetAccountInfo 不应失败: %v", err)
+	}
+	if got := account["total_equity"].(float64); math.Abs(got-44.48471397) > 0.00000001 {
+		t.Fatalf("total_equity应保留交易所净值: got=%.10f", got)
+	}
+	if got := account["initial_balance"].(float64); got != 10 {
+		t.Fatalf("initial_balance应保留配置值: got=%.2f", got)
+	}
+	if got := account["cost_basis"].(float64); math.Abs(got-44.4129516633) > 0.000001 {
+		t.Fatalf("cost_basis应由交易日志重建: got=%.10f", got)
+	}
+	if got := account["strategy_baseline"].(float64); math.Abs(got-44.4129516633) > 0.000001 {
+		t.Fatalf("strategy_baseline应等于当前成本基准: got=%.10f", got)
+	}
+	if got := account["equity_source"].(string); got != "exchange_balance" {
+		t.Fatalf("equity_source不符合预期: %s", got)
+	}
+	if got := account["baseline_source"].(string); got != "trade_logs_plus_unrealized" {
+		t.Fatalf("baseline_source不符合预期: %s", got)
+	}
+	if got := account["initial_balance_role"].(string); got != "configured_baseline_fallback" {
+		t.Fatalf("initial_balance_role不符合预期: %s", got)
+	}
+}
+
+func TestGetAccountInfoComputesCapitalAllocationState(t *testing.T) {
+	at := &AutoTrader{
+		config: AutoTraderConfig{
+			CapitalAllocation: config.TraderCapitalAllocationConfig{
+				Enabled:          true,
+				AllocatedBalance: 100,
+			},
+		},
+		trader: &mockTrader{
+			balance: map[string]interface{}{
+				"totalWalletBalance":    1000.0,
+				"totalUnrealizedProfit": 0.0,
+				"availableBalance":      50.0,
+			},
+			positions: []map[string]interface{}{{
+				"symbol":           "BNBUSDT",
+				"side":             "long",
+				"entryPrice":       100.0,
+				"markPrice":        100.0,
+				"positionAmt":      1.0,
+				"unRealizedProfit": 0.0,
+				"liquidationPrice": 10.0,
+				"leverage":         5.0,
+			}},
+		},
+		decisionLogger: logger.NewDecisionLogger(t.TempDir()),
+		initialBalance: 1000,
+	}
+
+	account, err := at.GetAccountInfo()
+	if err != nil {
+		t.Fatalf("GetAccountInfo 不应失败: %v", err)
+	}
+	if account["allocation_enabled"] != true {
+		t.Fatalf("allocation_enabled应为true: %+v", account)
+	}
+	if got := account["allocated_used_margin"].(float64); math.Abs(got-20) > 0.000001 {
+		t.Fatalf("allocated_used_margin应扣减当前保证金: got=%.6f", got)
+	}
+	if got := account["allocated_available_balance"].(float64); math.Abs(got-80) > 0.000001 {
+		t.Fatalf("allocated_available_balance应等于分配资金减保证金: got=%.6f", got)
+	}
+	if got := account["sizing_available_balance"].(float64); math.Abs(got-50) > 0.000001 {
+		t.Fatalf("sizing_available_balance应取交易所可用和分配可用较小值: got=%.6f", got)
+	}
+	if got := account["risk_denominator"].(float64); math.Abs(got-100) > 0.000001 {
+		t.Fatalf("risk_denominator应使用分配资金: got=%.6f", got)
 	}
 }
 

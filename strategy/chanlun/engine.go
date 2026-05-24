@@ -1809,8 +1809,12 @@ func (e *Engine) applyPreviewPilotSizing(ctx *decision.Context, data *market.Dat
 		return
 	}
 	sizing := decision.CalculatePositionSizing(decision.PositionSizingInput{
-		AccountEquity:            ctx.Account.TotalEquity,
-		AvailableBalance:         ctx.Account.AvailableBalance,
+		AccountEquity:            decision.AccountSizingEquity(ctx.Account),
+		AvailableBalance:         decision.AccountSizingAvailableBalance(ctx.Account),
+		ExchangeAvailableBalance: ctx.Account.AvailableBalance,
+		AllocationEnabled:        ctx.Account.AllocationEnabled,
+		AllocatedBalance:         ctx.Account.AllocatedBalance,
+		AllocatedAvailable:       ctx.Account.AllocatedAvailable,
 		CurrentPrice:             currentPrice,
 		StopLoss:                 d.StopLoss,
 		Leverage:                 d.Leverage,

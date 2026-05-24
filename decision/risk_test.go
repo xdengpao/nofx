@@ -167,6 +167,25 @@ func TestCalculateTotalRisk_NoPositions_ReturnsZero(t *testing.T) {
 	}
 }
 
+func TestCalculateTotalRisk_UsesAllocatedCapitalDenominator(t *testing.T) {
+	ctx := newRiskTestContext(10000)
+	ctx.Account.AllocationEnabled = true
+	ctx.Account.AllocatedBalance = 1000
+	ctx.Account.RiskDenominator = 1000
+	ctx.Positions = []PositionInfo{{
+		Symbol:    "BTCUSDT",
+		Side:      "long",
+		MarkPrice: 100,
+		Quantity:  10,
+		StopLoss:  95,
+	}}
+
+	totalRisk, _ := CalculateTotalRisk(ctx)
+	if math.Abs(totalRisk-0.05) > 0.000001 {
+		t.Fatalf("总风险应按allocated capital分母计算: got=%.6f", totalRisk)
+	}
+}
+
 func TestCalculateTotalRisk_InaccurateEstimates_AddSafetyMargin(t *testing.T) {
 	// 两个持仓，均无止损（不准确估算），应添加安全边际
 	ctx := newRiskTestContext(10000)

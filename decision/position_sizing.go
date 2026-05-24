@@ -6,6 +6,10 @@ import "math"
 type PositionSizingInput struct {
 	AccountEquity            float64
 	AvailableBalance         float64
+	ExchangeAvailableBalance float64
+	AllocationEnabled        bool
+	AllocatedBalance         float64
+	AllocatedAvailable       float64
 	CurrentPrice             float64
 	StopLoss                 float64
 	Leverage                 int
@@ -34,6 +38,7 @@ type PositionSizingResult struct {
 	StopDistanceRatio     float64  `json:"stop_distance_ratio"`
 	StopDistancePercent   float64  `json:"stop_distance_percent"`
 	CanPartialExit        bool     `json:"can_partial_exit"`
+	ReasonCode            string   `json:"reason_code,omitempty"`
 	Reasons               []string `json:"reasons,omitempty"`
 }
 
@@ -48,10 +53,12 @@ func CalculatePositionSizing(input PositionSizingInput) PositionSizingResult {
 	result := PositionSizingResult{}
 
 	if input.AccountEquity <= 0 {
+		result.ReasonCode = positionSizingReasonCode(input, "position_sizing.invalid_account_equity")
 		result.Reasons = append(result.Reasons, "账户净值必须大于0")
 		return result
 	}
 	if input.AvailableBalance <= 0 {
+		result.ReasonCode = positionSizingReasonCode(input, "position_sizing.available_balance_insufficient")
 		result.Reasons = append(result.Reasons, "可用余额必须大于0")
 		return result
 	}
@@ -113,10 +120,12 @@ func CalculatePositionSizing(input PositionSizingInput) PositionSizingResult {
 	result.MarginRequiredUSD = positionSize / float64(input.Leverage)
 
 	if positionSize < input.MinOrderValueUSDT {
+		result.ReasonCode = positionSizingReasonCode(input, "position_sizing.min_notional")
 		result.Reasons = append(result.Reasons, "仓位名义额低于最小下单额")
 		return result
 	}
 	if result.MarginRequiredUSD > input.AvailableBalance {
+		result.ReasonCode = positionSizingReasonCode(input, "position_sizing.available_balance_insufficient")
 		result.Reasons = append(result.Reasons, "可用保证金不足")
 		return result
 	}
@@ -130,4 +139,11 @@ func CalculatePositionSizing(input PositionSizingInput) PositionSizingResult {
 
 	result.Executable = len(result.Reasons) == 0
 	return result
+}
+
+func positionSizingReasonCode(input PositionSizingInput, fallback string) string {
+	if input.AllocationEnabled {
+		return "position_sizing.allocation_insufficient"
+	}
+	return fallback
 }

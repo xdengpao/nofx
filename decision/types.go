@@ -29,17 +29,67 @@ type PositionInfo struct {
 
 // AccountInfo 账户信息
 type AccountInfo struct {
-	TotalEquity      float64 `json:"total_equity"`
-	AvailableBalance float64 `json:"available_balance"`
-	TotalPnL         float64 `json:"total_pnl"`
-	TotalPnLPct      float64 `json:"total_pnl_pct"`
-	CostBasis        float64 `json:"cost_basis,omitempty"`
-	RealizedPnL      float64 `json:"realized_pnl,omitempty"`
-	PnLSource        string  `json:"pnl_source,omitempty"`
-	TotalRealized24h float64 `json:"total_realized_24h,omitempty"`
-	MarginUsed       float64 `json:"margin_used"`
-	MarginUsedPct    float64 `json:"margin_used_pct"`
-	PositionCount    int     `json:"position_count"`
+	TotalEquity            float64 `json:"total_equity"`
+	AvailableBalance       float64 `json:"available_balance"`
+	TotalPnL               float64 `json:"total_pnl"`
+	TotalPnLPct            float64 `json:"total_pnl_pct"`
+	CostBasis              float64 `json:"cost_basis,omitempty"`
+	RealizedPnL            float64 `json:"realized_pnl,omitempty"`
+	PnLSource              string  `json:"pnl_source,omitempty"`
+	StrategyBaseline       float64 `json:"strategy_baseline,omitempty"`
+	BaselineSource         string  `json:"baseline_source,omitempty"`
+	EquitySource           string  `json:"equity_source,omitempty"`
+	InitialBalance         float64 `json:"initial_balance,omitempty"`
+	InitialBalanceRole     string  `json:"initial_balance_role,omitempty"`
+	TotalRealized24h       float64 `json:"total_realized_24h,omitempty"`
+	MarginUsed             float64 `json:"margin_used"`
+	MarginUsedPct          float64 `json:"margin_used_pct"`
+	PositionCount          int     `json:"position_count"`
+	AllocationEnabled      bool    `json:"allocation_enabled,omitempty"`
+	AllocatedBalance       float64 `json:"allocated_balance,omitempty"`
+	AllocatedAvailable     float64 `json:"allocated_available_balance,omitempty"`
+	AllocatedUsedMargin    float64 `json:"allocated_used_margin,omitempty"`
+	SizingEquity           float64 `json:"sizing_equity,omitempty"`
+	SizingAvailableBalance float64 `json:"sizing_available_balance,omitempty"`
+	SizingEquitySource     string  `json:"sizing_equity_source,omitempty"`
+	RiskDenominator        float64 `json:"risk_denominator,omitempty"`
+	RiskDenominatorSource  string  `json:"risk_denominator_source,omitempty"`
+}
+
+// AccountRiskDenominator 返回风险预算百分比使用的资金分母。
+func AccountRiskDenominator(account AccountInfo) float64 {
+	if account.RiskDenominator > 0 {
+		return account.RiskDenominator
+	}
+	if account.AllocationEnabled && account.AllocatedBalance > 0 {
+		return account.AllocatedBalance
+	}
+	if account.SizingEquity > 0 {
+		return account.SizingEquity
+	}
+	return account.TotalEquity
+}
+
+// AccountSizingEquity 返回开仓 sizing 使用的净值基准。
+func AccountSizingEquity(account AccountInfo) float64 {
+	if account.SizingEquity > 0 {
+		return account.SizingEquity
+	}
+	if account.AllocationEnabled && account.AllocatedBalance > 0 {
+		return account.AllocatedBalance
+	}
+	return account.TotalEquity
+}
+
+// AccountSizingAvailableBalance 返回开仓 sizing 使用的可用资金。
+func AccountSizingAvailableBalance(account AccountInfo) float64 {
+	if account.SizingAvailableBalance > 0 {
+		return account.SizingAvailableBalance
+	}
+	if account.AllocationEnabled {
+		return account.AllocatedAvailable
+	}
+	return account.AvailableBalance
 }
 
 // CandidateCoin 候选币种
