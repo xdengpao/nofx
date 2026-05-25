@@ -222,6 +222,10 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 	if len(validationRejections) > 0 {
 		summary += "; 风控/open gate拒绝 " + strings.Join(chanlunV2OpenRejectionReasons(validationRejections), "; ")
 	}
+	actionReasons := chanlunV2DecisionReasonSummaries(allDecisions)
+	if len(actionReasons) > 0 {
+		summary += "; 交易动作原因: " + strings.Join(actionReasons, "; ")
+	}
 	terminalSuppressedCount, terminalSuppressedReasons, terminalSuppressedSamples := e.terminalSuppressionSnapshot(ctx.TraderID, 3)
 
 	return &decision.FullDecision{
@@ -250,8 +254,102 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 			"terminal_suppressed_reasons": terminalSuppressedReasons,
 			"terminal_suppressed_samples": append([]string(nil), terminalSuppressedSamples...),
 			"validation_rejections":       chanlunV2OpenRejectionReasons(validationRejections),
+			"action_reasons":              append([]string(nil), actionReasons...),
 		},
 	}, nil
+}
+
+func chanlunV2DecisionReasonSummaries(decisions []decision.Decision) []string {
+	if len(decisions) == 0 {
+		return nil
+	}
+	summaries := make([]string, 0, len(decisions))
+	for _, d := range decisions {
+		summary := chanlunV2DecisionReasonSummary(d)
+		if summary != "" {
+			summaries = append(summaries, summary)
+		}
+	}
+	return summaries
+}
+
+func chanlunV2DecisionReasonSummary(d decision.Decision) string {
+	actionLabel, reasonLabel := chanlunV2ActionReasonLabels(d.Action)
+	if reasonLabel == "" {
+		return ""
+	}
+	symbol := market.Normalize(d.Symbol)
+	if symbol == "" || symbol == "ALL" {
+		return ""
+	}
+	reason := strings.TrimSpace(d.Reasoning)
+	if reason == "" {
+		reason = "策略未提供具体原因"
+	}
+	details := chanlunV2DecisionReasonDetails(d)
+	if len(details) > 0 {
+		return fmt.Sprintf("%s %s(%s) %s: %s [%s]", symbol, d.Action, actionLabel, reasonLabel, reason, strings.Join(details, ", "))
+	}
+	return fmt.Sprintf("%s %s(%s) %s: %s", symbol, d.Action, actionLabel, reasonLabel, reason)
+}
+
+func chanlunV2ActionReasonLabels(action string) (string, string) {
+	switch action {
+	case "open_long":
+		return "开多", "开仓原因"
+	case "open_short":
+		return "开空", "开仓原因"
+	case "close_long":
+		return "平多", "平仓原因"
+	case "close_short":
+		return "平空", "平仓原因"
+	case "partial_close":
+		return "部分平仓", "平仓原因"
+	default:
+		return "", ""
+	}
+}
+
+func chanlunV2DecisionReasonDetails(d decision.Decision) []string {
+	details := []string{}
+	if d.SignalType != "" {
+		details = append(details, "信号="+d.SignalType)
+	}
+	if d.SignalTimeframe != "" {
+		details = append(details, "周期="+d.SignalTimeframe)
+	}
+	if d.Confidence > 0 {
+		details = append(details, fmt.Sprintf("置信度=%d", d.Confidence))
+	}
+	if decision.IsOpenLikeAction(d.Action) {
+		if d.Leverage > 0 {
+			details = append(details, fmt.Sprintf("杠杆=%dx", d.Leverage))
+		}
+		if d.PositionSizeUSD > 0 {
+			details = append(details, fmt.Sprintf("仓位=%.2fUSDT", d.PositionSizeUSD))
+		}
+		if stop := firstPositiveFloat(d.EffectiveStopLoss, d.StopLoss, d.RequestedStopLoss); stop > 0 {
+			details = append(details, fmt.Sprintf("SL=%.4f", stop))
+		}
+		if take := firstPositiveFloat(d.EffectiveTakeProfit, d.TakeProfit, d.RequestedTakeProfit); take > 0 {
+			details = append(details, fmt.Sprintf("TP=%.4f", take))
+		}
+		if d.NetRR > 0 {
+			details = append(details, fmt.Sprintf("净RR=%.2f", d.NetRR))
+		}
+	}
+	if !decision.IsOpenLikeAction(d.Action) {
+		if side := metadataString(d.StrategyMetadata, "position_side"); side != "" {
+			details = append(details, "方向="+side)
+		}
+		if d.ClosePercentage > 0 {
+			details = append(details, fmt.Sprintf("比例=%.1f%%", d.ClosePercentage))
+		}
+	}
+	if reasonCode := metadataString(d.StrategyMetadata, "reason_code"); reasonCode != "" {
+		details = append(details, "规则="+reasonCode)
+	}
+	return details
 }
 
 type multiLevelResult struct {

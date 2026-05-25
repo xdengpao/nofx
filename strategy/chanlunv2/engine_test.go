@@ -61,6 +61,58 @@ func TestLatestSignalsWithOptionsReturnsV2ReportMarkers(t *testing.T) {
 	}
 }
 
+func TestChanlunV2DecisionReasonSummariesExposeOpenAndCloseReasons(t *testing.T) {
+	reasons := chanlunV2DecisionReasonSummaries([]decision.Decision{
+		{
+			Symbol:          "SOLUSDT",
+			Action:          "partial_close",
+			ClosePercentage: 50,
+			Reasoning:       "缠论V2 15m 连续2根K线破坏结构位 86.360000",
+			SignalType:      "structure_break",
+			SignalTimeframe: "position",
+			StrategyMetadata: map[string]any{
+				"position_side": "long",
+				"reason_code":   "chanlun_v2_structure_break",
+			},
+		},
+		{
+			Symbol:          "BTCUSDT",
+			Action:          "open_long",
+			Leverage:        5,
+			PositionSizeUSD: 25,
+			StopLoss:        65000,
+			TakeProfit:      69000,
+			NetRR:           2.55,
+			Confidence:      82,
+			Reasoning:       "缠论V2 buy2 置信度82 背驰强度0.71",
+			SignalType:      "buy2",
+			SignalTimeframe: "1h",
+		},
+		{
+			Symbol:    "ALL",
+			Action:    "wait",
+			Reasoning: "无可执行信号",
+		},
+	})
+
+	if len(reasons) != 2 {
+		t.Fatalf("应只输出开仓和平仓动作原因，实际=%v", reasons)
+	}
+	if !strings.Contains(reasons[0], "平仓原因") ||
+		!strings.Contains(reasons[0], "连续2根K线破坏结构位") ||
+		!strings.Contains(reasons[0], "比例=50.0%") ||
+		!strings.Contains(reasons[0], "规则=chanlun_v2_structure_break") {
+		t.Fatalf("平仓原因摘要不完整: %s", reasons[0])
+	}
+	if !strings.Contains(reasons[1], "开仓原因") ||
+		!strings.Contains(reasons[1], "buy2") ||
+		!strings.Contains(reasons[1], "SL=65000.0000") ||
+		!strings.Contains(reasons[1], "TP=69000.0000") ||
+		!strings.Contains(reasons[1], "净RR=2.55") {
+		t.Fatalf("开仓原因摘要不完整: %s", reasons[1])
+	}
+}
+
 func TestLatestSignalsWithOptionsFiltersV2Markers(t *testing.T) {
 	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
 	if err != nil {
