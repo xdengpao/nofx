@@ -129,12 +129,12 @@
 
 ### Task 13 - 161 部署后观察
 
-- [ ] 部署前确认工作区不包含运行日志、真实配置或密钥。
-- [ ] 部署后观察至少 3 个新 V2 cycle。
-- [ ] 验证 CLUSDT/XAUUSDT 不在 V2 新开仓候选。
-- [ ] 验证 zero-size failed open 为 0。
-- [ ] 验证同一 signal_id 不重复产生 open action。
-- [ ] 验证 terminal/stale 诊断改为汇总计数。
+- [x] 部署前确认工作区不包含运行日志、真实配置或密钥。
+- [x] 部署后观察至少 3 个新 V2 cycle。
+- [x] 验证 CLUSDT/XAUUSDT 不在 V2 新开仓候选。
+- [x] 验证 zero-size failed open 为 0。
+- [x] 验证同一 signal_id 不重复产生 open action。
+- [x] 验证 terminal/stale 诊断改为汇总计数。
 
 ---
 
