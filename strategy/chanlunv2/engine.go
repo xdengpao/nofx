@@ -13,15 +13,17 @@ import (
 
 // Engine 缠论V2策略引擎
 type Engine struct {
-	Config            config.ChanlunV2StrategyConfig
-	mu                sync.RWMutex
-	latestSignals     map[string]*chanlunSignalReport
-	symbolUniverse    map[string][]chanlunStrategySymbol
-	staleSuppressions map[string]chanlunV2StaleSuppression
-	lifecycleStates   map[string]SignalLifecycleState
-	lifecycleLoaded   map[string]bool
-	positionStates    map[string]PositionManagementState
-	configHash        string
+	Config                config.ChanlunV2StrategyConfig
+	mu                    sync.RWMutex
+	latestSignals         map[string]*chanlunSignalReport
+	symbolUniverse        map[string][]chanlunStrategySymbol
+	staleSuppressions     map[string]chanlunV2StaleSuppression
+	lifecycleStates       map[string]SignalLifecycleState
+	lifecycleLoaded       map[string]bool
+	signalExecutionStates map[string]SignalExecutionState
+	executionLoaded       map[string]bool
+	positionStates        map[string]PositionManagementState
+	configHash            string
 }
 
 type chanlunV2StaleSuppression struct {
@@ -57,14 +59,16 @@ type chanlunV2FreshnessEvaluation struct {
 func NewEngine(cfg config.ChanlunV2StrategyConfig) (*Engine, error) {
 	cfg = config.NormalizeChanlunV2StrategyConfig(cfg)
 	return &Engine{
-		Config:            cfg,
-		latestSignals:     map[string]*chanlunSignalReport{},
-		symbolUniverse:    map[string][]chanlunStrategySymbol{},
-		staleSuppressions: map[string]chanlunV2StaleSuppression{},
-		lifecycleStates:   map[string]SignalLifecycleState{},
-		lifecycleLoaded:   map[string]bool{},
-		positionStates:    map[string]PositionManagementState{},
-		configHash:        hashChanlunV2Config(cfg),
+		Config:                cfg,
+		latestSignals:         map[string]*chanlunSignalReport{},
+		symbolUniverse:        map[string][]chanlunStrategySymbol{},
+		staleSuppressions:     map[string]chanlunV2StaleSuppression{},
+		lifecycleStates:       map[string]SignalLifecycleState{},
+		lifecycleLoaded:       map[string]bool{},
+		signalExecutionStates: map[string]SignalExecutionState{},
+		executionLoaded:       map[string]bool{},
+		positionStates:        map[string]PositionManagementState{},
+		configHash:            hashChanlunV2Config(cfg),
 	}, nil
 }
 
@@ -109,6 +113,12 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 	// 对每个标的进行多级别分析
 	for _, symbol := range symbols {
 		symbolDiagnostics := []string{}
+		if !isChanlunV2TradableCryptoSymbol(symbol) {
+			symbolDiagnostics = append(symbolDiagnostics, fmt.Sprintf("%s 非V2可开仓加密标的，跳过新开仓分析", symbol))
+			diagnostics = append(diagnostics, symbolDiagnostics...)
+			e.setLatestReport(ctx.TraderID, symbol, nil, nil, symbolDiagnostics)
+			continue
+		}
 		multiResult := e.analyzeSymbolFromContext(ctx, symbol, timeframes)
 		if multiResult == nil {
 			symbolDiagnostics = append(symbolDiagnostics, fmt.Sprintf("%s 数据不足", symbol))
@@ -118,12 +128,18 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		}
 
 		// 级别联立产出信号
-		signals := e.multiLevelJudgment(multiResult, timeframes)
+		signals, countertrendDiagnostics := e.multiLevelJudgment(ctx, multiResult, timeframes)
+		if len(countertrendDiagnostics) > 0 {
+			symbolDiagnostics = append(symbolDiagnostics, countertrendDiagnostics...)
+		}
 		if len(signals) == 0 {
 			symbolDiagnostics = append(symbolDiagnostics, fmt.Sprintf("%s 无买卖点信号", symbol))
 			diagnostics = append(diagnostics, symbolDiagnostics...)
 			e.setLatestReport(ctx.TraderID, symbol, multiResult, nil, symbolDiagnostics)
 			continue
+		}
+		if len(countertrendDiagnostics) > 0 {
+			diagnostics = append(diagnostics, countertrendDiagnostics...)
 		}
 		rawSignalCount += len(signals)
 		e.setLatestReport(ctx.TraderID, symbol, multiResult, signals, symbolDiagnostics)
@@ -145,6 +161,13 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 			if d.Action == "" {
 				continue
 			}
+			if suppressed, diagnostic := e.suppressKnownTerminalSignal(ctx.TraderID, d); suppressed {
+				if diagnostic != "" {
+					diagnostics = append(diagnostics, diagnostic)
+				}
+				continue
+			}
+			d = e.applyV2StopTakeProfitFallback(ctx, d, sig, multiResult, timeframes["trade"])
 			if downgraded, diagnostic := e.downgradeExpiredChanlunV2Signal(ctx, d, timeframes["trade"]); downgraded {
 				if diagnostic != "" {
 					diagnostics = append(diagnostics, diagnostic)
@@ -174,7 +197,7 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		} else if len(downgradedStaleSignals) > 0 {
 			reason = "缠论V2过期信号已降级为诊断: " + strings.Join(downgradedStaleSignals, "; ")
 		} else if len(freshnessSuppressed) > 0 {
-			reason = "缠论V2重复过期信号已静默: " + strings.Join(freshnessSuppressed, "; ")
+			reason = summarizeChanlunV2Diagnostics("缠论V2重复终态信号已静默", freshnessSuppressed)
 		}
 		allDecisions = []decision.Decision{{
 			Symbol:    "ALL",
@@ -194,11 +217,12 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		summary += "; 信号新鲜度拒绝 " + strings.Join(chanlunV2OpenRejectionReasons(freshnessRejections), "; ")
 	}
 	if len(freshnessSuppressed) > 0 {
-		summary += "; 重复过期信号已静默 " + strings.Join(freshnessSuppressed, "; ")
+		summary += "; " + summarizeChanlunV2Diagnostics("重复终态信号已静默", freshnessSuppressed)
 	}
 	if len(validationRejections) > 0 {
 		summary += "; 风控/open gate拒绝 " + strings.Join(chanlunV2OpenRejectionReasons(validationRejections), "; ")
 	}
+	terminalSuppressedCount, terminalSuppressedReasons, terminalSuppressedSamples := e.terminalSuppressionSnapshot(ctx.TraderID, 3)
 
 	return &decision.FullDecision{
 		CoTTrace:        summary,
@@ -210,19 +234,22 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		ConfigHash:      e.configHash,
 		OpenRejections:  openRejections,
 		StrategyDiagnostics: map[string]any{
-			"messages":                  diagnostics,
-			"timeframes":                timeframes,
-			"symbols":                   symbols,
-			"raw_signal_count":          rawSignalCount,
-			"signal_count":              activeSignalCount,
-			"parent_structure_count":    parentStructureCount,
-			"entry_trigger_count":       entryTriggerCount,
-			"trigger_rejection_reasons": triggerRejectionReasons,
-			"downgraded_stale_signals":  append([]string(nil), downgradedStaleSignals...),
-			"open_rejections":           chanlunV2OpenRejectionReasons(openRejections),
-			"freshness_rejections":      chanlunV2OpenRejectionReasons(freshnessRejections),
-			"freshness_suppressed":      append([]string(nil), freshnessSuppressed...),
-			"validation_rejections":     chanlunV2OpenRejectionReasons(validationRejections),
+			"messages":                    diagnostics,
+			"timeframes":                  timeframes,
+			"symbols":                     symbols,
+			"raw_signal_count":            rawSignalCount,
+			"signal_count":                activeSignalCount,
+			"parent_structure_count":      parentStructureCount,
+			"entry_trigger_count":         entryTriggerCount,
+			"trigger_rejection_reasons":   triggerRejectionReasons,
+			"downgraded_stale_signals":    append([]string(nil), downgradedStaleSignals...),
+			"open_rejections":             chanlunV2OpenRejectionReasons(openRejections),
+			"freshness_rejections":        chanlunV2OpenRejectionReasons(freshnessRejections),
+			"freshness_suppressed":        append([]string(nil), freshnessSuppressed...),
+			"terminal_suppressed_count":   terminalSuppressedCount,
+			"terminal_suppressed_reasons": terminalSuppressedReasons,
+			"terminal_suppressed_samples": append([]string(nil), terminalSuppressedSamples...),
+			"validation_rejections":       chanlunV2OpenRejectionReasons(validationRejections),
 		},
 	}, nil
 }
@@ -302,9 +329,9 @@ func (e *Engine) analyzeSymbol(symbol string, timeframes map[string]string) *mul
 }
 
 func (e *Engine) buildInput(klines []market.Kline, _ string) *AnalysisInput {
+	closes := make([]float64, len(klines))
 	input := &AnalysisInput{
 		Klines:   make([]Kline, len(klines)),
-		MACDHist: make([]float64, len(klines)),
 		Config: AnalysisConfig{
 			MinStrokeBars:         5,
 			DivergenceThreshold:   0.8,
@@ -314,40 +341,51 @@ func (e *Engine) buildInput(klines []market.Kline, _ string) *AnalysisInput {
 		},
 	}
 	for i, k := range klines {
+		closes[i] = k.Close
 		input.Klines[i] = Kline{
 			OpenTime: k.OpenTime, CloseTime: k.CloseTime,
 			Open: k.Open, High: k.High, Low: k.Low, Close: k.Close, Volume: k.Volume,
 		}
-		// 简化 MACD hist：用价格变化近似
-		if i > 0 {
-			input.MACDHist[i] = k.Close - klines[i-1].Close
-		}
 	}
+	input.MACDHist = calculateV2MACDHistogram(closes, 12, 26, 9)
 	return input
 }
 
-func (e *Engine) multiLevelJudgment(mr *multiLevelResult, timeframes map[string]string) []Signal {
+func (e *Engine) multiLevelJudgment(ctx *decision.Context, mr *multiLevelResult, timeframes map[string]string) ([]Signal, []string) {
 	tradeResult, ok := mr.Results["trade"]
 	if !ok || tradeResult == nil {
-		return nil
+		return nil, nil
 	}
 
 	signals := tradeResult.Signals
 	if len(signals) == 0 {
-		return nil
+		return nil, nil
 	}
 
+	var diagnostics []string
 	// 高级别趋势过滤
 	if higherResult, ok := mr.Results["higher"]; ok {
+		filtered := make([]Signal, 0, len(signals))
 		for i := range signals {
-			aligned := (signals[i].Direction == "long" && higherResult.Trend == "up_trend") ||
-				(signals[i].Direction == "short" && higherResult.Trend == "down_trend")
+			sig := signals[i]
+			aligned := (sig.Direction == "long" && higherResult.Trend == "up_trend") ||
+				(sig.Direction == "short" && higherResult.Trend == "down_trend")
 			if aligned {
-				signals[i].Confidence = min(signals[i].Confidence+15, 100)
+				sig.Confidence = min(sig.Confidence+15, 100)
 			} else if higherResult.Trend != "consolidation" && higherResult.Trend != "unknown" {
-				signals[i].Confidence = max(signals[i].Confidence-30, 0)
+				if (sig.Direction == "long" && higherResult.Trend == "down_trend") ||
+					(sig.Direction == "short" && higherResult.Trend == "up_trend") {
+					diagnostic := e.markCountertrendSuppressed(ctx, mr, sig, higherResult.Trend, timeframes)
+					if diagnostic != "" {
+						diagnostics = append(diagnostics, diagnostic)
+					}
+					continue
+				}
+				sig.Confidence = max(sig.Confidence-30, 0)
 			}
+			filtered = append(filtered, sig)
 		}
+		signals = filtered
 	}
 
 	// 次级别确认加分
@@ -369,7 +407,35 @@ func (e *Engine) multiLevelJudgment(mr *multiLevelResult, timeframes map[string]
 			filtered = append(filtered, s)
 		}
 	}
-	return filtered
+	return filtered, diagnostics
+}
+
+func (e *Engine) markCountertrendSuppressed(ctx *decision.Context, mr *multiLevelResult, sig Signal, higherTrend string, timeframes map[string]string) string {
+	if mr == nil {
+		return ""
+	}
+	symbol := market.Normalize(mr.Symbol)
+	reasonCode := "countertrend.higher_timeframe"
+	reason := fmt.Sprintf("%s %s 被V2高级别趋势压制: higher=%s direction=%s", symbol, sig.SignalType, higherTrend, sig.Direction)
+	if ctx == nil {
+		return reason
+	}
+	tradeTF := firstNonEmptyString(timeframes["trade"], "1h")
+	d := e.signalToDecision(ctx, symbol, sig, tradeTF, evaluationCloseTime(mr, "trade"))
+	if d.Action == "" {
+		return reason
+	}
+	if d.StrategyMetadata == nil {
+		d.StrategyMetadata = map[string]any{}
+	}
+	d.StrategyMetadata["reason_code"] = reasonCode
+	d.StrategyMetadata["higher_trend"] = higherTrend
+	d.StrategyMetadata["action_timestamp"] = time.Now().UnixMilli()
+	if suppressed, diagnostic := e.suppressKnownTerminalSignal(ctx.TraderID, d); suppressed {
+		return diagnostic
+	}
+	e.markSignalTerminalRejected(ctx.TraderID, d, reasonCode, time.Now())
+	return reason
 }
 
 func (e *Engine) signalToDecision(ctx *decision.Context, symbol string, sig Signal, timeframe string, decisionCloseTimes ...int64) decision.Decision {
@@ -601,6 +667,11 @@ func (e *Engine) applyChanlunV2FreshnessGuard(ctx *decision.Context, decisions [
 				rejection.GateDiagnostics[key] = value
 			}
 			if terminalChanlunV2FreshnessReason(reasonCode) {
+				traderID := ""
+				if ctx != nil {
+					traderID = ctx.TraderID
+				}
+				e.markSignalTerminalRejected(traderID, d, reasonCode, time.Now())
 				if isSuppressed, diagnostic := e.rememberOrSuppressTerminalFreshnessRejection(ctx, d, reasonCode, state, signalClose, decisionClose, reason); isSuppressed {
 					if diagnostic != "" {
 						suppressed = append(suppressed, diagnostic)
@@ -804,14 +875,60 @@ func (e *Engine) validateChanlunV2Decisions(ctx *decision.Context, decisions []d
 		return validRisk, rejections
 	}
 
-	validOpenLike, rejections := decision.ValidateStrategyDecisions(ctx, openLike, decision.StrategyValidationOptions{
+	precheckedOpenLike := make([]decision.Decision, 0, len(openLike))
+	var precheckRejections []decision.OpenRejection
+	for _, d := range openLike {
+		if invalidV2StopTakeProfitDecision(d) {
+			reasonCode := "chanlun_v2.sl_tp_invalid"
+			reason := fmt.Sprintf("%s %s 被V2风控拒绝: 止损/止盈结构无效", d.Symbol, d.Action)
+			if source := metadataString(d.StrategyMetadata, "sl_tp_source"); source != "" {
+				reason += " source=" + source
+			}
+			if d.StrategyMetadata == nil {
+				d.StrategyMetadata = map[string]any{}
+			}
+			d.StrategyMetadata["reason_code"] = reasonCode
+			rejection := decision.NewOpenRejectionFromDecision(d, reason)
+			rejection.GateState = "blocked"
+			rejection.GateReasons = []string{reasonCode}
+			rejection.GateDiagnostics = map[string]any{
+				"source":      "chanlun_v2_sl_tp",
+				"reason_code": reasonCode,
+			}
+			precheckRejections = append(precheckRejections, rejection)
+			traderID := ""
+			if ctx != nil {
+				traderID = ctx.TraderID
+			}
+			e.markSignalTerminalRejected(traderID, d, reasonCode, time.Now())
+			continue
+		}
+		precheckedOpenLike = append(precheckedOpenLike, d)
+	}
+
+	validOpenLike, rejections := decision.ValidateStrategyDecisions(ctx, precheckedOpenLike, decision.StrategyValidationOptions{
 		Source: "chanlun_v2",
 	})
 	rejections = annotateChanlunV2SizingRejections(rejections)
+	e.markTerminalChanlunV2OpenRejections(ctx, rejections)
 	validRisk, riskRejections := decision.ValidateRiskReducingStrategyDecisions(ctx, riskReducing, decision.RiskReducingValidationOptions{Source: "chanlun_v2"})
+	rejections = append(precheckRejections, rejections...)
 	rejections = append(riskRejections, rejections...)
 	valid := append(validRisk, validOpenLike...)
 	return valid, rejections
+}
+
+func invalidV2StopTakeProfitDecision(d decision.Decision) bool {
+	if !decision.IsOpenLikeAction(d.Action) {
+		return false
+	}
+	if metadataString(d.StrategyMetadata, "sl_tp_source") == "invalid" {
+		return true
+	}
+	if d.StopLoss <= 0 || d.TakeProfit <= 0 {
+		return true
+	}
+	return false
 }
 
 func annotateChanlunV2SizingRejections(rejections []decision.OpenRejection) []decision.OpenRejection {
@@ -819,13 +936,13 @@ func annotateChanlunV2SizingRejections(rejections []decision.OpenRejection) []de
 		reason := strings.ToLower(rejections[i].Reason)
 		reasonCode := ""
 		switch {
-		case strings.Contains(reason, "仓位大小必须>0") || strings.Contains(reason, "position size"):
+		case strings.Contains(reason, "position_sizing.zero_quantity") || strings.Contains(reason, "仓位大小必须>0") || strings.Contains(reason, "position size"):
 			reasonCode = "position_sizing.zero_quantity"
-		case strings.Contains(reason, "最小下单额") || strings.Contains(reason, "低于最小"):
+		case strings.Contains(reason, "position_sizing.min_notional") || strings.Contains(reason, "最小下单额") || strings.Contains(reason, "低于最小"):
 			reasonCode = "position_sizing.min_notional"
-		case strings.Contains(reason, "保证金") || strings.Contains(reason, "margin"):
+		case strings.Contains(reason, "position_sizing.margin_insufficient") || strings.Contains(reason, "保证金") || strings.Contains(reason, "margin"):
 			reasonCode = "position_sizing.margin_insufficient"
-		case strings.Contains(reason, "sizing不可执行"):
+		case strings.Contains(reason, "position_sizing.not_executable") || strings.Contains(reason, "sizing不可执行"):
 			reasonCode = "position_sizing.not_executable"
 		}
 		if reasonCode == "" {
@@ -847,6 +964,61 @@ func annotateChanlunV2SizingRejections(rejections []decision.OpenRejection) []de
 		rejections[i].StrategyMetadata["reason_code"] = reasonCode
 	}
 	return rejections
+}
+
+func (e *Engine) markTerminalChanlunV2OpenRejections(ctx *decision.Context, rejections []decision.OpenRejection) {
+	if e == nil || ctx == nil {
+		return
+	}
+	for _, rejection := range rejections {
+		reasonCode := terminalChanlunV2RejectionReasonCode(rejection)
+		if !terminalChanlunV2Reason(reasonCode) {
+			continue
+		}
+		d := decision.Decision{
+			Symbol:           rejection.Symbol,
+			Action:           rejection.Action,
+			StrategyMode:     rejection.StrategyMode,
+			StrategyName:     rejection.StrategyName,
+			StrategyVersion:  rejection.StrategyVersion,
+			ConfigHash:       rejection.ConfigHash,
+			SignalID:         rejection.SignalID,
+			SignalType:       rejection.SignalType,
+			SignalTimeframe:  rejection.SignalTimeframe,
+			StrategyMetadata: rejection.StrategyMetadata,
+		}
+		e.markSignalTerminalRejected(ctx.TraderID, d, reasonCode, time.Now())
+	}
+}
+
+func terminalChanlunV2RejectionReasonCode(rejection decision.OpenRejection) string {
+	if code := metadataString(rejection.StrategyMetadata, "reason_code"); code != "" {
+		return code
+	}
+	if code := metadataString(rejection.GateDiagnostics, "reason_code"); code != "" {
+		return code
+	}
+	if len(rejection.GateReasons) > 0 {
+		return strings.TrimSpace(rejection.GateReasons[0])
+	}
+	return ""
+}
+
+func terminalChanlunV2Reason(reasonCode string) bool {
+	switch strings.ToLower(strings.TrimSpace(reasonCode)) {
+	case "freshness_gate.signal_expired",
+		"freshness_gate.target_crossed",
+		"freshness_gate.rr_invalid",
+		"countertrend.higher_timeframe",
+		"position_sizing.zero_quantity",
+		"position_sizing.min_notional",
+		"position_sizing.margin_insufficient",
+		"position_sizing.not_executable",
+		"chanlun_v2.sl_tp_invalid":
+		return true
+	default:
+		return false
+	}
 }
 
 func stringSliceContains(values []string, want string) bool {
@@ -885,6 +1057,24 @@ func chanlunV2OpenRejectionReasons(rejections []decision.OpenRejection) []string
 		}
 	}
 	return reasons
+}
+
+func summarizeChanlunV2Diagnostics(label string, values []string) string {
+	if len(values) == 0 {
+		return label + " 0"
+	}
+	limit := 3
+	if len(values) < limit {
+		limit = len(values)
+	}
+	summary := fmt.Sprintf("%s %d", label, len(values))
+	if limit > 0 {
+		summary += ": " + strings.Join(values[:limit], "; ")
+	}
+	if len(values) > limit {
+		summary += fmt.Sprintf("; 另%d条已汇总", len(values)-limit)
+	}
+	return summary
 }
 
 func (e *Engine) resolveTimeframes() map[string]string {

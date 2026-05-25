@@ -394,6 +394,10 @@ func TestNormalizeChanlunV2PositionManagementDefaultsAndOverrides(t *testing.T) 
 		PartialTakeProfitPct:            40,
 		StructureBreakTimeframe:         "1h",
 		StructureBreakConfirmBars:       3,
+		FullCloseOnBreak:                &disabled,
+		HardStopATRMultiplier:           2.8,
+		MaxHoldCandles:                  64,
+		MaxHoldTimeframe:                "1h",
 		FloatingDrawdownActivationR:     2.5,
 		FloatingDrawdownPct:             30,
 		ReverseSignalMinConfidence:      75,
@@ -406,6 +410,9 @@ func TestNormalizeChanlunV2PositionManagementDefaultsAndOverrides(t *testing.T) 
 	}
 	if profile.BreakevenTriggerR != 1.2 || profile.PartialTakeProfitR != 2 || profile.PartialTakeProfitPct != 40 ||
 		profile.StructureBreakTimeframe != "1h" || profile.StructureBreakConfirmBars != 3 ||
+		profile.FullCloseOnBreak == nil || *profile.FullCloseOnBreak ||
+		profile.HardStopATREnabled == nil || !*profile.HardStopATREnabled || profile.HardStopATRMultiplier != 2.8 ||
+		profile.MaxHoldEnabled == nil || !*profile.MaxHoldEnabled || profile.MaxHoldCandles != 64 || profile.MaxHoldTimeframe != "1h" ||
 		profile.FloatingDrawdownActivationR != 2.5 || profile.FloatingDrawdownPct != 30 ||
 		profile.ReverseSignalMinConfidence != 75 || profile.PartialCloseCooldownMinutes != 20 ||
 		profile.MaxPartialCloseCountPerPosition != 3 || profile.MaxTotalPartialClosePct != 70 {
@@ -428,7 +435,10 @@ func TestValidateChanlunV2TraderNormalizesEntryExitDefaults(t *testing.T) {
 	}
 	pm := cfg.Traders[0].ChanlunV2Strategy.PositionManagement
 	if pm.Enabled == nil || !*pm.Enabled || pm.BreakevenTriggerR != 1 || pm.PartialTakeProfitR != 1.5 ||
-		pm.StructureBreakTimeframe != "15m" || pm.ReverseSignalMinConfidence != 60 {
+		pm.StructureBreakTimeframe != "15m" || pm.FullCloseOnBreak == nil || *pm.FullCloseOnBreak ||
+		pm.HardStopATREnabled == nil || !*pm.HardStopATREnabled || pm.HardStopATRMultiplier != 2 ||
+		pm.MaxHoldEnabled == nil || !*pm.MaxHoldEnabled || pm.MaxHoldCandles != 96 || pm.MaxHoldTimeframe != "15m" ||
+		pm.ReverseSignalMinConfidence != 60 {
 		t.Fatalf("Validate应写回position_management保守默认: %+v", pm)
 	}
 }

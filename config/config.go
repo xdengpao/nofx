@@ -141,6 +141,12 @@ type ChanlunV2PositionManagementConfig struct {
 	StructureBreakEnabled           *bool   `json:"structure_break_enabled,omitempty"`
 	StructureBreakTimeframe         string  `json:"structure_break_timeframe,omitempty"`
 	StructureBreakConfirmBars       int     `json:"structure_break_confirm_bars,omitempty"`
+	FullCloseOnBreak                *bool   `json:"full_close_on_break,omitempty"`
+	HardStopATREnabled              *bool   `json:"hard_stop_atr_enabled,omitempty"`
+	HardStopATRMultiplier           float64 `json:"hard_stop_atr_multiplier,omitempty"`
+	MaxHoldEnabled                  *bool   `json:"max_hold_enabled,omitempty"`
+	MaxHoldCandles                  int     `json:"max_hold_candles,omitempty"`
+	MaxHoldTimeframe                string  `json:"max_hold_timeframe,omitempty"`
 	FloatingDrawdownEnabled         *bool   `json:"floating_drawdown_enabled,omitempty"`
 	FloatingDrawdownActivationR     float64 `json:"floating_drawdown_activation_r,omitempty"`
 	FloatingDrawdownPct             float64 `json:"floating_drawdown_pct,omitempty"`
@@ -627,6 +633,22 @@ func NormalizeChanlunV2PositionManagement(cfg ChanlunV2PositionManagementConfig)
 	if cfg.StructureBreakConfirmBars <= 0 || cfg.StructureBreakConfirmBars > 10 {
 		cfg.StructureBreakConfirmBars = 2
 	}
+	if cfg.FullCloseOnBreak == nil {
+		cfg.FullCloseOnBreak = boolPtr(false)
+	}
+	if cfg.HardStopATREnabled == nil {
+		cfg.HardStopATREnabled = boolPtr(true)
+	}
+	if cfg.HardStopATRMultiplier <= 0 || cfg.HardStopATRMultiplier > 10 {
+		cfg.HardStopATRMultiplier = 2.0
+	}
+	if cfg.MaxHoldEnabled == nil {
+		cfg.MaxHoldEnabled = boolPtr(true)
+	}
+	if cfg.MaxHoldCandles <= 0 || cfg.MaxHoldCandles > 500 {
+		cfg.MaxHoldCandles = 96
+	}
+	cfg.MaxHoldTimeframe = normalizeChanlunV2Timeframe(cfg.MaxHoldTimeframe, cfg.StructureBreakTimeframe)
 	if cfg.FloatingDrawdownEnabled == nil {
 		cfg.FloatingDrawdownEnabled = boolPtr(true)
 	}

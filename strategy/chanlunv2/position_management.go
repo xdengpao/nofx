@@ -23,15 +23,28 @@ func (e *Engine) evaluateV2PositionManagement(ctx *decision.Context, pos decisio
 	}
 	currentPrice := currentPositionPrice(pos, data)
 	currentR, ok := currentFavorableR(pos, currentPrice)
-	if !ok {
-		return e.evaluateV2ReverseSignalClose(ctx, pos, timeframes, pm)
+	state := PositionManagementState{}
+	if ok {
+		state = e.updateV2PositionPeak(ctx, pos, currentR)
 	}
-	state := e.updateV2PositionPeak(ctx, pos, currentR)
 	now := time.Now()
 	if pm.StructureBreakEnabled == nil || *pm.StructureBreakEnabled {
 		if d := e.evaluateV2StructureBreak(ctx, pos, data, pm, now); d.Action != "" {
 			return d
 		}
+	}
+	if pm.HardStopATREnabled == nil || *pm.HardStopATREnabled {
+		if d := e.evaluateV2ATRHardStop(ctx, pos, data, pm, currentPrice, now); d.Action != "" {
+			return d
+		}
+	}
+	if pm.MaxHoldEnabled == nil || *pm.MaxHoldEnabled {
+		if d := e.evaluateV2MaxHoldClose(ctx, pos, pm, currentPrice, now); d.Action != "" {
+			return d
+		}
+	}
+	if !ok {
+		return e.evaluateV2ReverseSignalClose(ctx, pos, timeframes, pm)
 	}
 	if pm.FloatingDrawdownEnabled == nil || *pm.FloatingDrawdownEnabled {
 		if d := e.evaluateV2FloatingDrawdown(ctx, pos, pm, state, currentR, now); d.Action != "" {
@@ -118,7 +131,59 @@ func (e *Engine) evaluateV2StructureBreak(ctx *decision.Context, pos decision.Po
 	if !broken {
 		return decision.Decision{}
 	}
+	if pm.FullCloseOnBreak != nil && *pm.FullCloseOnBreak {
+		return e.buildV2FullCloseDecision(ctx, pos, "structure_break", "chanlun_v2_structure_break_full_close", fmt.Sprintf("缠论V2 %s 连续%d根K线破坏结构位 %.6f，执行全平", tf, pm.StructureBreakConfirmBars, level), now)
+	}
 	return e.buildV2PartialCloseDecision(ctx, pos, pm, "structure_break", fmt.Sprintf("缠论V2 %s 连续%d根K线破坏结构位 %.6f", tf, pm.StructureBreakConfirmBars, level), now)
+}
+
+func (e *Engine) evaluateV2ATRHardStop(ctx *decision.Context, pos decision.PositionInfo, data *market.Data, pm config.ChanlunV2PositionManagementConfig, currentPrice float64, now time.Time) decision.Decision {
+	if pos.EntryPrice <= 0 || currentPrice <= 0 {
+		return decision.Decision{}
+	}
+	tf := firstNonEmptyString(pm.MaxHoldTimeframe, pm.StructureBreakTimeframe, "15m")
+	atr := market.GetATR(data, tf)
+	if atr <= 0 {
+		atr = calculateSimpleATR(normalizeMarketKlines(data.Klines[tf]), 14)
+	}
+	if atr <= 0 {
+		return decision.Decision{}
+	}
+	multiplier := pm.HardStopATRMultiplier
+	if multiplier <= 0 {
+		multiplier = 2.0
+	}
+	side := strings.ToLower(pos.Side)
+	switch side {
+	case "long":
+		threshold := pos.EntryPrice - atr*multiplier
+		if currentPrice <= threshold {
+			return e.buildV2FullCloseDecision(ctx, pos, "atr_hard_stop", "chanlun_v2_atr_hard_stop", fmt.Sprintf("缠论V2 ATR硬止损触发: 当前价%.6f <= 阈值%.6f", currentPrice, threshold), now)
+		}
+	case "short":
+		threshold := pos.EntryPrice + atr*multiplier
+		if currentPrice >= threshold {
+			return e.buildV2FullCloseDecision(ctx, pos, "atr_hard_stop", "chanlun_v2_atr_hard_stop", fmt.Sprintf("缠论V2 ATR硬止损触发: 当前价%.6f >= 阈值%.6f", currentPrice, threshold), now)
+		}
+	}
+	return decision.Decision{}
+}
+
+func (e *Engine) evaluateV2MaxHoldClose(ctx *decision.Context, pos decision.PositionInfo, pm config.ChanlunV2PositionManagementConfig, currentPrice float64, now time.Time) decision.Decision {
+	if pos.EntryPrice <= 0 || pos.UpdateTime <= 0 || pm.MaxHoldCandles <= 0 {
+		return decision.Decision{}
+	}
+	openedAt := normalizeV2EpochMillis(pos.UpdateTime)
+	ageCandles := signalAgeCandles(openedAt, now.UnixMilli(), firstNonEmptyString(pm.MaxHoldTimeframe, "15m"))
+	if ageCandles < pm.MaxHoldCandles || !positionIsNotProfitable(pos, currentPrice) {
+		return decision.Decision{}
+	}
+	reason := fmt.Sprintf("缠论V2持仓超时且未盈利: 年龄%d根%s >= %d", ageCandles, firstNonEmptyString(pm.MaxHoldTimeframe, "15m"), pm.MaxHoldCandles)
+	d := e.buildV2FullCloseDecision(ctx, pos, "max_hold_unprofitable", "chanlun_v2_max_hold_unprofitable", reason, now)
+	if d.StrategyMetadata != nil {
+		d.StrategyMetadata["age_candles"] = ageCandles
+	}
+	return d
 }
 
 func (e *Engine) evaluateV2FloatingDrawdown(ctx *decision.Context, pos decision.PositionInfo, pm config.ChanlunV2PositionManagementConfig, state PositionManagementState, currentR float64, now time.Time) decision.Decision {
@@ -160,6 +225,18 @@ func (e *Engine) buildV2PartialCloseDecision(ctx *decision.Context, pos decision
 	d.ClosePercentage = closePct
 	d.Reasoning = reason
 	e.recordV2PartialCloseSignal(ctx, pos, closePct, now)
+	return d
+}
+
+func (e *Engine) buildV2FullCloseDecision(ctx *decision.Context, pos decision.PositionInfo, rule, reasonCode, reason string, now time.Time) decision.Decision {
+	action := "close_long"
+	if strings.EqualFold(pos.Side, "short") {
+		action = "close_short"
+	} else if !strings.EqualFold(pos.Side, "long") {
+		return decision.Decision{}
+	}
+	d := e.baseV2PositionDecision(ctx, pos, action, rule, reasonCode, now)
+	d.Reasoning = reason
 	return d
 }
 
@@ -324,5 +401,25 @@ func currentFavorableR(pos decision.PositionInfo, currentPrice float64) (float64
 		return (pos.EntryPrice - currentPrice) / risk, true
 	default:
 		return 0, false
+	}
+}
+
+func positionIsNotProfitable(pos decision.PositionInfo, currentPrice float64) bool {
+	if pos.UnrealizedPnL < 0 {
+		return true
+	}
+	if pos.UnrealizedPnLPct < 0 {
+		return true
+	}
+	if pos.EntryPrice <= 0 || currentPrice <= 0 {
+		return false
+	}
+	switch strings.ToLower(pos.Side) {
+	case "long":
+		return currentPrice <= pos.EntryPrice
+	case "short":
+		return currentPrice >= pos.EntryPrice
+	default:
+		return false
 	}
 }

@@ -644,6 +644,7 @@ func (at *AutoTrader) runCycle() error {
 			time.Sleep(1 * time.Second)
 		}
 		at.reportProgrammaticExecutionResult(&d, &actionRecord)
+		at.reportChanlunV2ExecutionResult(&d, &actionRecord)
 
 		record.Decisions = append(record.Decisions, actionRecord)
 	}
@@ -846,6 +847,34 @@ func (at *AutoTrader) reportProgrammaticExecutionResult(d *decision.Decision, ac
 		Price:                    actionRecord.Price,
 		Error:                    actionRecord.Error,
 		ExecutedAt:               actionRecord.Timestamp,
+	})
+}
+
+type chanlunV2ExecutionReporter interface {
+	OnExecutionResult(chanlunv2.ExecutionResult)
+}
+
+func (at *AutoTrader) reportChanlunV2ExecutionResult(d *decision.Decision, actionRecord *logger.DecisionAction) {
+	if at == nil || at.config.DecisionMode != "chanlun_v2" || at.chanlunV2Engine == nil || d == nil || actionRecord == nil {
+		return
+	}
+	reporter, ok := at.chanlunV2Engine.(chanlunV2ExecutionReporter)
+	if !ok {
+		return
+	}
+	finalAction := actionRecord.FinalAction
+	if strings.TrimSpace(finalAction) == "" {
+		finalAction = d.Action
+	}
+	reporter.OnExecutionResult(chanlunv2.ExecutionResult{
+		TraderID:         at.id,
+		Decision:         *d,
+		Success:          actionRecord.Success,
+		FinalAction:      finalAction,
+		ExecutedQuantity: actionRecord.Quantity,
+		Price:            actionRecord.Price,
+		Error:            actionRecord.Error,
+		ExecutedAt:       actionRecord.Timestamp,
 	})
 }
 

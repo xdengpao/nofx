@@ -702,6 +702,143 @@ func TestValidateChanlunV2DecisionsRejectsZeroQuantitySizing(t *testing.T) {
 	}
 }
 
+func TestChanlunV2SymbolFilterAndUniverseSkipsNonCryptoAndFilteredCandidates(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	for _, symbol := range []string{"CLUSDT", "XAUUSDT", "XAGUSDT"} {
+		if isChanlunV2TradableCryptoSymbol(symbol) {
+			t.Fatalf("%s 不应作为V2可开仓加密标的", symbol)
+		}
+	}
+	for _, symbol := range []string{"BTCUSDT", "ETHUSDT", "SOLUSDT"} {
+		if !isChanlunV2TradableCryptoSymbol(symbol) {
+			t.Fatalf("%s 应作为V2可开仓加密标的", symbol)
+		}
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	ctx.CandidateCoins = []decision.CandidateCoin{
+		{Symbol: "CLUSDT", IncludedInPrompt: true},
+		{Symbol: "XAUUSDT", IncludedInPrompt: true},
+		{Symbol: "BTCUSDT", IncludedInPrompt: true},
+		{Symbol: "DOGEUSDT", FilterReason: "cooldown", IncludedInPrompt: true},
+		{Symbol: "SOLUSDT", IncludedInPrompt: true},
+	}
+	universe := engine.resolveSymbolUniverse(ctx)
+	var symbols []string
+	for _, item := range universe {
+		symbols = append(symbols, item.Symbol)
+	}
+	got := strings.Join(symbols, ",")
+	if got != "BTCUSDT,SOLUSDT" {
+		t.Fatalf("V2候选过滤结果错误: %s", got)
+	}
+}
+
+func TestBuildInputUsesStandardMACDHistogram(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	base := int64(1710000000000)
+	klines := make([]market.Kline, 60)
+	for i := range klines {
+		close := 100 + float64(i)*0.7 + float64((i%5)*(i%5))*0.05
+		klines[i] = v2TestKline(base+int64(i)*int64(time.Hour/time.Millisecond), close-0.2, close, close+0.5, close-0.8)
+	}
+	input := engine.buildInput(klines, "1h")
+	if len(input.MACDHist) != len(klines) {
+		t.Fatalf("macd_hist长度应与K线一致: %d vs %d", len(input.MACDHist), len(klines))
+	}
+	last := len(klines) - 1
+	priceDiff := klines[last].Close - klines[last-1].Close
+	if input.MACDHist[last] == 0 || input.MACDHist[last] == priceDiff {
+		t.Fatalf("macd_hist应为标准MACD柱而不是收盘价差: hist=%.8f diff=%.8f", input.MACDHist[last], priceDiff)
+	}
+}
+
+func TestApplyV2StopTakeProfitFallbackKeepsRustAndUsesATR(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	ctx.MarketDataMap["BNBUSDT"] = chanlunV2EntryMarketData("BNBUSDT", []market.Kline{
+		v2TestKline(1710000000000, 99, 100, 101, 98),
+		v2TestKline(1710000900000, 100, 100, 102, 99),
+	})
+	valid := chanlunV2DecisionFixture(engine, ctx, "BNBUSDT", "buy2", "open_long", 1710000000000, 1710000000000, 90, 95, 120)
+	got := engine.applyV2StopTakeProfitFallback(ctx, valid, Signal{SignalType: "buy2", Direction: "long", StopLoss: 95, TakeProfit: 120}, nil, "15m")
+	if got.StopLoss != 95 || got.TakeProfit != 120 || metadataString(got.StrategyMetadata, "sl_tp_source") != "rust" {
+		t.Fatalf("Rust有效SL/TP应保持不变: %+v", got)
+	}
+	missing := chanlunV2DecisionFixture(engine, ctx, "BNBUSDT", "buy2", "open_long", 1710000000000, 1710000000000, 90, 0, 0)
+	got = engine.applyV2StopTakeProfitFallback(ctx, missing, Signal{SignalType: "buy2", Direction: "long"}, nil, "15m")
+	if got.StopLoss <= 0 || got.TakeProfit <= 0 || metadataString(got.StrategyMetadata, "sl_tp_source") != "atr" {
+		t.Fatalf("缺失SL/TP应使用ATR兜底: %+v", got)
+	}
+	noDataCtx := chanlunV2ValidationContext(1000)
+	delete(noDataCtx.MarketDataMap, "BNBUSDT")
+	got = engine.applyV2StopTakeProfitFallback(noDataCtx, missing, Signal{SignalType: "buy2", Direction: "long"}, nil, "15m")
+	if metadataString(got.StrategyMetadata, "sl_tp_source") != "invalid" {
+		t.Fatalf("无行情/无ATR时应标记invalid: %+v", got)
+	}
+}
+
+func TestValidateChanlunV2DecisionsRejectsInvalidStopTakeProfitFallback(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	d := chanlunV2DecisionFixture(engine, ctx, "BNBUSDT", "buy2", "open_long", 1710000000000, 1710000000000, 90, 0, 0)
+	d.StrategyMetadata["sl_tp_source"] = "invalid"
+	valid, rejections := engine.validateChanlunV2Decisions(ctx, []decision.Decision{d}, nil)
+	if len(valid) != 0 || len(rejections) != 1 || rejections[0].GateReasons[0] != "chanlun_v2.sl_tp_invalid" {
+		t.Fatalf("invalid SL/TP应转为open_rejected: valid=%+v rejections=%+v", valid, rejections)
+	}
+}
+
+func TestMultiLevelJudgmentSuppressesHigherTimeframeCountertrend(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	sig := Signal{SignalType: "buy2", Direction: "long", StopLoss: 95, TakeProfit: 120, Confidence: 90, Timestamp: 1710000000000}
+	mr := &multiLevelResult{
+		Symbol: "BNBUSDT",
+		Results: map[string]*AnalysisResult{
+			"higher": {Trend: "down_trend"},
+			"trade":  {Signals: []Signal{sig}},
+		},
+		LastClosedByLevel: map[string]int64{"trade": 1710000000000},
+	}
+	signals, diagnostics := engine.multiLevelJudgment(ctx, mr, map[string]string{"trade": "1h"})
+	if len(signals) != 0 || len(diagnostics) != 1 || !strings.Contains(diagnostics[0], "countertrend") && !strings.Contains(diagnostics[0], "高级别趋势压制") {
+		t.Fatalf("高级别下跌应压制多单: signals=%+v diagnostics=%+v", signals, diagnostics)
+	}
+	if !engine.hasTerminalSignal(ctx.TraderID, "BNBUSDT", v2SignalID("BNBUSDT", "1h", sig)) {
+		t.Fatalf("逆势压制应写入V2 terminal状态")
+	}
+
+	shortSig := Signal{SignalType: "sell2", Direction: "short", StopLoss: 105, TakeProfit: 80, Confidence: 90, Timestamp: 1710003600000}
+	mr.Results["higher"] = &AnalysisResult{Trend: "up_trend"}
+	mr.Results["trade"] = &AnalysisResult{Signals: []Signal{shortSig}}
+	signals, diagnostics = engine.multiLevelJudgment(ctx, mr, map[string]string{"trade": "1h"})
+	if len(signals) != 0 || len(diagnostics) != 1 {
+		t.Fatalf("高级别上涨应压制空单: signals=%+v diagnostics=%+v", signals, diagnostics)
+	}
+
+	mr.Results["higher"] = &AnalysisResult{Trend: "consolidation"}
+	mr.Results["trade"] = &AnalysisResult{Signals: []Signal{{SignalType: "buy2", Direction: "long", StopLoss: 95, TakeProfit: 120, Confidence: 90, Timestamp: 1710007200000}}}
+	signals, diagnostics = engine.multiLevelJudgment(ctx, mr, map[string]string{"trade": "1h"})
+	if len(signals) != 1 || len(diagnostics) != 0 {
+		t.Fatalf("盘整高级别不应压制: signals=%+v diagnostics=%+v", signals, diagnostics)
+	}
+}
+
 func TestV2PositionManagementBreakevenPartialStructureAndDrawdown(t *testing.T) {
 	disabled := false
 	tests := []struct {
@@ -776,6 +913,107 @@ func TestV2PositionManagementBreakevenPartialStructureAndDrawdown(t *testing.T) 
 			valid, rejections := engine.validateChanlunV2Decisions(tt.ctx, []decision.Decision{d}, nil)
 			if len(valid) != 1 || len(rejections) != 0 {
 				t.Fatalf("risk-reducing动作应通过专用验证: valid=%+v rejections=%+v", valid, rejections)
+			}
+		})
+	}
+}
+
+func TestV2PositionManagementFullCloseRiskPaths(t *testing.T) {
+	disabled := false
+	enabled := true
+	now := time.Now().UnixMilli()
+	tests := []struct {
+		name  string
+		cfg   config.ChanlunV2StrategyConfig
+		ctx   *decision.Context
+		want  string
+		rule  string
+		setup func(*decision.Context)
+	}{
+		{
+			name: "long atr hard stop",
+			cfg: config.ChanlunV2StrategyConfig{PositionManagement: config.ChanlunV2PositionManagementConfig{
+				BreakevenEnabled:         &disabled,
+				PartialTakeProfitEnabled: &disabled,
+				StructureBreakEnabled:    &disabled,
+				FloatingDrawdownEnabled:  &disabled,
+				HardStopATRMultiplier:    2,
+			}},
+			ctx:  chanlunV2PositionContext("BNBUSDT", "long", 100, 95, 90, nil),
+			want: "close_long",
+			rule: "atr_hard_stop",
+			setup: func(ctx *decision.Context) {
+				ctx.MarketDataMap["BNBUSDT"].MidTermSeries15m = &market.MidTermData15m{ATRValues: []float64{2}}
+			},
+		},
+		{
+			name: "short atr hard stop",
+			cfg: config.ChanlunV2StrategyConfig{PositionManagement: config.ChanlunV2PositionManagementConfig{
+				BreakevenEnabled:         &disabled,
+				PartialTakeProfitEnabled: &disabled,
+				StructureBreakEnabled:    &disabled,
+				FloatingDrawdownEnabled:  &disabled,
+				HardStopATRMultiplier:    2,
+			}},
+			ctx:  chanlunV2PositionContext("BNBUSDT", "short", 100, 105, 110, nil),
+			want: "close_short",
+			rule: "atr_hard_stop",
+			setup: func(ctx *decision.Context) {
+				ctx.MarketDataMap["BNBUSDT"].MidTermSeries15m = &market.MidTermData15m{ATRValues: []float64{2}}
+			},
+		},
+		{
+			name: "timeout unprofitable",
+			cfg: config.ChanlunV2StrategyConfig{PositionManagement: config.ChanlunV2PositionManagementConfig{
+				BreakevenEnabled:         &disabled,
+				PartialTakeProfitEnabled: &disabled,
+				StructureBreakEnabled:    &disabled,
+				FloatingDrawdownEnabled:  &disabled,
+				HardStopATREnabled:       &disabled,
+				MaxHoldEnabled:           &enabled,
+				MaxHoldCandles:           1,
+				MaxHoldTimeframe:         "15m",
+			}},
+			ctx:  chanlunV2PositionContext("BNBUSDT", "long", 100, 99, 95, nil),
+			want: "close_long",
+			rule: "max_hold_unprofitable",
+			setup: func(ctx *decision.Context) {
+				ctx.Positions[0].UpdateTime = now - int64(45*time.Minute/time.Millisecond)
+			},
+		},
+		{
+			name: "structure break full close",
+			cfg: config.ChanlunV2StrategyConfig{PositionManagement: config.ChanlunV2PositionManagementConfig{
+				BreakevenEnabled:         &disabled,
+				PartialTakeProfitEnabled: &disabled,
+				FloatingDrawdownEnabled:  &disabled,
+				HardStopATREnabled:       &disabled,
+				FullCloseOnBreak:         &enabled,
+			}},
+			ctx: chanlunV2PositionContext("BNBUSDT", "long", 100, 94, 95, []market.Kline{
+				v2TestKline(1710000000000, 96, 94.5, 96.2, 94.2),
+				v2TestKline(1710000900000, 94.8, 94.2, 95.0, 94.0),
+			}),
+			want: "close_long",
+			rule: "structure_break",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			engine, err := NewEngine(tt.cfg)
+			if err != nil {
+				t.Fatalf("创建缠论V2引擎失败: %v", err)
+			}
+			if tt.setup != nil {
+				tt.setup(tt.ctx)
+			}
+			d := engine.evaluateV2PositionManagement(tt.ctx, tt.ctx.Positions[0], map[string]string{"trade": "1h", "sub": "15m", "micro": "3m"})
+			if d.Action != tt.want || metadataString(d.StrategyMetadata, "rule") != tt.rule {
+				t.Fatalf("V2 full close动作错误: want=%s/%s got=%+v", tt.want, tt.rule, d)
+			}
+			valid, rejections := engine.validateChanlunV2Decisions(tt.ctx, []decision.Decision{d}, nil)
+			if len(valid) != 1 || len(rejections) != 0 {
+				t.Fatalf("full close应通过risk-reducing验证: valid=%+v rejections=%+v", valid, rejections)
 			}
 		})
 	}

@@ -713,12 +713,18 @@ func (e *Engine) resolveSymbolUniverse(ctx *decision.Context) []chanlunStrategyS
 	items := map[string]chanlunStrategySymbol{}
 	order := make([]string, 0, len(ctx.CandidateCoins)+len(ctx.Positions))
 	for _, coin := range ctx.CandidateCoins {
-		if len(order) >= 10 {
-			break
-		}
 		symbol := market.Normalize(coin.Symbol)
 		if symbol == "" {
 			continue
+		}
+		if strings.TrimSpace(coin.FilterReason) != "" {
+			continue
+		}
+		if !isChanlunV2TradableCryptoSymbol(symbol) {
+			continue
+		}
+		if len(order) >= 10 {
+			break
 		}
 		if !items[symbol].Selected {
 			order = append(order, symbol)

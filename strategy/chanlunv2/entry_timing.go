@@ -95,11 +95,25 @@ func (e *Engine) evaluateParentStructureEntry(ctx *decision.Context, symbol stri
 		decisionCloseTime = parentClose
 	}
 	if e.isTerminalParentLifecycle(ctx.TraderID, symbol, parentID) {
+		d := e.signalToDecision(ctx, symbol, sig, tradeTF, decisionCloseTime)
+		if d.StrategyMetadata == nil {
+			d.StrategyMetadata = map[string]any{}
+		}
+		d.StrategyMetadata["reason_code"] = "lifecycle.terminal"
+		if suppressed, diagnostic := e.suppressKnownTerminalSignal(ctx.TraderID, d); suppressed {
+			return parentEntryEvaluation{
+				ParentSeen:  true,
+				Terminal:    true,
+				ReasonCode:  "lifecycle.terminal",
+				Diagnostics: []string{diagnostic},
+			}
+		}
+		e.markSignalTerminalRejected(ctx.TraderID, d, "lifecycle.terminal", time.Now())
 		return parentEntryEvaluation{
 			ParentSeen:  true,
 			Terminal:    true,
 			ReasonCode:  "lifecycle.terminal",
-			Diagnostics: []string{fmt.Sprintf("%s %s 父结构已处于终态，跳过entry trigger", market.Normalize(symbol), sig.SignalType)},
+			Diagnostics: []string{fmt.Sprintf("%s %s 父结构终态已汇总，跳过entry trigger", market.Normalize(symbol), sig.SignalType)},
 		}
 	}
 
@@ -119,6 +133,12 @@ func (e *Engine) evaluateParentStructureEntry(ctx *decision.Context, symbol stri
 		state.Status = status
 		state.TerminalReasonCode = reasonCode
 		e.upsertLifecycle(state)
+		d := e.signalToDecision(ctx, symbol, sig, tradeTF, decisionCloseTime)
+		if d.StrategyMetadata == nil {
+			d.StrategyMetadata = map[string]any{}
+		}
+		d.StrategyMetadata["reason_code"] = reasonCode
+		e.markSignalTerminalRejected(ctx.TraderID, d, reasonCode, time.Now())
 		return parentEntryEvaluation{
 			ParentSeen:  true,
 			Terminal:    true,
