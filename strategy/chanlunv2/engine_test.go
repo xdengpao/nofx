@@ -615,6 +615,23 @@ func TestEntryTriggerUsesFreshTriggerCloseTimeAndParentLineage(t *testing.T) {
 	}
 }
 
+func TestV2EntryRRUsesSignalTypeThreshold(t *testing.T) {
+	timing := config.NormalizeChanlunV2EntryTiming(config.ChanlunV2EntryTimingConfig{
+		EntryZone: config.ChanlunV2EntryZoneConfig{
+			MinRemainingNetRR: 2.0,
+			SignalTypeMinRR: map[string]float64{
+				"buy2": 1.5,
+			},
+		},
+	})
+	if rejection := validateEntryZoneAndRR("BNBUSDT", "open_long", "buy2", 100, 90, 116, 100, timing, 0); rejection.ReasonCode != "" {
+		t.Fatalf("buy2 RR=1.6应通过1.5阈值: %+v", rejection)
+	}
+	if rejection := validateEntryZoneAndRR("BNBUSDT", "open_long", "buy2", 100, 90, 114, 100, timing, 0); rejection.ReasonCode != "entry_rr_invalid" {
+		t.Fatalf("buy2 RR=1.4应被1.5阈值拒绝: %+v", rejection)
+	}
+}
+
 func TestThirdPointQualityRejectsInvalidCases(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -751,6 +768,88 @@ func TestValidateChanlunV2DecisionsRejectsZeroQuantitySizing(t *testing.T) {
 	}
 	if len(rejections[0].GateReasons) == 0 || rejections[0].GateReasons[0] != "position_sizing.zero_quantity" {
 		t.Fatalf("应使用position_sizing.zero_quantity原因码: %+v", rejections[0])
+	}
+}
+
+func TestMarkTerminalChanlunV2OpenRejectionsCountsConfidenceTriggers(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	rejection := decision.OpenRejection{
+		Symbol:          "DOGEUSDT",
+		Action:          "open_long",
+		SignalID:        "trigger-1",
+		SignalType:      "buy2",
+		SignalTimeframe: "15m",
+		StrategyMode:    "chanlun_v2",
+		StrategyName:    "chanlun_v2",
+		StrategyVersion: "v0.1",
+		StrategyMetadata: map[string]any{
+			"parent_signal_id": "parent-1",
+			"entry_trigger_id": "trigger-1",
+		},
+		GateDiagnostics: map[string]any{
+			"min_confidence_rule":        "range_long",
+			"min_confidence_reason_code": "gate.range_long_confidence",
+		},
+	}
+	for i := 0; i < 2; i++ {
+		engine.markTerminalChanlunV2OpenRejections(ctx, []decision.OpenRejection{rejection})
+	}
+	if engine.isTriggerBlocked(ctx.TraderID, "parent-1", "trigger-1") {
+		t.Fatal("同一trigger前2次置信度拒绝仍应允许重试")
+	}
+	engine.markTerminalChanlunV2OpenRejections(ctx, []decision.OpenRejection{rejection})
+	record, ok := engine.triggerRejectionRecord(ctx.TraderID, "parent-1", "trigger-1")
+	if !ok || record.Count != 3 || record.LastReason != "gate.range_long_confidence" {
+		t.Fatalf("应记录3次置信度拒绝: ok=%v record=%+v", ok, record)
+	}
+	if !engine.isTriggerBlocked(ctx.TraderID, "parent-1", "trigger-1") {
+		t.Fatal("第3次置信度拒绝后trigger应被阻断")
+	}
+	if !engine.hasTerminalSignal(ctx.TraderID, "DOGEUSDT", "trigger-1") {
+		t.Fatal("第3次置信度拒绝后trigger应升级为gate_blocked终态")
+	}
+}
+
+func TestMarkTerminalChanlunV2OpenRejectionsIgnoresNonConfidenceTriggers(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	rejections := []decision.OpenRejection{
+		{
+			Symbol:   "DOGEUSDT",
+			Action:   "open_long",
+			SignalID: "trigger-risk",
+			StrategyMetadata: map[string]any{
+				"parent_signal_id": "parent-risk",
+				"entry_trigger_id": "trigger-risk",
+			},
+			GateDiagnostics: map[string]any{
+				"min_confidence_reason_code": "gate.counter_trend_confidence",
+			},
+		},
+		{
+			Symbol:   "DOGEUSDT",
+			Action:   "open_long",
+			SignalID: "trigger-sizing",
+			StrategyMetadata: map[string]any{
+				"parent_signal_id": "parent-sizing",
+				"entry_trigger_id": "trigger-sizing",
+				"reason_code":      "position_sizing.min_notional",
+			},
+		},
+	}
+	engine.markTerminalChanlunV2OpenRejections(ctx, rejections)
+	if _, ok := engine.triggerRejectionRecord(ctx.TraderID, "parent-risk", "trigger-risk"); ok {
+		t.Fatal("风险类counter_trend置信度拒绝不应计入trigger重试")
+	}
+	if _, ok := engine.triggerRejectionRecord(ctx.TraderID, "parent-sizing", "trigger-sizing"); ok {
+		t.Fatal("非置信度拒绝不应计入trigger重试")
 	}
 }
 

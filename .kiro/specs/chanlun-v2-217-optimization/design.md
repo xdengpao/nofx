@@ -63,13 +63,25 @@ for k, v := range cfg.SignalTypeMinRR {
 
 ### 1.3 entry_timing.go 修改
 
-`evaluateParentStructureEntry` 中 RR 检查（约 153 行）：
+新增统一 helper，避免父结构和 trigger 阶段使用不同 RR 阈值：
 
 ```go
-minRR := timing.EntryZone.MinRemainingNetRR
-if v, ok := timing.EntryZone.SignalTypeMinRR[strings.ToLower(strings.TrimSpace(sig.SignalType))]; ok && v > 0 {
-    minRR = v
+func minRemainingNetRRForV2Signal(timing config.ChanlunV2EntryTimingConfig, signalType string) float64 {
+    minRR := timing.EntryZone.MinRemainingNetRR
+    if v, ok := timing.EntryZone.SignalTypeMinRR[strings.ToLower(strings.TrimSpace(signalType))]; ok && v > 0 {
+        minRR = v
+    }
+    if minRR < 1 {
+        return 1
+    }
+    return minRR
 }
+```
+
+`evaluateParentStructureEntry` 中 RR 检查（约 153 行）改用 helper：
+
+```go
+minRR := minRemainingNetRRForV2Signal(timing, sig.SignalType)
 if rr < minRR {
     // 既有诊断 + 增加 effective_min_rr / signal_type
     return terminal("terminal_rr_invalid", "entry_rr_invalid", map[string]any{
@@ -79,6 +91,11 @@ if rr < minRR {
     })
 }
 ```
+
+同一 helper SHALL 覆盖所有 V2 entry RR 判断：
+- `evaluateParentStructureEntry` 父结构剩余 RR 检查；
+- `evaluateThirdPointQuality` 中 `remainingRR < ...` 检查；
+- `validateEntryZoneAndRR` 中 entry trigger 剩余 RR 检查。该函数签名需要增加 `signalType string` 参数，调用方传入 `sig.SignalType`。
 
 ---
 
@@ -150,9 +167,15 @@ type MinConfidenceOverrides struct {
 }
 ```
 
-`decision/open_gate.go` `OpenGateInput` 同步新增 `MinConfidenceOverrides`，并在 `EvaluateOpenGate` 内的 `requireMinConfidence` 调用处用以下 helper：
+`decision/open_gate.go` `OpenGateInput` 同步新增 `MinConfidenceOverrides`，`OpenGateResult` 新增结构化置信度字段供 rejection 和日志使用：
 
 ```go
+type OpenGateResult struct {
+    // ...已有字段
+    MinConfidenceRule       string `json:"min_confidence_rule,omitempty"`
+    MinConfidenceReasonCode string `json:"min_confidence_reason_code,omitempty"`
+}
+
 func effectiveFloor(defaultFloor int, override int) int {
     if override > 0 && override < defaultFloor {
         return override
@@ -163,19 +186,25 @@ func effectiveFloor(defaultFloor int, override int) int {
 // long base
 result.requireMinConfidence(
     effectiveFloor(longBaseMinConfidence, input.MinConfidenceOverrides.LongBase),
-    "long base 置信度要求")
+    "多单基础置信度要求",
+    "long_base",
+    "gate.long_base_confidence")
 
 // RANGING long
 if state == "RANGING" || state == "SQUEEZE" {
     result.requireMinConfidence(
         effectiveFloor(rangeLongMinConfidence, input.MinConfidenceOverrides.RangeLong),
-        "震荡区间多单置信度要求")
+        "震荡区间多单置信度要求",
+        "range_long",
+        "gate.range_long_confidence")
 }
 // short / range_short 同理
 // counterTrend / btcConflict / btcVolatility / highADX 不读 override
 ```
 
 > **关键不变量**：`override` 永远只能**降低**门槛（且不能降到 0 以下），永远不会**升高**——升高的需求由 `requireMinConfidence` 自身的"取较大值"语义满足，不需 override 配合。
+
+> **实现注意**：如果只设置 `range_long: 60`，`long_base=78` 仍会使 confidence=65 被拒。本规格推荐 217 显式同时设置 `long_base: 60` 与 `range_long: 60`；单测需要覆盖"只降 range_long 不绕过 long_base"。
 
 ### 3.4 strategy/chanlunv2/engine.go 接入
 
@@ -211,6 +240,8 @@ result.Diagnostics["min_confidence_override_applied"] = map[string]any{
 
 下游 `Decision.StrategyMetadata` 透传时使用同名 key，便于在日志/落库里检索。
 
+Accepted path 需要显式保留诊断：`validateOpenDecisionWithOptions` 在 open gate 通过后，如果 `gate.Diagnostics` 非空，应把它写到 `d.StrategyMetadata["gate_diagnostics"]`；如果 `gate.MinConfidenceReasonCode` 非空，也写入 `gate_diagnostics.min_confidence_rule` 与 `gate_diagnostics.min_confidence_reason_code`。否则 `trader/auto_trader.go` 只复制 `StrategyMetadata` 时会丢失 override 归因。Rejected path 继续由 `buildOpenRejection` 写入 `OpenRejection.GateDiagnostics`，并同样补齐 `min_confidence_rule / min_confidence_reason_code`。
+
 ---
 
 ## 4. open gate 置信度类拒绝在 trigger 维度去重（W4）
@@ -221,10 +252,10 @@ result.Diagnostics["min_confidence_override_applied"] = map[string]any{
 - 已经按 `traderID` 维度分片、已经有 JSON 持久化通路、已经被 `markSignalTerminalRejected / suppressKnownTerminalSignal` 等多处使用；
 - trigger 维度本质是 SignalID 的下钻，复用比新建一致性更好。
 
-在 `signalExecutionState` 上扩展：
+在 `SignalExecutionState` 上扩展：
 
 ```go
-type signalExecutionState struct {
+type SignalExecutionState struct {
     // ...已有字段
     TriggerRejections map[string]triggerRejectionRecord `json:"trigger_rejections,omitempty"`
 }
@@ -243,19 +274,19 @@ type triggerRejectionRecord struct {
 新增三个 state 方法：
 
 ```go
-func (e *Engine) markTriggerRejected(traderID string, d decision.Decision, reasonCode, gateRule string, now time.Time)
-func (e *Engine) triggerRejectionRecord(traderID, signalID, triggerID string) (triggerRejectionRecord, bool)
-func (e *Engine) isTriggerBlocked(traderID, signalID, triggerID string) bool // count >= 3
+func (e *Engine) markTriggerRejected(traderID, parentSignalID, triggerID, reasonCode, gateRule string, now time.Time)
+func (e *Engine) triggerRejectionRecord(traderID, parentSignalID, triggerID string) (triggerRejectionRecord, bool)
+func (e *Engine) isTriggerBlocked(traderID, parentSignalID, triggerID string) bool // count >= 3
 ```
 
 接入点：
-1. **拒绝时记录**：`markTerminalChanlunV2OpenRejections`（engine.go:1067）现仅处理白名单内的终态原因；新增分支：当 `rej.ReasonCode` 匹配 `*_confidence` / `*_min_confidence` 这类 open-gate 置信度拒因时，调 `markTriggerRejected`；当 `Count >= 3` 时升级为终态（写 `gate_blocked` 到现有 `markSignalTerminalRejected` 通路）。
-2. **下一 cycle 跳过**：`evaluateParentStructureEntry` 在产出 trigger Decision 前，先查 `isTriggerBlocked`：若已 block 则直接 `return skip`，并在 Diagnostics 标 `trigger_skipped: gate_blocked`。
+1. **拒绝时记录**：`markTerminalChanlunV2OpenRejections`（engine.go:1067）现仅处理白名单内的终态原因；新增分支：当 `terminalChanlunV2RejectionReasonCode(rej)` 或 `rej.GateDiagnostics["min_confidence_reason_code"]` 匹配 `gate.long_base_confidence / gate.short_base_confidence / gate.range_long_confidence / gate.range_short_confidence` 时，调 `markTriggerRejected`；当 `Count >= 3` 时升级为终态（写 `gate_blocked` 到现有 `markSignalTerminalRejected` 通路）。
+2. **下一 cycle 跳过**：`evaluateParentStructureEntry` 在产出 trigger Decision 前，先查 `isTriggerBlocked`：只有 `Count >= 3` 时才直接 `return skip`，并在 Diagnostics 标 `trigger_skipped: gate_blocked`；`Count < 3` 时允许再次产出 Decision，并在 metadata 写入当前计数。
 3. **诊断字段**：每条 Decision 的 `StrategyMetadata` 写入：
    - `trigger_rejected_count`
    - `trigger_rejected_first_at`
    - `trigger_rejected_last_reason`
-   字段名与 requirements W4.3 完全一致。
+   字段名与 requirements W4.4 完全一致。
 
 ### 4.3 拒因匹配规则
 
@@ -311,7 +342,7 @@ V1（`strategy/chanlun/engine.go`）的 entry zone 已演化为：
 新增/调整测试（详见 tasks.md）：
 1. `config/config_test.go` 新增 `TestNormalizeChanlunV2EntryZoneSignalTypeMinRRClamp` — 校验 `<1` 被上调到 1。
 2. `config/config_test.go` 修改 `TestNormalizeChanlunV2EntryTimingDefaultsAndOverrides` — `WatchMaxCandles` 默认期望从 8 改到 16。
-3. `decision/open_gate_test.go` 新增 `TestEvaluateOpenGate_RangeLongOverrideRelaxes` 与 `TestEvaluateOpenGate_OverrideDoesNotAffectCounterTrend` — 覆盖 §3.3 的核心不变量。
+3. `decision/open_gate_test.go` 新增 `TestEvaluateOpenGate_RangeLongOverrideRelaxes`、`TestEvaluateOpenGate_RangeLongOnlyDoesNotBypassLongBase` 与 `TestEvaluateOpenGate_OverrideDoesNotAffectCounterTrend` — 覆盖 §3.3 的核心不变量。
 4. `strategy/chanlunv2/entry_timing_test.go`（或就近的 engine_test）新增按信号类型 RR 阈值生效的用例。
 5. `strategy/chanlunv2/state_test.go` 新增 trigger 维度 reject 计数与 ≥3 升级 `gate_blocked` 用例。
 6. 既有 `strategy/chanlunv2/engine_test.go` 中所有 `signalToDecision` 用例**保持不变**（这是 B' 方案优于 A 的关键回归收益）。

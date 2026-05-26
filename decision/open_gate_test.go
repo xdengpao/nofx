@@ -92,6 +92,161 @@ func TestEvaluateOpenGate_ShortConfidenceRequirement(t *testing.T) {
 	}
 }
 
+func TestEvaluateOpenGate_RangeLongOverrideRelaxes(t *testing.T) {
+	ctx := newTestContext()
+	data := newTestMarketData(100)
+	data.CurrentADX = 18
+	data.BollingerWidth = 3
+
+	withoutOverride := EvaluateOpenGate(OpenGateInput{
+		Decision:   &Decision{Symbol: "DOGEUSDT", Action: "open_long", Confidence: 65},
+		Context:    ctx,
+		MarketData: data,
+	})
+	if withoutOverride.MinConfidence <= 65 {
+		t.Fatalf("无override时RANGING long应被置信度门槛拒绝: %+v", withoutOverride)
+	}
+
+	withOverride := EvaluateOpenGate(OpenGateInput{
+		Decision:   &Decision{Symbol: "DOGEUSDT", Action: "open_long", Confidence: 65},
+		Context:    ctx,
+		MarketData: data,
+		MinConfidenceOverrides: MinConfidenceOverrides{
+			LongBase:  60,
+			RangeLong: 60,
+		},
+	})
+	if withOverride.MinConfidence > 65 {
+		t.Fatalf("long_base + range_long override后应放行65置信度: %+v", withOverride)
+	}
+	applied, ok := withOverride.Diagnostics["min_confidence_override_applied"].(map[string]any)
+	if !ok || applied["rule"] != "range_long" {
+		t.Fatalf("应记录range_long override诊断: %+v", withOverride.Diagnostics)
+	}
+}
+
+func TestEvaluateOpenGate_RangeLongOnlyDoesNotBypassLongBase(t *testing.T) {
+	ctx := newTestContext()
+	data := newTestMarketData(100)
+	data.CurrentADX = 18
+	data.BollingerWidth = 3
+
+	result := EvaluateOpenGate(OpenGateInput{
+		Decision:   &Decision{Symbol: "DOGEUSDT", Action: "open_long", Confidence: 65},
+		Context:    ctx,
+		MarketData: data,
+		MinConfidenceOverrides: MinConfidenceOverrides{
+			RangeLong: 60,
+		},
+	})
+	if result.MinConfidence != longBaseMinConfidence || result.MinConfidenceReasonCode != "gate.long_base_confidence" {
+		t.Fatalf("只降range_long不应绕过long_base门槛: %+v", result)
+	}
+}
+
+func TestEvaluateOpenGate_OverrideDoesNotAffectCounterTrend(t *testing.T) {
+	ctx := newTestContext()
+	data := newTestMarketData(100)
+	data.CurrentADX = 22
+	data.CurrentDIPlus = 10
+	data.CurrentDIMinus = 25
+
+	result := EvaluateOpenGate(OpenGateInput{
+		Decision:   &Decision{Symbol: "DOGEUSDT", Action: "open_long", Confidence: 70},
+		Context:    ctx,
+		MarketData: data,
+		MinConfidenceOverrides: MinConfidenceOverrides{
+			LongBase:  60,
+			RangeLong: 60,
+		},
+	})
+	if result.MinConfidence != counterTrendMinConfidence || result.MinConfidenceReasonCode != "gate.counter_trend_confidence" {
+		t.Fatalf("override不应影响逆势置信度门槛: %+v", result)
+	}
+}
+
+func TestEvaluateOpenGate_OverrideAboveDefaultIsIgnored(t *testing.T) {
+	ctx := newTestContext()
+	data := newTestMarketData(100)
+	data.CurrentADX = 18
+	data.BollingerWidth = 3
+
+	result := EvaluateOpenGate(OpenGateInput{
+		Decision:   &Decision{Symbol: "DOGEUSDT", Action: "open_long", Confidence: 83},
+		Context:    ctx,
+		MarketData: data,
+		MinConfidenceOverrides: MinConfidenceOverrides{
+			RangeLong: 90,
+		},
+	})
+	if result.MinConfidence != rangeLongMinConfidence {
+		t.Fatalf("高于默认值的override应被忽略: %+v", result)
+	}
+}
+
+func TestValidateStrategyDecisionsPersistsOpenGateDiagnostics(t *testing.T) {
+	ctx := newTestContext()
+	data := newTestMarketData(100)
+	data.Symbol = "DOGEUSDT"
+	data.CurrentADX = 18
+	data.BollingerWidth = 3
+	ctx.MarketDataMap["DOGEUSDT"] = data
+
+	valid, rejections := ValidateStrategyDecisions(ctx, []Decision{{
+		Symbol:          "DOGEUSDT",
+		Action:          "open_long",
+		Confidence:      65,
+		StopLoss:        95,
+		TakeProfit:      120,
+		PositionSizeUSD: 50,
+		StrategyMode:    "chanlun_v2",
+		StrategyMetadata: map[string]any{
+			"parent_signal_id": "parent-1",
+			"entry_trigger_id": "trigger-1",
+		},
+	}}, StrategyValidationOptions{
+		Source: "chanlun_v2",
+		MinConfidenceOverrides: MinConfidenceOverrides{
+			LongBase:  60,
+			RangeLong: 60,
+		},
+	})
+	if len(rejections) != 0 || len(valid) != 1 {
+		t.Fatalf("override后65置信度开仓应通过: valid=%+v rejections=%+v", valid, rejections)
+	}
+	diagnostics, ok := valid[0].StrategyMetadata["gate_diagnostics"].(map[string]any)
+	if !ok || diagnostics["min_confidence_reason_code"] != "gate.range_long_confidence" {
+		t.Fatalf("accepted path应保留open gate诊断: %+v", valid[0].StrategyMetadata)
+	}
+	if valid[0].Confidence != 65 {
+		t.Fatalf("override不应污染原始confidence: %+v", valid[0])
+	}
+}
+
+func TestBuildOpenRejectionIncludesMinConfidenceReasonCode(t *testing.T) {
+	ctx := newTestContext()
+	data := newTestMarketData(100)
+	data.Symbol = "DOGEUSDT"
+	data.CurrentADX = 18
+	data.BollingerWidth = 3
+	ctx.MarketDataMap["DOGEUSDT"] = data
+
+	rejection := buildOpenRejection(Decision{
+		Symbol:     "DOGEUSDT",
+		Action:     "open_long",
+		Confidence: 55,
+	}, ctx, "DOGEUSDT open_long 被风控过滤", openValidationOptions{
+		MinConfidenceOverrides: MinConfidenceOverrides{
+			LongBase:  60,
+			RangeLong: 60,
+		},
+	})
+	if rejection.GateDiagnostics["min_confidence_reason_code"] != "gate.range_long_confidence" ||
+		rejection.GateDiagnostics["min_confidence_rule"] != "range_long" {
+		t.Fatalf("rejection path应输出结构化置信度拒因: %+v", rejection.GateDiagnostics)
+	}
+}
+
 func TestEvaluateOpenGate_ADXRegimeBlocksLowADX(t *testing.T) {
 	ctx := newTestContext()
 	policy := &StrategyRiskPolicy{

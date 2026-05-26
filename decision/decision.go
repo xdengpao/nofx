@@ -358,7 +358,7 @@ func openRejectionReasons(rejections []OpenRejection) []string {
 	return reasons
 }
 
-func buildOpenRejection(d Decision, ctx *Context, reason string) OpenRejection {
+func buildOpenRejection(d Decision, ctx *Context, reason string, opts ...openValidationOptions) OpenRejection {
 	rejection := NewOpenRejectionFromDecision(d, reason)
 	if ctx == nil || ctx.MarketDataMap == nil {
 		return rejection
@@ -371,17 +371,22 @@ func buildOpenRejection(d Decision, ctx *Context, reason string) OpenRejection {
 	if ctx.StrategyRiskPolicy != nil && !ctx.StrategyRiskPolicy.Legacy && ctx.StrategyRiskPolicy.Enabled {
 		strategyProfile = ResolveInstrumentProfile(d.Symbol, ctx.StrategyRiskPolicy)
 	}
+	validationOpts := openValidationOptions{}
+	if len(opts) > 0 {
+		validationOpts = opts[0]
+	}
 	gate := EvaluateOpenGate(OpenGateInput{
-		Decision:         &d,
-		Context:          ctx,
-		MarketData:       marketData,
-		ExecutionQuality: ctx.ExecutionQuality,
-		StrategyPolicy:   ctx.StrategyRiskPolicy,
-		StrategyProfile:  strategyProfile,
+		Decision:               &d,
+		Context:                ctx,
+		MarketData:             marketData,
+		ExecutionQuality:       ctx.ExecutionQuality,
+		StrategyPolicy:         ctx.StrategyRiskPolicy,
+		StrategyProfile:        strategyProfile,
+		MinConfidenceOverrides: validationOpts.MinConfidenceOverrides,
 	})
 	rejection.GateState = gate.State
 	rejection.GateReasons = append(rejection.GateReasons, gate.Reasons...)
-	rejection.GateDiagnostics = copyDiagnostics(gate.Diagnostics)
+	rejection.GateDiagnostics = openGateDiagnostics(gate)
 	rejection.Simulations = buildOpenFrequencySimulations(d, ctx, marketData, gate, reason)
 	if len(rejection.GateReasons) == 0 && strings.TrimSpace(reason) != "" {
 		rejection.GateReasons = append(rejection.GateReasons, reason)
@@ -474,10 +479,11 @@ func decisionMetadataInt(values map[string]any, key string) int {
 }
 
 type StrategyValidationOptions struct {
-	Source              string
-	AllowAdd            bool
-	AllowTPRRFallback   bool
-	PreserveStructureTP bool
+	Source                 string
+	AllowAdd               bool
+	AllowTPRRFallback      bool
+	PreserveStructureTP    bool
+	MinConfidenceOverrides MinConfidenceOverrides
 }
 
 func ValidateStrategyDecisions(ctx *Context, decisions []Decision, opts StrategyValidationOptions) ([]Decision, []OpenRejection) {
@@ -496,13 +502,13 @@ func ValidateStrategyDecisions(ctx *Context, decisions []Decision, opts Strategy
 				openRejections = append(openRejections, NewOpenRejectionFromDecision(d, reason))
 				continue
 			}
-			validationOpts := openValidationOptions{}
+			validationOpts := openValidationOptions{MinConfidenceOverrides: opts.MinConfidenceOverrides}
 			if IsAddAction(d.Action) {
 				validationOpts.Intent = "add"
 			}
 			if err := validateOpenDecisionWithOptions(&d, ctx, validationOpts); err != nil {
 				reason := fmt.Sprintf("%s %s 被风控过滤: %v", d.Symbol, d.Action, err)
-				openRejections = append(openRejections, buildOpenRejection(d, ctx, reason))
+				openRejections = append(openRejections, buildOpenRejection(d, ctx, reason, validationOpts))
 				continue
 			}
 			validDecisions = append(validDecisions, d)
@@ -910,6 +916,44 @@ func copyDiagnostics(source map[string]any) map[string]any {
 	return copied
 }
 
+func openGateDiagnostics(gate OpenGateResult) map[string]any {
+	diagnostics := copyDiagnostics(gate.Diagnostics)
+	if gate.MinConfidenceRule == "" && gate.MinConfidenceReasonCode == "" {
+		return diagnostics
+	}
+	if diagnostics == nil {
+		diagnostics = map[string]any{}
+	}
+	if gate.MinConfidenceRule != "" {
+		diagnostics["min_confidence_rule"] = gate.MinConfidenceRule
+	}
+	if gate.MinConfidenceReasonCode != "" {
+		diagnostics["min_confidence_reason_code"] = gate.MinConfidenceReasonCode
+	}
+	return diagnostics
+}
+
+func attachOpenGateDiagnostics(d *Decision, gate OpenGateResult) {
+	if d == nil {
+		return
+	}
+	diagnostics := openGateDiagnostics(gate)
+	if len(diagnostics) == 0 {
+		return
+	}
+	if d.StrategyMetadata == nil {
+		d.StrategyMetadata = map[string]any{}
+	}
+	if existing, ok := d.StrategyMetadata["gate_diagnostics"].(map[string]any); ok {
+		for key, value := range diagnostics {
+			existing[key] = value
+		}
+		d.StrategyMetadata["gate_diagnostics"] = existing
+		return
+	}
+	d.StrategyMetadata["gate_diagnostics"] = diagnostics
+}
+
 func waitDecision(reason string) Decision {
 	return Decision{
 		Symbol:    "ALL",
@@ -1279,7 +1323,8 @@ func validateOpenDecision(d *Decision, ctx *Context) error {
 }
 
 type openValidationOptions struct {
-	Intent string
+	Intent                 string
+	MinConfidenceOverrides MinConfidenceOverrides
 }
 
 func validateOpenDecisionWithOptions(d *Decision, ctx *Context, opts openValidationOptions) error {
@@ -1303,13 +1348,14 @@ func validateOpenDecisionWithOptions(d *Decision, ctx *Context, opts openValidat
 	}
 
 	gate := EvaluateOpenGate(OpenGateInput{
-		Decision:          d,
-		Context:           ctx,
-		MarketData:        marketData,
-		ExecutionQuality:  ctx.ExecutionQuality,
-		StrategyProfile:   strategyProfile,
-		StrategyPolicy:    ctx.StrategyRiskPolicy,
-		RiskNormalization: riskNormalization,
+		Decision:               d,
+		Context:                ctx,
+		MarketData:             marketData,
+		ExecutionQuality:       ctx.ExecutionQuality,
+		StrategyProfile:        strategyProfile,
+		StrategyPolicy:         ctx.StrategyRiskPolicy,
+		RiskNormalization:      riskNormalization,
+		MinConfidenceOverrides: opts.MinConfidenceOverrides,
 	})
 	if !gate.Allowed {
 		return fmt.Errorf("open gate阻止开仓: %s", strings.Join(gate.Reasons, "; "))
@@ -1317,6 +1363,7 @@ func validateOpenDecisionWithOptions(d *Decision, ctx *Context, opts openValidat
 	if gate.MinConfidence > 0 && d.Confidence > 0 && d.Confidence < gate.MinConfidence {
 		return fmt.Errorf("open gate要求更高置信度: %d < %d (%s)", d.Confidence, gate.MinConfidence, openGateConfidenceReason(gate))
 	}
+	attachOpenGateDiagnostics(d, gate)
 
 	// 开仓前失效条件检查
 	if invalidated, reason := CheckPreOpenInvalidation(d, marketData); invalidated {

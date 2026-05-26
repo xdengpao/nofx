@@ -429,7 +429,7 @@ func (e *Engine) analyzeSymbol(symbol string, timeframes map[string]string) *mul
 func (e *Engine) buildInput(klines []market.Kline, _ string) *AnalysisInput {
 	closes := make([]float64, len(klines))
 	input := &AnalysisInput{
-		Klines:   make([]Kline, len(klines)),
+		Klines: make([]Kline, len(klines)),
 		Config: AnalysisConfig{
 			MinStrokeBars:         5,
 			DivergenceThreshold:   0.8,
@@ -1004,8 +1004,15 @@ func (e *Engine) validateChanlunV2Decisions(ctx *decision.Context, decisions []d
 		precheckedOpenLike = append(precheckedOpenLike, d)
 	}
 
+	confidenceOverrides := e.Config.EntryTiming.EntryZone.MinConfidenceOverrides
 	validOpenLike, rejections := decision.ValidateStrategyDecisions(ctx, precheckedOpenLike, decision.StrategyValidationOptions{
 		Source: "chanlun_v2",
+		MinConfidenceOverrides: decision.MinConfidenceOverrides{
+			LongBase:   confidenceOverrides.LongBase,
+			ShortBase:  confidenceOverrides.ShortBase,
+			RangeLong:  confidenceOverrides.RangeLong,
+			RangeShort: confidenceOverrides.RangeShort,
+		},
 	})
 	rejections = annotateChanlunV2SizingRejections(rejections)
 	e.markTerminalChanlunV2OpenRejections(ctx, rejections)
@@ -1069,6 +1076,34 @@ func (e *Engine) markTerminalChanlunV2OpenRejections(ctx *decision.Context, reje
 		return
 	}
 	for _, rejection := range rejections {
+		if reasonCode, gateRule := chanlunV2TriggerConfidenceRejection(rejection); reasonCode != "" {
+			parentSignalID := metadataString(rejection.StrategyMetadata, "parent_signal_id")
+			triggerID := firstNonEmptyString(metadataString(rejection.StrategyMetadata, "entry_trigger_id"), rejection.SignalID)
+			if parentSignalID != "" && triggerID != "" {
+				now := time.Now()
+				e.markTriggerRejected(ctx.TraderID, parentSignalID, triggerID, reasonCode, gateRule, now)
+				if e.isTriggerBlocked(ctx.TraderID, parentSignalID, triggerID) {
+					d := decision.Decision{
+						Symbol:           rejection.Symbol,
+						Action:           rejection.Action,
+						StrategyMode:     rejection.StrategyMode,
+						StrategyName:     rejection.StrategyName,
+						StrategyVersion:  rejection.StrategyVersion,
+						ConfigHash:       rejection.ConfigHash,
+						SignalID:         triggerID,
+						SignalType:       rejection.SignalType,
+						SignalTimeframe:  rejection.SignalTimeframe,
+						StrategyMetadata: rejection.StrategyMetadata,
+					}
+					if d.StrategyMetadata == nil {
+						d.StrategyMetadata = map[string]any{}
+					}
+					d.StrategyMetadata["reason_code"] = "gate_blocked"
+					e.markSignalTerminalRejected(ctx.TraderID, d, "gate_blocked", now)
+				}
+			}
+			continue
+		}
 		reasonCode := terminalChanlunV2RejectionReasonCode(rejection)
 		if !terminalChanlunV2Reason(reasonCode) {
 			continue
@@ -1086,6 +1121,64 @@ func (e *Engine) markTerminalChanlunV2OpenRejections(ctx *decision.Context, reje
 			StrategyMetadata: rejection.StrategyMetadata,
 		}
 		e.markSignalTerminalRejected(ctx.TraderID, d, reasonCode, time.Now())
+	}
+}
+
+func chanlunV2TriggerConfidenceRejection(rejection decision.OpenRejection) (string, string) {
+	if reason := strings.TrimSpace(rejection.Reason); reason != "" && !strings.Contains(reason, "open gate要求更高置信度") {
+		return "", ""
+	}
+	candidates := []string{
+		metadataString(rejection.GateDiagnostics, "min_confidence_reason_code"),
+		metadataString(rejection.GateDiagnostics, "reason_code"),
+		metadataString(rejection.StrategyMetadata, "min_confidence_reason_code"),
+	}
+	if nested, ok := rejection.StrategyMetadata["gate_diagnostics"].(map[string]any); ok {
+		candidates = append(candidates,
+			metadataString(nested, "min_confidence_reason_code"),
+			metadataString(nested, "reason_code"),
+		)
+	}
+	for _, candidate := range candidates {
+		code := strings.TrimSpace(candidate)
+		if !chanlunV2OpenGateConfidenceReason(code) {
+			continue
+		}
+		rule := firstNonEmptyString(
+			metadataString(rejection.GateDiagnostics, "min_confidence_rule"),
+			metadataString(rejection.GateDiagnostics, "rule"),
+			metadataString(rejection.StrategyMetadata, "min_confidence_rule"),
+			chanlunV2GateRuleFromReasonCode(code),
+		)
+		return code, rule
+	}
+	return "", ""
+}
+
+func chanlunV2OpenGateConfidenceReason(reasonCode string) bool {
+	switch strings.ToLower(strings.TrimSpace(reasonCode)) {
+	case "gate.long_base_confidence",
+		"gate.short_base_confidence",
+		"gate.range_long_confidence",
+		"gate.range_short_confidence":
+		return true
+	default:
+		return false
+	}
+}
+
+func chanlunV2GateRuleFromReasonCode(reasonCode string) string {
+	switch strings.ToLower(strings.TrimSpace(reasonCode)) {
+	case "gate.long_base_confidence":
+		return "long_base"
+	case "gate.short_base_confidence":
+		return "short_base"
+	case "gate.range_long_confidence":
+		return "range_long"
+	case "gate.range_short_confidence":
+		return "range_short"
+	default:
+		return ""
 	}
 }
 
@@ -1112,7 +1205,8 @@ func terminalChanlunV2Reason(reasonCode string) bool {
 		"position_sizing.min_notional",
 		"position_sizing.margin_insufficient",
 		"position_sizing.not_executable",
-		"chanlun_v2.sl_tp_invalid":
+		"chanlun_v2.sl_tp_invalid",
+		"gate_blocked":
 		return true
 	default:
 		return false

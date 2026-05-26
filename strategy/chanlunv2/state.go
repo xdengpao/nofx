@@ -38,17 +38,26 @@ type PositionManagementState struct {
 }
 
 type SignalExecutionState struct {
-	TraderID        string `json:"trader_id"`
-	Symbol          string `json:"symbol"`
-	SignalID        string `json:"signal_id"`
-	SignalType      string `json:"signal_type,omitempty"`
-	Action          string `json:"action,omitempty"`
-	Status          string `json:"status"`
-	ReasonCode      string `json:"reason_code,omitempty"`
-	FirstSeenAt     int64  `json:"first_seen_at,omitempty"`
-	LastSeenAt      int64  `json:"last_seen_at,omitempty"`
-	SuppressedCount int    `json:"suppressed_count,omitempty"`
-	UpdatedAt       int64  `json:"updated_at"`
+	TraderID          string                            `json:"trader_id"`
+	Symbol            string                            `json:"symbol"`
+	SignalID          string                            `json:"signal_id"`
+	SignalType        string                            `json:"signal_type,omitempty"`
+	Action            string                            `json:"action,omitempty"`
+	Status            string                            `json:"status"`
+	ReasonCode        string                            `json:"reason_code,omitempty"`
+	FirstSeenAt       int64                             `json:"first_seen_at,omitempty"`
+	LastSeenAt        int64                             `json:"last_seen_at,omitempty"`
+	SuppressedCount   int                               `json:"suppressed_count,omitempty"`
+	TriggerRejections map[string]triggerRejectionRecord `json:"trigger_rejections,omitempty"`
+	UpdatedAt         int64                             `json:"updated_at"`
+}
+
+type triggerRejectionRecord struct {
+	Count        int    `json:"count"`
+	FirstAt      int64  `json:"first_at_ms"`
+	LastAt       int64  `json:"last_at_ms"`
+	LastReason   string `json:"last_reason"`
+	LastGateRule string `json:"last_gate_rule,omitempty"`
 }
 
 func lifecycleParentKey(traderID, symbol, parentSignalID string) string {
@@ -81,6 +90,14 @@ func signalExecutionKey(traderID, symbol, signalID string) string {
 		strings.TrimSpace(traderID),
 		normalizeSymbolForState(symbol),
 		strings.TrimSpace(signalID),
+	}, "|")
+}
+
+func triggerRejectionStateKey(traderID, parentSignalID string) string {
+	return strings.Join([]string{
+		strings.TrimSpace(traderID),
+		"entry_trigger_rejections",
+		strings.TrimSpace(parentSignalID),
 	}, "|")
 }
 
@@ -310,6 +327,69 @@ func (e *Engine) markSignalTerminalRejected(traderID string, d decision.Decision
 		now = time.Now()
 	}
 	e.upsertSignalExecutionState(traderID, d, "terminal_rejected", reasonCode, now)
+}
+
+func (e *Engine) markTriggerRejected(traderID, parentSignalID, triggerID, reasonCode, gateRule string, now time.Time) {
+	if e == nil || strings.TrimSpace(parentSignalID) == "" || strings.TrimSpace(triggerID) == "" || strings.TrimSpace(reasonCode) == "" {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	e.ensureExecutionLoaded(traderID)
+	key := triggerRejectionStateKey(traderID, parentSignalID)
+	triggerKey := strings.TrimSpace(triggerID)
+	nowMs := now.UnixMilli()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.signalExecutionStates == nil {
+		e.signalExecutionStates = map[string]SignalExecutionState{}
+	}
+	state := e.signalExecutionStates[key]
+	if state.FirstSeenAt == 0 {
+		state.FirstSeenAt = nowMs
+	}
+	state.TraderID = strings.TrimSpace(traderID)
+	state.SignalID = strings.TrimSpace(parentSignalID)
+	state.Status = "trigger_rejected"
+	state.LastSeenAt = nowMs
+	state.UpdatedAt = nowMs
+	if state.TriggerRejections == nil {
+		state.TriggerRejections = map[string]triggerRejectionRecord{}
+	}
+	record := state.TriggerRejections[triggerKey]
+	if record.FirstAt == 0 {
+		record.FirstAt = nowMs
+	}
+	record.Count++
+	record.LastAt = nowMs
+	record.LastReason = strings.TrimSpace(reasonCode)
+	record.LastGateRule = strings.TrimSpace(gateRule)
+	state.TriggerRejections[triggerKey] = record
+	e.signalExecutionStates[key] = state
+	e.persistExecutionLocked(traderID)
+}
+
+func (e *Engine) triggerRejectionRecord(traderID, parentSignalID, triggerID string) (triggerRejectionRecord, bool) {
+	if e == nil || strings.TrimSpace(parentSignalID) == "" || strings.TrimSpace(triggerID) == "" {
+		return triggerRejectionRecord{}, false
+	}
+	e.ensureExecutionLoaded(traderID)
+	key := triggerRejectionStateKey(traderID, parentSignalID)
+	triggerKey := strings.TrimSpace(triggerID)
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	state, ok := e.signalExecutionStates[key]
+	if !ok || state.TriggerRejections == nil {
+		return triggerRejectionRecord{}, false
+	}
+	record, ok := state.TriggerRejections[triggerKey]
+	return record, ok
+}
+
+func (e *Engine) isTriggerBlocked(traderID, parentSignalID, triggerID string) bool {
+	record, ok := e.triggerRejectionRecord(traderID, parentSignalID, triggerID)
+	return ok && record.Count >= 3
 }
 
 func (e *Engine) upsertSignalExecutionState(traderID string, d decision.Decision, status, reasonCode string, now time.Time) {
