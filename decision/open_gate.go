@@ -27,26 +27,41 @@ const (
 
 // OpenGateInput 是开仓准入评估的输入。
 type OpenGateInput struct {
-	Decision          *Decision
-	Context           *Context
-	MarketData        *market.Data
-	ExistingRisk      float64
-	ExecutionQuality  *logger.ExecutionQualityStats
-	StrategyProfile   InstrumentProfile
-	StrategyPolicy    *StrategyRiskPolicy
-	RiskNormalization *OpenRiskNormalization
+	Decision               *Decision
+	Context                *Context
+	MarketData             *market.Data
+	ExistingRisk           float64
+	ExecutionQuality       *logger.ExecutionQualityStats
+	StrategyProfile        InstrumentProfile
+	StrategyPolicy         *StrategyRiskPolicy
+	RiskNormalization      *OpenRiskNormalization
+	MinConfidenceOverrides MinConfidenceOverrides
 }
 
 // OpenGateResult 是结构化开仓准入结果。
 type OpenGateResult struct {
-	Allowed         bool           `json:"allowed"`
-	State           string         `json:"state"` // allow, penalize, block
-	EffectiveRisk   float64        `json:"effective_risk"`
-	MinConfidence   int            `json:"min_confidence,omitempty"`
-	AdjustedSizeUSD float64        `json:"adjusted_size_usd,omitempty"`
-	Reasons         []string       `json:"reasons,omitempty"`
-	Warnings        []string       `json:"warnings,omitempty"`
-	Diagnostics     map[string]any `json:"diagnostics,omitempty"`
+	Allowed                 bool           `json:"allowed"`
+	State                   string         `json:"state"` // allow, penalize, block
+	EffectiveRisk           float64        `json:"effective_risk"`
+	MinConfidence           int            `json:"min_confidence,omitempty"`
+	MinConfidenceRule       string         `json:"min_confidence_rule,omitempty"`
+	MinConfidenceReasonCode string         `json:"min_confidence_reason_code,omitempty"`
+	AdjustedSizeUSD         float64        `json:"adjusted_size_usd,omitempty"`
+	Reasons                 []string       `json:"reasons,omitempty"`
+	Warnings                []string       `json:"warnings,omitempty"`
+	Diagnostics             map[string]any `json:"diagnostics,omitempty"`
+}
+
+type MinConfidenceOverrides struct {
+	LongBase   int
+	ShortBase  int
+	RangeLong  int
+	RangeShort int
+}
+
+type minConfidenceGate struct {
+	Rule       string
+	ReasonCode string
 }
 
 // EvaluateOpenGate 汇总当前行情、相关性、执行质量和 AI backoff gate。
@@ -73,7 +88,7 @@ func EvaluateOpenGate(input OpenGateInput) OpenGateResult {
 		result.block(fmt.Sprintf("AI调用退避中，直到 %s", ctx.AIBackoffUntil.Format(time.RFC3339)))
 	}
 
-	applyDirectionalConfidenceGate(&result, input.Decision, input.MarketData)
+	applyDirectionalConfidenceGate(&result, input.Decision, input.MarketData, input.MinConfidenceOverrides)
 	applyADXRegimeGate(&result, input.Decision, input.MarketData, input.StrategyProfile, input.StrategyPolicy, input.RiskNormalization)
 	applyBTCMarketGate(&result, ctx)
 	applyBTCMultiTimeframeGate(&result, input.Decision, ctx)
@@ -126,15 +141,15 @@ func applyLossModeGate(result *OpenGateResult, d *Decision, ctx *Context) {
 	}
 }
 
-func applyDirectionalConfidenceGate(result *OpenGateResult, d *Decision, data *market.Data) {
+func applyDirectionalConfidenceGate(result *OpenGateResult, d *Decision, data *market.Data, overrides MinConfidenceOverrides) {
 	if d == nil {
 		return
 	}
 	switch DecisionDirection(d.Action) {
 	case "long":
-		result.requireMinConfidence(longBaseMinConfidence, "多单基础置信度要求")
+		result.requireOverridableMinConfidence(longBaseMinConfidence, overrides.LongBase, d.Confidence, "多单基础置信度要求", "long_base", "gate.long_base_confidence")
 	case "short":
-		result.requireMinConfidence(shortBaseMinConfidence, "空单基础置信度要求")
+		result.requireOverridableMinConfidence(shortBaseMinConfidence, overrides.ShortBase, d.Confidence, "空单基础置信度要求", "short_base", "gate.short_base_confidence")
 	default:
 		return
 	}
@@ -148,19 +163,19 @@ func applyDirectionalConfidenceGate(result *OpenGateResult, d *Decision, data *m
 		switch state {
 		case "RANGING", "SQUEEZE":
 			result.penalize("标的处于震荡/波动收缩，多单需更高置信度")
-			result.requireMinConfidence(rangeLongMinConfidence, "震荡区间多单置信度要求")
+			result.requireOverridableMinConfidence(rangeLongMinConfidence, overrides.RangeLong, d.Confidence, "震荡区间多单置信度要求", "range_long", "gate.range_long_confidence")
 		case "WEAK_DOWNTREND", "STRONG_DOWNTREND":
 			result.penalize("标的处于下行结构，多单属于逆势")
-			result.requireMinConfidence(counterTrendMinConfidence, "逆势多单置信度要求")
+			result.requireMinConfidence(counterTrendMinConfidence, "逆势多单置信度要求", minConfidenceGate{Rule: "counter_trend", ReasonCode: "gate.counter_trend_confidence"})
 		}
 	case "short":
 		switch state {
 		case "RANGING", "SQUEEZE":
 			result.penalize("标的处于震荡/波动收缩，空单需更高置信度")
-			result.requireMinConfidence(rangeShortMinConfidence, "震荡区间空单置信度要求")
+			result.requireOverridableMinConfidence(rangeShortMinConfidence, overrides.RangeShort, d.Confidence, "震荡区间空单置信度要求", "range_short", "gate.range_short_confidence")
 		case "WEAK_UPTREND", "STRONG_UPTREND":
 			result.penalize("标的处于上行结构，空单属于逆势")
-			result.requireMinConfidence(counterTrendMinConfidence, "逆势空单置信度要求")
+			result.requireMinConfidence(counterTrendMinConfidence, "逆势空单置信度要求", minConfidenceGate{Rule: "counter_trend", ReasonCode: "gate.counter_trend_confidence"})
 		}
 	}
 }
@@ -242,7 +257,7 @@ func applyADXRegimeGate(result *OpenGateResult, d *Decision, data *market.Data, 
 			}
 			return
 		}
-		result.requireMinConfidence(counterTrendMinConfidence, "ADX过渡区趋势确认置信度要求")
+		result.requireMinConfidence(counterTrendMinConfidence, "ADX过渡区趋势确认置信度要求", minConfidenceGate{Rule: "counter_trend", ReasonCode: "gate.counter_trend_confidence"})
 		return
 	}
 
@@ -336,7 +351,7 @@ func applyBTCMarketGate(result *OpenGateResult, ctx *Context) {
 	}
 	if btcData.PriceChange1h <= -3 || btcData.PriceChange4h <= -7 || btcData.BollingerWidth >= btcHighVolatilityBollingerPct {
 		result.penalize("BTC波动或跌幅偏高，新开仓降权")
-		result.requireMinConfidence(btcVolatilityMinConfidence, "BTC波动环境置信度要求")
+		result.requireMinConfidence(btcVolatilityMinConfidence, "BTC波动环境置信度要求", minConfidenceGate{Rule: "btc_volatility", ReasonCode: "gate.btc_volatility_confidence"})
 		result.EffectiveRisk *= 0.5
 	}
 }
@@ -356,13 +371,13 @@ func applyBTCMultiTimeframeGate(result *OpenGateResult, d *Decision, ctx *Contex
 	}
 	if isBearishStructure(btcData) {
 		result.penalizeWithDiagnostics("BTC 1h/4h 存在转弱信号，高 beta 山寨多单降权", "btc", diagnostics)
-		result.requireMinConfidence(btcConflictMinConfidence, "BTC转弱时高 beta 多单置信度要求")
+		result.requireMinConfidence(btcConflictMinConfidence, "BTC转弱时高 beta 多单置信度要求", minConfidenceGate{Rule: "btc_conflict", ReasonCode: "gate.btc_conflict_confidence"})
 		result.EffectiveRisk *= 0.5
 		return
 	}
 	if hasBTCMultiTimeframeConflict(btcData) {
 		result.penalizeWithDiagnostics("BTC 15m 与 1h/4h 趋势冲突，高 beta 山寨多单降权", "btc", diagnostics)
-		result.requireMinConfidence(btcConflictMinConfidence, "BTC多周期冲突时高 beta 多单置信度要求")
+		result.requireMinConfidence(btcConflictMinConfidence, "BTC多周期冲突时高 beta 多单置信度要求", minConfidenceGate{Rule: "btc_conflict", ReasonCode: "gate.btc_conflict_confidence"})
 		result.EffectiveRisk *= 0.5
 	}
 }
@@ -489,7 +504,7 @@ func applyHighADXChaseGate(result *OpenGateResult, d *Decision, data *market.Dat
 	}
 	if data.CurrentADX > elevatedADX {
 		result.penalize(fmt.Sprintf("%s ADX %.1f 偏高，按趋势末端追入风险降权", d.Symbol, data.CurrentADX))
-		result.requireMinConfidence(highADXMinConfidence, "高ADX追入置信度要求")
+		result.requireMinConfidence(highADXMinConfidence, "高ADX追入置信度要求", minConfidenceGate{Rule: "high_adx", ReasonCode: "gate.high_adx_confidence"})
 		result.EffectiveRisk *= highADXRiskMultiplier
 	}
 }
@@ -544,9 +559,42 @@ func (result *OpenGateResult) penalizeWithDiagnostics(reason, key string, diagno
 	result.addDiagnostics(key, diagnostics)
 }
 
-func (result *OpenGateResult) requireMinConfidence(min int, reason string) {
+func effectiveFloor(defaultFloor, override int) int {
+	if override > 0 && override < defaultFloor {
+		return override
+	}
+	return defaultFloor
+}
+
+func (result *OpenGateResult) requireOverridableMinConfidence(defaultFloor, override, actual int, reason, rule, reasonCode string) {
+	min := effectiveFloor(defaultFloor, override)
+	result.requireMinConfidence(min, reason, minConfidenceGate{
+		Rule:       rule,
+		ReasonCode: reasonCode,
+	})
+	if override > 0 && override < defaultFloor && actual >= override && actual < defaultFloor {
+		result.addDiagnostics("min_confidence_override_applied", map[string]any{
+			"rule":              rule,
+			"from":              defaultFloor,
+			"to":                override,
+			"actual_confidence": actual,
+		})
+	}
+}
+
+func (result *OpenGateResult) requireMinConfidence(min int, reason string, gates ...minConfidenceGate) {
 	if min > result.MinConfidence {
 		result.MinConfidence = min
+		if len(gates) > 0 {
+			result.MinConfidenceRule = gates[0].Rule
+			result.MinConfidenceReasonCode = gates[0].ReasonCode
+		} else {
+			result.MinConfidenceRule = ""
+			result.MinConfidenceReasonCode = ""
+		}
+	} else if min == result.MinConfidence && len(gates) > 0 && gates[0].ReasonCode != "" {
+		result.MinConfidenceRule = gates[0].Rule
+		result.MinConfidenceReasonCode = gates[0].ReasonCode
 	}
 	if reason != "" {
 		result.Warnings = appendUniqueReason(result.Warnings, reason)

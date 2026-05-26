@@ -366,7 +366,7 @@ func TestNormalizeChanlunV2EntryTimingDefaultsAndOverrides(t *testing.T) {
 			RangePullbackCandles: 7,
 		},
 	})
-	if profile.Enabled == nil || !*profile.Enabled || profile.WatchTimeframe != "15m" || profile.WatchMaxCandles != 8 {
+	if profile.Enabled == nil || !*profile.Enabled || profile.WatchTimeframe != "15m" || profile.WatchMaxCandles != 16 {
 		t.Fatalf("entry_timing默认值错误: %+v", profile)
 	}
 	if profile.TriggerTimeframe != "3m" || profile.MaxTriggerAgeCandles != 3 || profile.MinTriggerConfidence != 72 {
@@ -382,6 +382,22 @@ func TestNormalizeChanlunV2EntryTimingDefaultsAndOverrides(t *testing.T) {
 		profile.ThirdPointQuality.MaxRetracementRatio != 0.4 || profile.ThirdPointQuality.MaxPullbackCandles != 4 ||
 		profile.ThirdPointQuality.RangePullbackCandles != 7 {
 		t.Fatalf("third_point_quality override未生效: %+v", profile.ThirdPointQuality)
+	}
+}
+
+func TestNormalizeChanlunV2EntryZoneSignalTypeMinRRClamp(t *testing.T) {
+	profile := NormalizeChanlunV2EntryZone(ChanlunV2EntryZoneConfig{
+		SignalTypeMinRR: map[string]float64{"buy2": 0.5},
+	})
+	if profile.SignalTypeMinRR["buy2"] != 1 {
+		t.Fatalf("signal_type_min_rr应clamp到1: %+v", profile.SignalTypeMinRR)
+	}
+
+	defaultProfile := NormalizeChanlunV2EntryZone(ChanlunV2EntryZoneConfig{})
+	if defaultProfile.MinRemainingNetRR != 2.0 ||
+		defaultProfile.SignalTypeMinRR["buy2"] != 1.5 ||
+		defaultProfile.SignalTypeMinRR["buy3"] != 1.2 {
+		t.Fatalf("entry_zone默认RR错误: %+v", defaultProfile)
 	}
 }
 
@@ -429,7 +445,7 @@ func TestValidateChanlunV2TraderNormalizesEntryExitDefaults(t *testing.T) {
 	}
 	timing := cfg.Traders[0].ChanlunV2Strategy.EntryTiming
 	if timing.Enabled == nil || !*timing.Enabled || timing.DirectStructureOpen || timing.WatchTimeframe != "15m" ||
-		timing.TriggerTimeframe != "15m" || timing.EntryZone.MinRemainingNetRR != 2.5 ||
+		timing.TriggerTimeframe != "15m" || timing.EntryZone.MinRemainingNetRR != 2.0 ||
 		timing.ThirdPointQuality.Enabled == nil || !*timing.ThirdPointQuality.Enabled {
 		t.Fatalf("Validate应写回entry_timing保守默认: %+v", timing)
 	}

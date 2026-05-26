@@ -73,6 +73,17 @@ func stableV2EntryTriggerID(traderID, symbol, parentSignalID, triggerType, trigg
 	return "chanlun_v2_entry:" + hex.EncodeToString(sum[:])[:20]
 }
 
+func minRemainingNetRRForV2Signal(timing config.ChanlunV2EntryTimingConfig, signalType string) float64 {
+	minRR := timing.EntryZone.MinRemainingNetRR
+	if v, ok := timing.EntryZone.SignalTypeMinRR[strings.ToLower(strings.TrimSpace(signalType))]; ok && v > 0 {
+		minRR = v
+	}
+	if minRR < 1 {
+		return 1
+	}
+	return minRR
+}
+
 func (e *Engine) evaluateParentStructureEntry(ctx *decision.Context, symbol string, sig Signal, mr *multiLevelResult, timeframes map[string]string, decisionCloseTime int64) parentEntryEvaluation {
 	action := signalActionHint(sig)
 	if action == "" {
@@ -129,7 +140,7 @@ func (e *Engine) evaluateParentStructureEntry(ctx *decision.Context, symbol stri
 		UpdatedAt:             time.Now().UnixMilli(),
 	}
 	currentPrice := currentPriceForV2Guard(ctx, symbol, tradeTF)
-	terminal := func(status, reasonCode, reason string) parentEntryEvaluation {
+	terminal := func(status, reasonCode, reason string, metadata ...map[string]any) parentEntryEvaluation {
 		state.Status = status
 		state.TerminalReasonCode = reasonCode
 		e.upsertLifecycle(state)
@@ -138,6 +149,11 @@ func (e *Engine) evaluateParentStructureEntry(ctx *decision.Context, symbol stri
 			d.StrategyMetadata = map[string]any{}
 		}
 		d.StrategyMetadata["reason_code"] = reasonCode
+		for _, values := range metadata {
+			for key, value := range values {
+				d.StrategyMetadata[key] = value
+			}
+		}
 		e.markSignalTerminalRejected(ctx.TraderID, d, reasonCode, time.Now())
 		return parentEntryEvaluation{
 			ParentSeen:  true,
@@ -150,12 +166,18 @@ func (e *Engine) evaluateParentStructureEntry(ctx *decision.Context, symbol stri
 		return terminal("terminal_target_crossed", "entry_parent.target_crossed",
 			fmt.Sprintf("%s %s 父结构终止: 当前价%.6f已穿越目标%.6f", market.Normalize(symbol), sig.SignalType, currentPrice, sig.TakeProfit))
 	}
+	minRR := minRemainingNetRRForV2Signal(timing, sig.SignalType)
 	if currentPrice > 0 {
 		if rr, ok := remainingNetRRForV2Decision(action, currentPrice, sig.StopLoss, sig.TakeProfit, v2TradingCostPct(ctx)); ok {
 			state.RemainingNetRR = rr
-			if rr < timing.EntryZone.MinRemainingNetRR {
+			if rr < minRR {
 				return terminal("terminal_rr_invalid", "entry_rr_invalid",
-					fmt.Sprintf("%s %s 父结构终止: 剩余净RR %.2f低于阈值%.2f", market.Normalize(symbol), sig.SignalType, rr, timing.EntryZone.MinRemainingNetRR))
+					fmt.Sprintf("%s %s 父结构终止: 剩余净RR %.2f低于阈值%.2f", market.Normalize(symbol), sig.SignalType, rr, minRR),
+					map[string]any{
+						"remaining_net_rr": rr,
+						"effective_min_rr": minRR,
+						"signal_type":      sig.SignalType,
+					})
 			}
 		}
 	}
@@ -212,6 +234,25 @@ func (e *Engine) evaluateParentStructureEntry(ctx *decision.Context, symbol stri
 	state.EntryTriggerCloseTime = trigger.CloseTime
 	if trigger.QualityMetrics != nil {
 		state.RemainingNetRR = trigger.QualityMetrics.RemainingNetRR
+	}
+	if e.isTriggerBlocked(ctx.TraderID, parentID, trigger.ID) {
+		state.Status = "terminal_gate_blocked"
+		state.TerminalReasonCode = "gate_blocked"
+		e.upsertLifecycle(state)
+		e.appendEntryTriggerMarker(ctx.TraderID, *trigger, "rejected", fmt.Sprintf("%s %s %s skipped: gate_blocked", market.Normalize(symbol), sig.SignalType, trigger.Type))
+		d := e.entryTriggerToDecision(ctx, symbol, sig, *trigger)
+		if d.StrategyMetadata == nil {
+			d.StrategyMetadata = map[string]any{}
+		}
+		d.StrategyMetadata["reason_code"] = "gate_blocked"
+		d.StrategyMetadata["trigger_skipped"] = "gate_blocked"
+		e.markSignalTerminalRejected(ctx.TraderID, d, "gate_blocked", time.Now())
+		return parentEntryEvaluation{
+			ParentSeen:  true,
+			Terminal:    true,
+			ReasonCode:  "gate_blocked",
+			Diagnostics: []string{fmt.Sprintf("%s %s trigger_skipped: gate_blocked %s", market.Normalize(symbol), sig.SignalType, trigger.ID)},
+		}
 	}
 	e.upsertLifecycle(state)
 	e.appendEntryTriggerMarker(ctx.TraderID, *trigger, "ready", fmt.Sprintf("%s %s %s ready", market.Normalize(symbol), sig.SignalType, trigger.Type))
@@ -324,7 +365,7 @@ func (e *Engine) detectContinuationTrigger(ctx *decision.Context, symbol string,
 	if rejection := e.validateTriggerAge(symbol, sig, triggerTF, last.CloseTime, data, decisionCloseTime, timing); rejection.ReasonCode != "" {
 		return nil, rejection
 	}
-	if rejection := validateEntryZoneAndRR(symbol, signalActionHint(sig), last.Close, sig.StopLoss, sig.TakeProfit, sig.Price, timing, v2TradingCostPct(ctx)); rejection.ReasonCode != "" {
+	if rejection := validateEntryZoneAndRR(symbol, signalActionHint(sig), sig.SignalType, last.Close, sig.StopLoss, sig.TakeProfit, sig.Price, timing, v2TradingCostPct(ctx)); rejection.ReasonCode != "" {
 		return nil, rejection
 	}
 	parentID := v2SignalID(symbol, firstNonEmptyString(timeframes["trade"], "1h"), sig)
@@ -371,7 +412,7 @@ func (e *Engine) detectMicroReversalTrigger(ctx *decision.Context, symbol string
 	if rejection := e.validateTriggerAge(symbol, sig, triggerTF, last.CloseTime, data, decisionCloseTime, timing); rejection.ReasonCode != "" {
 		return nil, rejection
 	}
-	if rejection := validateEntryZoneAndRR(symbol, signalActionHint(sig), last.Close, sig.StopLoss, sig.TakeProfit, sig.Price, timing, v2TradingCostPct(ctx)); rejection.ReasonCode != "" {
+	if rejection := validateEntryZoneAndRR(symbol, signalActionHint(sig), sig.SignalType, last.Close, sig.StopLoss, sig.TakeProfit, sig.Price, timing, v2TradingCostPct(ctx)); rejection.ReasonCode != "" {
 		return nil, rejection
 	}
 	parentID := v2SignalID(symbol, firstNonEmptyString(timeframes["trade"], "1h"), sig)
@@ -591,10 +632,11 @@ func (e *Engine) evaluateThirdPointQuality(ctx *decision.Context, symbol string,
 			Diagnostics: thirdPointDiagnostics(metrics, diagnostics),
 		}
 	}
-	if remainingRR > 0 && remainingRR < timing.EntryZone.MinRemainingNetRR {
+	minRR := minRemainingNetRRForV2Signal(timing, sig.SignalType)
+	if remainingRR > 0 && remainingRR < minRR {
 		return metrics, "", diagnostics, entryTriggerRejection{
 			ReasonCode:  "entry_rr_invalid",
-			Reason:      fmt.Sprintf("%s %s entry trigger剩余净RR %.2f低于阈值%.2f", market.Normalize(symbol), sig.SignalType, remainingRR, timing.EntryZone.MinRemainingNetRR),
+			Reason:      fmt.Sprintf("%s %s entry trigger剩余净RR %.2f低于阈值%.2f", market.Normalize(symbol), sig.SignalType, remainingRR, minRR),
 			Diagnostics: thirdPointDiagnostics(metrics, diagnostics),
 		}
 	}
@@ -713,12 +755,21 @@ func calculateSimpleATR(klines []market.Kline, period int) float64 {
 	return total / float64(count)
 }
 
-func validateEntryZoneAndRR(symbol, action string, entryPrice, stopLoss, takeProfit, structurePrice float64, timing config.ChanlunV2EntryTimingConfig, costPct float64) entryTriggerRejection {
+func validateEntryZoneAndRR(symbol, action, signalType string, entryPrice, stopLoss, takeProfit, structurePrice float64, timing config.ChanlunV2EntryTimingConfig, costPct float64) entryTriggerRejection {
 	if entryPrice <= 0 || stopLoss <= 0 || takeProfit <= 0 {
 		return entryTriggerRejection{ReasonCode: "entry_rr_invalid", Reason: fmt.Sprintf("%s entry trigger价格结构无效", market.Normalize(symbol))}
 	}
-	if rr, ok := remainingNetRRForV2Decision(action, entryPrice, stopLoss, takeProfit, costPct); ok && rr < timing.EntryZone.MinRemainingNetRR {
-		return entryTriggerRejection{ReasonCode: "entry_rr_invalid", Reason: fmt.Sprintf("%s entry trigger剩余净RR %.2f低于阈值%.2f", market.Normalize(symbol), rr, timing.EntryZone.MinRemainingNetRR)}
+	minRR := minRemainingNetRRForV2Signal(timing, signalType)
+	if rr, ok := remainingNetRRForV2Decision(action, entryPrice, stopLoss, takeProfit, costPct); ok && rr < minRR {
+		return entryTriggerRejection{
+			ReasonCode: "entry_rr_invalid",
+			Reason:     fmt.Sprintf("%s entry trigger剩余净RR %.2f低于阈值%.2f", market.Normalize(symbol), rr, minRR),
+			Diagnostics: map[string]any{
+				"remaining_net_rr": rr,
+				"effective_min_rr": minRR,
+				"signal_type":      signalType,
+			},
+		}
 	}
 	width := math.Abs(takeProfit - stopLoss)
 	if width > 0 && structurePrice > 0 {
@@ -741,8 +792,10 @@ func (e *Engine) entryTriggerToDecision(ctx *decision.Context, symbol string, si
 	if strings.EqualFold(trigger.Direction, "short") {
 		action = "open_short"
 	}
+	traderID := ""
 	leverage := 0
 	if ctx != nil {
+		traderID = ctx.TraderID
 		leverage = ctx.AltcoinLeverage
 		if market.Normalize(symbol) == "BTCUSDT" || market.Normalize(symbol) == "ETHUSDT" {
 			leverage = ctx.BTCETHLeverage
@@ -767,6 +820,17 @@ func (e *Engine) entryTriggerToDecision(ctx *decision.Context, symbol string, si
 		"divergence_strength":                  sig.DivergenceStrength,
 		"center_id":                            signalCenterID(sig),
 		"reason_code":                          "entry_trigger." + trigger.Type,
+		"trigger_rejected_count":               0,
+		"trigger_rejected_first_at":            int64(0),
+		"trigger_rejected_last_reason":         "",
+	}
+	if record, ok := e.triggerRejectionRecord(traderID, trigger.ParentSignalID, trigger.ID); ok {
+		metadata["trigger_rejected_count"] = record.Count
+		metadata["trigger_rejected_first_at"] = record.FirstAt
+		metadata["trigger_rejected_last_reason"] = record.LastReason
+		if record.LastGateRule != "" {
+			metadata["trigger_rejected_last_gate_rule"] = record.LastGateRule
+		}
 	}
 	for key, value := range trigger.Diagnostics {
 		metadata[key] = value

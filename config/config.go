@@ -108,10 +108,19 @@ type ChanlunV2EntryTimingConfig struct {
 }
 
 type ChanlunV2EntryZoneConfig struct {
-	Mode                  string  `json:"mode,omitempty"`
-	MaxChaseRatio         float64 `json:"max_chase_ratio,omitempty"`
-	MinRemainingNetRR     float64 `json:"min_remaining_net_rr,omitempty"`
-	MaxChaseATRMultiplier float64 `json:"max_chase_atr_multiplier,omitempty"`
+	Mode                   string                          `json:"mode,omitempty"`
+	MaxChaseRatio          float64                         `json:"max_chase_ratio,omitempty"`
+	MinRemainingNetRR      float64                         `json:"min_remaining_net_rr,omitempty"`
+	MaxChaseATRMultiplier  float64                         `json:"max_chase_atr_multiplier,omitempty"`
+	SignalTypeMinRR        map[string]float64              `json:"signal_type_min_rr,omitempty"`
+	MinConfidenceOverrides ChanlunV2MinConfidenceOverrides `json:"min_confidence_overrides,omitempty"`
+}
+
+type ChanlunV2MinConfidenceOverrides struct {
+	LongBase   int `json:"long_base,omitempty"`
+	ShortBase  int `json:"short_base,omitempty"`
+	RangeLong  int `json:"range_long,omitempty"`
+	RangeShort int `json:"range_short,omitempty"`
 }
 
 type ChanlunV2ThirdPointQualityConfig struct {
@@ -520,7 +529,7 @@ func NormalizeChanlunV2EntryTiming(cfg ChanlunV2EntryTimingConfig) ChanlunV2Entr
 	}
 	cfg.WatchTimeframe = normalizeChanlunV2Timeframe(cfg.WatchTimeframe, "15m")
 	if cfg.WatchMaxCandles <= 0 || cfg.WatchMaxCandles > 96 {
-		cfg.WatchMaxCandles = 8
+		cfg.WatchMaxCandles = 16
 	}
 	cfg.TriggerTimeframe = normalizeChanlunV2Timeframe(cfg.TriggerTimeframe, cfg.WatchTimeframe)
 	if cfg.MaxTriggerAgeCandles <= 0 || cfg.MaxTriggerAgeCandles > 16 {
@@ -553,10 +562,25 @@ func NormalizeChanlunV2EntryZone(cfg ChanlunV2EntryZoneConfig) ChanlunV2EntryZon
 		cfg.MaxChaseRatio = 0.35
 	}
 	if cfg.MinRemainingNetRR <= 0 {
-		cfg.MinRemainingNetRR = 2.5
+		cfg.MinRemainingNetRR = 2.0
 	}
 	if cfg.MinRemainingNetRR < 1 {
 		cfg.MinRemainingNetRR = 1
+	}
+	if cfg.SignalTypeMinRR == nil {
+		cfg.SignalTypeMinRR = map[string]float64{
+			"buy1":  2.0,
+			"sell1": 2.0,
+			"buy2":  1.5,
+			"sell2": 1.5,
+			"buy3":  1.2,
+			"sell3": 1.2,
+		}
+	}
+	for key, value := range cfg.SignalTypeMinRR {
+		if value < 1 {
+			cfg.SignalTypeMinRR[key] = 1
+		}
 	}
 	if cfg.MaxChaseATRMultiplier <= 0 || cfg.MaxChaseATRMultiplier > 10 {
 		cfg.MaxChaseATRMultiplier = 0.6

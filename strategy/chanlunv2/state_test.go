@@ -112,3 +112,33 @@ func TestSignalExecutionStateSuppressesExecutedAndTerminalSignals(t *testing.T) 
 		t.Fatalf("终态静默计数应按reason汇总: %+v", reasons)
 	}
 }
+
+func TestTriggerRejectionRecordBlocksAfterThree(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "chanlun_v2_lifecycle_{trader_id}.json")
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{LifecycleStatePath: path})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	now := time.UnixMilli(1710000000000)
+	engine.markTriggerRejected("t1", "parent-1", "trigger-1", "gate.long_base_confidence", "long_base", now)
+	engine.markTriggerRejected("t1", "parent-1", "trigger-1", "gate.range_long_confidence", "range_long", now.Add(time.Minute))
+	if engine.isTriggerBlocked("t1", "parent-1", "trigger-1") {
+		t.Fatal("同一trigger少于3次置信度拒绝不应阻断")
+	}
+	engine.markTriggerRejected("t1", "parent-1", "trigger-1", "gate.range_long_confidence", "range_long", now.Add(2*time.Minute))
+	if !engine.isTriggerBlocked("t1", "parent-1", "trigger-1") {
+		t.Fatal("同一trigger第3次置信度拒绝后应阻断")
+	}
+	record, ok := engine.triggerRejectionRecord("t1", "parent-1", "trigger-1")
+	if !ok || record.Count != 3 || record.LastReason != "gate.range_long_confidence" || record.LastGateRule != "range_long" {
+		t.Fatalf("trigger拒绝记录不符合预期: ok=%v record=%+v", ok, record)
+	}
+
+	reloaded, err := NewEngine(config.ChanlunV2StrategyConfig{LifecycleStatePath: path})
+	if err != nil {
+		t.Fatalf("重新创建缠论V2引擎失败: %v", err)
+	}
+	if !reloaded.isTriggerBlocked("t1", "parent-1", "trigger-1") {
+		t.Fatal("trigger拒绝计数应持久化并可恢复")
+	}
+}
