@@ -9,7 +9,7 @@
 | 评估窗口 | 2026-05-25 ~ 2026-05-26（24h，306 条决策日志） |
 | 现役 trader | `aster_chanlun_v2`（initial_balance=100 USDT） |
 | 前置修复 | `a7fcac8e fix chanlun v2 trading defects`（V1-V7 已修复） |
-| 状态 | requirements 阶段（含交叉审核修订） |
+| 状态 | 待执行（交叉验证修订完成） |
 
 ---
 
@@ -51,7 +51,7 @@ DOGEUSDT 的 entry trigger 成功触发（10 次 `fresh entry trigger ready`）�
 
 **瓶颈 4：信号仍在反复产出被拒（同一 trigger 10 次）**
 
-同一个 `chanlun_v2_entry:81127866ce9f4a7ec584` 在 18:33-18:42 连续 4 次被拒，说明 entry trigger 被 open gate 拒绝后未做 trigger 维度的去重。代码侧已确认：`terminalChanlunV2Reason()` 的白名单仅包含 `freshness_gate.* / countertrend.higher_timeframe / position_sizing.* / chanlun_v2.sl_tp_invalid`，**不含**任何 open-gate 置信度类原因，因此 `markSignalTerminalRejected` 不会被触发，下一 cycle 仍会按相同 trigger ID 再次产出 Decision。
+同一个 `chanlun_v2_entry:81127866ce9f4a7ec584` 在 18:33-18:42 连续 4 次被拒，说明 entry trigger 被 open gate 拒绝后未做 trigger 维度的重试上限。代码侧已确认：`terminalChanlunV2Reason()` 的白名单仅包含 `freshness_gate.* / countertrend.higher_timeframe / position_sizing.* / chanlun_v2.sl_tp_invalid`，**不含**任何 open-gate 置信度类原因；同时 `open_gate.go` 目前只输出文本 warning 和 `MinConfidence`，没有结构化 `gate.*_confidence` 拒因，因此 `markSignalTerminalRejected` 和 trigger 维度计数都无法可靠触发。
 
 ### 1.2 信号流转链路分析
 
@@ -79,7 +79,7 @@ evaluateParentStructureEntry:
 1. RR 阈值 2.5 对 buy2/buy3 不合理；
 2. 观察窗口 2h 对 1h 信号太短；
 3. open gate 的 RANGING long 置信度 82 与 V2 信号置信度 60-70 不匹配；
-4. open gate 拒绝未做 trigger 维度去重，造成日志噪音。
+4. open gate 置信度拒绝缺少结构化 reason code 和 trigger 维度重试上限，造成日志噪音。
 
 ---
 
@@ -129,9 +129,10 @@ evaluateParentStructureEntry:
 2. THE `counterTrendMinConfidence`、`btcConflictMinConfidence`、`btcVolatilityMinConfidence`、`highADXMinConfidence` 这四类**风险型 gate** SHALL 不在覆盖范围内，永远使用代码硬编码值（88/88/85/90），即使配置写了也忽略。
 3. WHEN 覆盖值 `> 0` 且 `< 当前 gate 默认值`，THE `EvaluateOpenGate` SHALL 把对应 gate 的实际门槛调整为 `min(默认, 覆盖)`；为 `0` 或缺省时维持默认行为。
 4. THE 默认 `min_confidence_overrides` SHALL 全部为 0（即开箱行为与现状完全一致），需要由部署侧显式打开。
-5. THE V2 trader 的推荐配置 SHALL 至少设置 `range_long: 60`（解决本次 DOGEUSDT 案例），是否设置其他 gate 由部署方决定。
-6. WHEN 任一 override 生效（实际拒绝由"会拒"翻转为"放行"或反之），THE 引擎 SHALL 在 `gate_diagnostics.min_confidence_override_applied` 中记录 `{rule, from, to, actual_confidence}` 以便事后归因。
-7. **明确不采用**："在 `signalToDecision` 中把 `d.Confidence` 抬到 85" 这一备选路径——它会污染下游所有依赖 confidence 的链路（仓位规模、日志、风控、未来策略），不可接受。
+5. THE V2 trader 的推荐配置 SHALL 同时设置 `long_base: 60` 与 `range_long: 60`（解决本次 DOGEUSDT 置信度 62-65 案例）；只设置 `range_long: 60` 不足以放行，因为 `long_base=78` 仍会生效。
+6. WHEN 任一 override 把"会拒"翻转为"放行"（即 `actual_confidence ∈ [override, default)`），THE open gate SHALL 在 `gate_diagnostics.min_confidence_override_applied` 中记录 `{rule, from, to, actual_confidence}` 以便事后归因。
+7. THE accepted Decision 和 open rejection 记录 SHALL 保留上述 gate diagnostics：accepted path 写入 `StrategyMetadata.gate_diagnostics.min_confidence_override_applied`，rejection path 写入 `OpenRejection.GateDiagnostics.min_confidence_override_applied`。
+8. **明确不采用**："在 `signalToDecision` 中把 `d.Confidence` 抬到 85" 这一备选路径——它会污染下游所有依赖 confidence 的链路（仓位规模、日志、风控、未来策略），不可接受。
 
 > **澄清**：该需求仅放宽 RANGING long 等"行情类"门槛；逆势/BTC 冲突/高 ADX 追单这类与"风险"相关的限制不变。如未来需要在缠论结构明确时连这些 gate 都豁免，需另立规格。
 
@@ -139,9 +140,10 @@ evaluateParentStructureEntry:
 
 **验收标准**：
 
-1. WHEN entry trigger 被 open gate 以置信度类原因（`*_confidence` / `*_min_confidence`）拒绝，THE 引擎 SHALL 标记该 trigger ID 为已拒，下一 cycle 不再产出相同 Decision。
-2. WHEN 同一 trigger 被拒 ≥3 次，THE 引擎 SHALL 把父结构标记为 `gate_blocked` 终态。
-3. THE 诊断输出 SHALL 在 Decision 的 `StrategyMetadata` 中新增以下字段：
+1. THE open gate SHALL 为可覆盖的四类置信度 gate 输出结构化 reason code：`gate.long_base_confidence`、`gate.short_base_confidence`、`gate.range_long_confidence`、`gate.range_short_confidence`。
+2. WHEN entry trigger 被上述置信度类 reason code 拒绝，THE 引擎 SHALL 以 `trader_id + parent_signal_id + entry_trigger_id` 为 key 记录拒绝次数，并允许同一 trigger 最多产出 3 次 Decision 以避免一次瞬时行情判断直接封死。
+3. WHEN 同一 trigger 的置信度类拒绝次数达到 3 次，THE 引擎 SHALL 把父结构或 trigger 标记为 `gate_blocked` 终态；后续 cycle SHALL 不再产出相同 trigger Decision。
+4. THE 诊断输出 SHALL 在 Decision 的 `StrategyMetadata` 中新增以下字段：
    - `trigger_rejected_count`（int）— 当前 trigger 累计被拒次数
    - `trigger_rejected_first_at`（int64, ms）— 首次被拒时间戳
    - `trigger_rejected_last_reason`（string）— 最近一次拒绝的 `reason_code`
@@ -162,7 +164,7 @@ evaluateParentStructureEntry:
         "buy3": 1.2, "sell3": 1.2
       },
       "min_confidence_overrides": {             // 新增（按 gate 分项，0=不覆盖）
-        "long_base":  0,
+        "long_base":  60,
         "short_base": 0,
         "range_long": 60,
         "range_short": 0
@@ -182,7 +184,7 @@ evaluateParentStructureEntry:
 | 风险 | 缓解 |
 |---|---|
 | RR 降低后开仓质量下降 | buy2/buy3 本身有中枢确认，RR 1.5 仍合理；保留 `> 0` 配置覆盖通道，可按 symbol 收紧 |
-| `range_long: 60` 在震荡中允许多单导致频繁打止损 | counterTrend/btcConflict/btcVolatility 等风险 gate 不在覆盖范围；仓位规模仍按真实 confidence(60~70) 缩放，pilot 单子小 |
+| `long_base: 60` + `range_long: 60` 在震荡中允许多单导致频繁打止损 | counterTrend/btcConflict/btcVolatility 等风险 gate 不在覆盖范围；仓位规模仍按真实 confidence(60~70) 缩放，pilot 单子小 |
 | 窗口延长后过期信号堆积 | 终态机制仍生效，只是延长了有效期 |
 | trigger 去重逻辑误把仍可成立的 trigger 拒掉 | 仅在 ≥3 次同因拒绝才升级为 `gate_blocked`，且只针对置信度类拒因，其他原因不受影响 |
 
@@ -196,5 +198,5 @@ evaluateParentStructureEntry:
 | entry_rr_invalid 终态占比（按终态事件） | 73% | ≤20% |
 | watch_window_expired 占比（按终态事件） | 26% | ≤10% |
 | `open_rejected` 中 RANGING long 置信度不足（按 cycle） | 10/10 | 0 |
-| 同一 trigger 重复被拒次数（最大值） | 4 | ≤1 |
+| 同一 trigger 重复被拒次数（最大值） | 4 | ≤3 |
 | `gate_diagnostics.min_confidence_override_applied` 出现次数（按周期） | — | 与 `open_accepted` 数量同阶 |
