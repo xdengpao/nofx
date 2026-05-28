@@ -45,8 +45,9 @@
 
 Status: consistent after spec correction.
 
-Sell2 必须绑定 `Direction::Down`，否则只靠 `last_seg.high` 落在中枢内，容易在震荡段和 Buy2 条件附近产生对称噪声。需求已补充：
+Sell2 必须绑定 `Direction::Down`，且现有 Buy2 必须补 `Direction::Up` 对称约束；否则只靠 `last_seg.high/low` 落在中枢内，容易在震荡段同时产生 Buy2 和 Sell2。需求已补充：
 
+- Buy2: `last_seg.direction == Direction::Up`
 - `last_seg.direction == Direction::Down`
 - `ZD < last_seg.high < ZG`
 - `current_price < last_seg.high`

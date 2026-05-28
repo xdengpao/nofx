@@ -45,7 +45,7 @@
    - `stop_loss = center.zg`（中枢上沿）
    - `take_profit = max(center.low - (center.high - center.low), current_price * 0.9)`（中枢下方等距目标，最多不超过当前价下方 10%）
    - `confidence = 70`
-3. THE Rust 库 SHALL NOT 在同一最后线段上同时产出对称的 `buy2` 和 `sell2`。
+3. THE Rust 库 SHALL NOT 在同一最后线段上同时产出对称的 `buy2` 和 `sell2`；为此 `buy2` SHALL 仅在 `last_seg.direction == Direction::Up` 时触发，`sell2` SHALL 仅在 `last_seg.direction == Direction::Down` 时触发。
 4. THE Go 层 SHALL 正确路由 `sell2` 为 `open_short` 决策。
 
 ### Requirement S2 — 实现 Sell3（三类卖点）

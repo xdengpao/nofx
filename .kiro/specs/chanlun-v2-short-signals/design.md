@@ -16,7 +16,7 @@
 if let Some(center) = centers.last() {
     if let Some(last_seg) = segments.last() {
         // Buy2: 回抽不入中枢（做多）
-        if last_seg.low > center.zd && last_seg.low < center.zg && current_price > last_seg.low { ... }
+        if last_seg.direction == Direction::Up && last_seg.low > center.zd && last_seg.low < center.zg && current_price > last_seg.low { ... }
         // Buy3: 离开中枢不回（做多）
         if last_seg.low > center.zg { ... }
     }
@@ -159,7 +159,7 @@ validateChanlunV2Decisions → open gate:
 
 ### 6.1 Sell2 方向约束
 
-为避免 Sell2 和 Buy2 同时触发，Sell2 条件增加 `last_seg.direction == Direction::Down`。该修正已并入 §1.2 主实现片段。
+为避免 Sell2 和 Buy2 同时触发，Buy2 条件增加 `last_seg.direction == Direction::Up`，Sell2 条件增加 `last_seg.direction == Direction::Down`。Sell2 修正已并入 §1.2 主实现片段；Buy2 为 V2 内部对称约束，不影响 V1。
 
 ### 6.2 Sell3 当前价约束
 

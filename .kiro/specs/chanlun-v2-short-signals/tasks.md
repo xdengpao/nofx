@@ -9,6 +9,7 @@
 ## Task 1 — Rust signal.rs 实现 Sell2/Sell3
 
 - [ ] `chanlun_v2/src/signal.rs`：引入 `Direction`，或使用 `crate::kline::Direction::Down` 全限定名。
+- [ ] `chanlun_v2/src/signal.rs`：给现有 Buy2 补 `last_seg.direction == Direction::Up` 约束，避免同一最后线段同时产出 Buy2/Sell2。
 - [ ] `chanlun_v2/src/signal.rs`：在 `detect_signals` 中枢部分新增 Sell2 逻辑（`last_seg.direction == Direction::Down`，反弹不破 ZG）。
 - [ ] `chanlun_v2/src/signal.rs`：Sell2 `take_profit` 使用 `(center.low - (center.high - center.low)).max(current_price * 0.9)`，避免目标过远。
 - [ ] `chanlun_v2/src/signal.rs`：新增 Sell3 逻辑（`last_seg.direction == Direction::Down && last_seg.high < center.zd && current_price < center.zd`）。
