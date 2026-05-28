@@ -26,15 +26,20 @@ if let Some(center) = centers.last() {
 ### 1.2 新增 Sell2/Sell3（在 Buy3 之后追加）
 
 ```rust
+use crate::kline::Direction;
+
         // Sell2: 反弹不破中枢上沿（做空）
-        // 条件：最后线段高点在中枢区间内（ZD < high < ZG），且当前价低于该高点
-        if last_seg.high < center.zg && last_seg.high > center.zd && current_price < last_seg.high {
+        // 条件：最后下跌线段高点在中枢区间内（ZD < high < ZG），且当前价低于该高点
+        if last_seg.direction == Direction::Down
+            && last_seg.high < center.zg
+            && last_seg.high > center.zd
+            && current_price < last_seg.high {
             signals.push(Signal {
                 signal_type: SignalType::Sell2,
                 direction: "short".into(),
                 price: current_price,
                 stop_loss: center.zg,
-                take_profit: center.low - (center.high - center.low),
+                take_profit: (center.low - (center.high - center.low)).max(current_price * 0.9),
                 confidence: 70,
                 center_id: Some(center.id),
                 divergence_strength: 0.0,
@@ -43,8 +48,10 @@ if let Some(center) = centers.last() {
         }
 
         // Sell3: 跌破中枢不回（做空）
-        // 条件：最后线段高点低于中枢下沿 ZD
-        if last_seg.high < center.zd {
+        // 条件：最后下跌线段高点低于中枢下沿 ZD，且当前价仍在 ZD 下方
+        if last_seg.direction == Direction::Down
+            && last_seg.high < center.zd
+            && current_price < center.zd {
             signals.push(Signal {
                 signal_type: SignalType::Sell3,
                 direction: "short".into(),
@@ -134,7 +141,7 @@ validateChanlunV2Decisions → open gate:
 - `strategy/chanlunv2/engine.go` — sell 路由已存在
 - `strategy/chanlunv2/entry_timing.go` — short 方向已支持
 - `strategy/chanlunv2/position_management.go` — close_short 已支持
-- `config/config.go` — NormalizeChanlunV2EntryZone 默认值需确认包含 sell
+- `config/config.go` — 已确认 `NormalizeChanlunV2EntryZone` 默认包含 sell1/sell2/sell3
 
 ---
 
@@ -142,9 +149,9 @@ validateChanlunV2Decisions → open gate:
 
 | 文件 | 改动 |
 |---|---|
-| `chanlun_v2/src/signal.rs` | +20 行（Sell2/Sell3）+ 修改 2 行（Sell1 条件） |
-| `config/config.go`（可选） | 确认 `SignalTypeMinRR` 默认包含 sell |
-| 总计 | ~22 行 Rust |
+| `chanlun_v2/src/signal.rs` | +Sell2/Sell3、Sell1 条件放宽、`Direction` 引用和单测 |
+| `config/config.go` | 无需修改，默认 sell RR 已存在 |
+| `strategy/chanlunv2/*` | 无需修改，执行聚焦测试验证 |
 
 ---
 
@@ -152,28 +159,25 @@ validateChanlunV2Decisions → open gate:
 
 ### 6.1 Sell2 方向约束
 
-为避免 Sell2 和 Buy2 同时触发，Sell2 条件增加 `last_seg.direction == Direction::Down`：
+为避免 Sell2 和 Buy2 同时触发，Sell2 条件增加 `last_seg.direction == Direction::Down`。该修正已并入 §1.2 主实现片段。
 
-```rust
-if last_seg.direction == Direction::Down
-    && last_seg.high < center.zg && last_seg.high > center.zd
-    && current_price < last_seg.high {
-    // Sell2
-}
-```
+### 6.2 Sell3 当前价约束
 
-### 6.2 TP 保护
+为避免过期三卖在价格已回到中枢时仍生成父结构噪声，Sell3 条件增加 `current_price < center.zd`。该修正已并入 §1.2 主实现片段。
 
-Sell2 的 `take_profit` 加下限保护：
+### 6.3 TP 保护
 
-```rust
-take_profit: (center.low - (center.high - center.low)).max(current_price * 0.9),
-```
+Sell2 的 `take_profit` 加下限保护，避免中枢历史波动过大导致目标过远。该修正已并入 §1.2 主实现片段。
 
-### 6.3 验证通过项
+### 6.4 验证通过项
 
 - ✅ `invalidStopTakeProfit` 对 short 方向正确（`tp < price < sl`）
 - ✅ `SignalTypeMinRR` 包含 sell1:2.0, sell2:1.5, sell3:1.2
 - ✅ Go `signalToDecision` 路由 sell → open_short
 - ✅ `multiLevelJudgment` 逆势过滤对 sell 正确
 - ✅ Rust `SignalType` 枚举已有 Sell1/Sell2/Sell3
+
+### 6.5 必补测试
+
+- `signal.rs` 新增 Rust 单测覆盖 `sell2`、`sell3`、`sell1` consolidation、Buy2/Sell2 不同时触发、Sell3 回到 ZD 上方不触发。
+- Go 聚焦测试执行 `go test ./config ./strategy/chanlunv2`，确认现有 sell 路由、RR 阈值和 short entry timing 未回归。

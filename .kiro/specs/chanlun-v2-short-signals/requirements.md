@@ -7,7 +7,7 @@
 | 规格名称 | chanlun-v2-short-signals |
 | 评估服务器 | `43.133.65.217:/home/ubuntu/appai2/nofx`，HEAD `afee0c88` |
 | 评估窗口 | 近 24h，480 条决策日志 |
-| 状态 | requirements 阶段 |
+| 状态 | cross-validation complete，等待执行任务 |
 
 ---
 
@@ -39,13 +39,14 @@
 
 **验收标准**：
 
-1. WHEN 最后一个线段的高点在中枢 ZD 和 ZG 之间（`last_seg.high < center.zg && last_seg.high > center.zd`），且当前价格低于该线段高点，THE Rust 库 SHALL 产出 `sell2` 信号。
+1. WHEN 最后一个线段方向为下跌（`last_seg.direction == Direction::Down`），高点在中枢 ZD 和 ZG 之间（`last_seg.high < center.zg && last_seg.high > center.zd`），且当前价格低于该线段高点，THE Rust 库 SHALL 产出 `sell2` 信号。
 2. THE `sell2` 信号 SHALL 包含：
    - `direction = "short"`
    - `stop_loss = center.zg`（中枢上沿）
-   - `take_profit = center.low - (center.high - center.low)`（中枢下方等距目标）
+   - `take_profit = max(center.low - (center.high - center.low), current_price * 0.9)`（中枢下方等距目标，最多不超过当前价下方 10%）
    - `confidence = 70`
-3. THE Go 层 SHALL 正确路由 `sell2` 为 `open_short` 决策。
+3. THE Rust 库 SHALL NOT 在同一最后线段上同时产出对称的 `buy2` 和 `sell2`。
+4. THE Go 层 SHALL 正确路由 `sell2` 为 `open_short` 决策。
 
 ### Requirement S2 — 实现 Sell3（三类卖点）
 
@@ -53,20 +54,21 @@
 
 **验收标准**：
 
-1. WHEN 最后一个线段的高点低于中枢 ZD（`last_seg.high < center.zd`），THE Rust 库 SHALL 产出 `sell3` 信号。
+1. WHEN 最后一个线段方向为下跌（`last_seg.direction == Direction::Down`），最后一个线段的高点低于中枢 ZD（`last_seg.high < center.zd`），且当前价格仍低于中枢 ZD（`current_price < center.zd`），THE Rust 库 SHALL 产出 `sell3` 信号。
 2. THE `sell3` 信号 SHALL 包含：
    - `direction = "short"`
    - `stop_loss = center.zd`（中枢下沿）
    - `take_profit = current_price - (center.zg - center.zd)`（中枢区间等距下方）
    - `confidence = 65`
-3. THE Go 层 SHALL 正确路由 `sell3` 为 `open_short` 决策。
+3. THE Rust 库 SHALL NOT 在当前价格已经回到 ZD 上方时产出新的 `sell3`，避免过期三卖变成无效父结构。
+4. THE Go 层 SHALL 正确路由 `sell3` 为 `open_short` 决策。
 
 ### Requirement S3 — Sell1 条件放宽
 
 **验收标准**：
 
 1. WHEN `DivergenceType::Top` 被检测到，THE Rust 库 SHALL 在 `UpTrend` 和 `Consolidation` 两种走势类型下都产出 `sell1` 信号（当前仅 UpTrend）。
-2. THE `sell1` 在 `Consolidation` 中的置信度 SHALL 降低 15（`strength * 100 - 15`）。
+2. THE `sell1` 在 `Consolidation` 中的置信度 SHALL 降低 15（`strength * 100 - 15`），并 clamp 到 `[0, 100]`。
 
 ### Requirement S4 — Go 层 entry_timing 支持 sell 信号
 
@@ -82,17 +84,22 @@
 
 ### 3.1 Rust `signal.rs` 修改
 
-在 `detect_signals` 函数的"二类/三类买卖点"部分，新增 Sell2 和 Sell3：
+在 `detect_signals` 函数的"二类/三类买卖点"部分，新增 Sell2 和 Sell3，并引入 `Direction`：
 
 ```rust
+use crate::kline::Direction;
+
 // 二类卖点：反弹不破中枢上沿
-if last_seg.high < center.zg && last_seg.high > center.zd && current_price < last_seg.high {
+if last_seg.direction == Direction::Down
+    && last_seg.high < center.zg
+    && last_seg.high > center.zd
+    && current_price < last_seg.high {
     signals.push(Signal {
         signal_type: SignalType::Sell2,
         direction: "short".into(),
         price: current_price,
         stop_loss: center.zg,
-        take_profit: center.low - (center.high - center.low),
+        take_profit: (center.low - (center.high - center.low)).max(current_price * 0.9),
         confidence: 70,
         center_id: Some(center.id),
         divergence_strength: 0.0,
@@ -101,7 +108,9 @@ if last_seg.high < center.zg && last_seg.high > center.zd && current_price < las
 }
 
 // 三类卖点：跌破中枢不回
-if last_seg.high < center.zd {
+if last_seg.direction == Direction::Down
+    && last_seg.high < center.zd
+    && current_price < center.zd {
     signals.push(Signal {
         signal_type: SignalType::Sell3,
         direction: "short".into(),
