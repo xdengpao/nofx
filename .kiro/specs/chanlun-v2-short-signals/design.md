@@ -145,3 +145,35 @@ validateChanlunV2Decisions → open gate:
 | `chanlun_v2/src/signal.rs` | +20 行（Sell2/Sell3）+ 修改 2 行（Sell1 条件） |
 | `config/config.go`（可选） | 确认 `SignalTypeMinRR` 默认包含 sell |
 | 总计 | ~22 行 Rust |
+
+---
+
+## 6. 交叉验证修正
+
+### 6.1 Sell2 方向约束
+
+为避免 Sell2 和 Buy2 同时触发，Sell2 条件增加 `last_seg.direction == Direction::Down`：
+
+```rust
+if last_seg.direction == Direction::Down
+    && last_seg.high < center.zg && last_seg.high > center.zd
+    && current_price < last_seg.high {
+    // Sell2
+}
+```
+
+### 6.2 TP 保护
+
+Sell2 的 `take_profit` 加下限保护：
+
+```rust
+take_profit: (center.low - (center.high - center.low)).max(current_price * 0.9),
+```
+
+### 6.3 验证通过项
+
+- ✅ `invalidStopTakeProfit` 对 short 方向正确（`tp < price < sl`）
+- ✅ `SignalTypeMinRR` 包含 sell1:2.0, sell2:1.5, sell3:1.2
+- ✅ Go `signalToDecision` 路由 sell → open_short
+- ✅ `multiLevelJudgment` 逆势过滤对 sell 正确
+- ✅ Rust `SignalType` 枚举已有 Sell1/Sell2/Sell3
