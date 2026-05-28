@@ -8,21 +8,21 @@
 
 ## Task 1 — Rust signal.rs 实现 Sell2/Sell3
 
-- [ ] `chanlun_v2/src/signal.rs`：引入 `Direction`，或使用 `crate::kline::Direction::Down` 全限定名。
-- [ ] `chanlun_v2/src/signal.rs`：给现有 Buy2 补 `last_seg.direction == Direction::Up` 约束，避免同一最后线段同时产出 Buy2/Sell2。
-- [ ] `chanlun_v2/src/signal.rs`：在 `detect_signals` 中枢部分新增 Sell2 逻辑（`last_seg.direction == Direction::Down`，反弹不破 ZG）。
-- [ ] `chanlun_v2/src/signal.rs`：Sell2 `take_profit` 使用 `(center.low - (center.high - center.low)).max(current_price * 0.9)`，避免目标过远。
-- [ ] `chanlun_v2/src/signal.rs`：新增 Sell3 逻辑（`last_seg.direction == Direction::Down && last_seg.high < center.zd && current_price < center.zd`）。
-- [ ] `chanlun_v2/src/signal.rs`：Sell1 条件放宽（UpTrend + Consolidation），Consolidation 置信度减 15 并 clamp 到 `[0,100]`。
-- [ ] `chanlun_v2/src/signal.rs`：新增 Rust 单测覆盖 Sell2、Sell3、Sell1 consolidation、Buy2/Sell2 不同时触发、Sell3 回到 ZD 上方不触发。
-- [ ] `cargo test` 通过。
+- [x] `chanlun_v2/src/signal.rs`：引入 `Direction`，或使用 `crate::kline::Direction::Down` 全限定名。
+- [x] `chanlun_v2/src/signal.rs`：给现有 Buy2 补 `last_seg.direction == Direction::Up` 约束，避免同一最后线段同时产出 Buy2/Sell2。
+- [x] `chanlun_v2/src/signal.rs`：在 `detect_signals` 中枢部分新增 Sell2 逻辑（`last_seg.direction == Direction::Down`，反弹不破 ZG）。
+- [x] `chanlun_v2/src/signal.rs`：Sell2 `take_profit` 使用 `(center.low - (center.high - center.low)).max(current_price * 0.9)`，避免目标过远。
+- [x] `chanlun_v2/src/signal.rs`：新增 Sell3 逻辑（`last_seg.direction == Direction::Down && last_seg.high < center.zd && current_price < center.zd`）。
+- [x] `chanlun_v2/src/signal.rs`：Sell1 条件放宽（UpTrend + Consolidation），Consolidation 置信度减 15 并 clamp 到 `[0,100]`。
+- [x] `chanlun_v2/src/signal.rs`：新增 Rust 单测覆盖 Sell2、Sell3、Sell1 consolidation、Buy2/Sell2 不同时触发、Sell3 回到 ZD 上方不触发。
+- [x] `cargo test` 通过。
 
 ## Task 2 — 验证 Go 层兼容
 
-- [ ] 确认 `signalToDecision` 对 `sell2/sell3` 正确路由为 `open_short`。
-- [ ] 确认 `entry_timing.go` 对 short 方向的 `invalidStopTakeProfit` 检查正确（SL > price > TP）。
-- [ ] 确认 `SignalTypeMinRR` 配置包含 sell1/sell2/sell3。
-- [ ] `go test ./config ./strategy/chanlunv2` 通过。
+- [x] 确认 `signalToDecision` 对 `sell2/sell3` 正确路由为 `open_short`。
+- [x] 确认 `entry_timing.go` 对 short 方向的 `invalidStopTakeProfit` 检查正确（SL > price > TP）。
+- [x] 确认 `SignalTypeMinRR` 配置包含 sell1/sell2/sell3。
+- [x] `go test ./config ./strategy/chanlunv2` 通过。
 
 ## Task 3 — 构建部署验证
 

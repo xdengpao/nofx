@@ -1,9 +1,9 @@
-use serde::{Deserialize, Serialize};
 use crate::center::Center;
 use crate::divergence::Divergence;
 use crate::kline::Direction;
 use crate::segment::Segment;
 use crate::trend::TrendType;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SignalType {
@@ -32,11 +32,11 @@ pub enum SignalType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Signal {
     pub signal_type: SignalType,
-    pub direction: String,    // "long" or "short"
+    pub direction: String, // "long" or "short"
     pub price: f64,
     pub stop_loss: f64,
     pub take_profit: f64,
-    pub confidence: i32,      // 0-100
+    pub confidence: i32, // 0-100
     pub center_id: Option<usize>,
     pub divergence_strength: f64,
     pub timestamp: i64,
@@ -74,8 +74,14 @@ pub fn detect_signals(
                     timestamp: seg.end_time,
                 });
             }
-            crate::divergence::DivergenceType::Top if trend == TrendType::UpTrend || trend == TrendType::Consolidation => {
-                let conf_penalty = if trend == TrendType::Consolidation { 15 } else { 0 };
+            crate::divergence::DivergenceType::Top
+                if trend == TrendType::UpTrend || trend == TrendType::Consolidation =>
+            {
+                let conf_penalty = if trend == TrendType::Consolidation {
+                    15
+                } else {
+                    0
+                };
                 let sl = seg.high * 1.02;
                 let tp = center.map(|c| c.zd).unwrap_or(seg.low);
                 signals.push(Signal {
@@ -98,7 +104,11 @@ pub fn detect_signals(
     if let Some(center) = centers.last() {
         if let Some(last_seg) = segments.last() {
             // 二类买点：回抽不入中枢
-            if last_seg.direction == Direction::Up && last_seg.low > center.zd && last_seg.low < center.zg && current_price > last_seg.low {
+            if last_seg.direction == Direction::Up
+                && last_seg.low > center.zd
+                && last_seg.low < center.zg
+                && current_price > last_seg.low
+            {
                 signals.push(Signal {
                     signal_type: SignalType::Buy2,
                     direction: "long".into(),
@@ -197,7 +207,10 @@ mod tests {
     }
 
     fn signal_count(signals: &[Signal], signal_type: SignalType) -> usize {
-        signals.iter().filter(|s| s.signal_type == signal_type).count()
+        signals
+            .iter()
+            .filter(|s| s.signal_type == signal_type)
+            .count()
     }
 
     #[test]
@@ -206,7 +219,10 @@ mod tests {
         let signals = detect_signals(&segments, &[center()], &[], TrendType::DownTrend, 104.0);
 
         assert_eq!(signal_count(&signals, SignalType::Sell2), 1);
-        let sell2 = signals.iter().find(|s| s.signal_type == SignalType::Sell2).unwrap();
+        let sell2 = signals
+            .iter()
+            .find(|s| s.signal_type == SignalType::Sell2)
+            .unwrap();
         assert_eq!(sell2.direction, "short");
         assert_eq!(sell2.stop_loss, 110.0);
         assert!((sell2.take_profit - 93.6).abs() < 0.000001);
@@ -237,7 +253,10 @@ mod tests {
         let signals = detect_signals(&segments, &[center()], &[], TrendType::DownTrend, 94.0);
 
         assert_eq!(signal_count(&signals, SignalType::Sell3), 1);
-        let sell3 = signals.iter().find(|s| s.signal_type == SignalType::Sell3).unwrap();
+        let sell3 = signals
+            .iter()
+            .find(|s| s.signal_type == SignalType::Sell3)
+            .unwrap();
         assert_eq!(sell3.direction, "short");
         assert_eq!(sell3.stop_loss, 100.0);
         assert_eq!(sell3.take_profit, 84.0);
@@ -263,10 +282,19 @@ mod tests {
             slope_ratio: 0.7,
             strength: 0.8,
         }];
-        let signals = detect_signals(&segments, &[center()], &divergences, TrendType::Consolidation, 108.0);
+        let signals = detect_signals(
+            &segments,
+            &[center()],
+            &divergences,
+            TrendType::Consolidation,
+            108.0,
+        );
 
         assert_eq!(signal_count(&signals, SignalType::Sell1), 1);
-        let sell1 = signals.iter().find(|s| s.signal_type == SignalType::Sell1).unwrap();
+        let sell1 = signals
+            .iter()
+            .find(|s| s.signal_type == SignalType::Sell1)
+            .unwrap();
         assert_eq!(sell1.direction, "short");
         assert_eq!(sell1.confidence, 65);
     }
