@@ -26,12 +26,19 @@
 
 ## Task 3 — 构建部署验证
 
-- [ ] 同步到 217 服务器实际目录 `/home/ubuntu/appai2/nofx`。
-- [ ] 部署前备份并保留 217 本地 Aster 账户配置，不从 161 复制凭证。
-- [ ] 部署后确认 `capital_allocation.enabled=true`、`capital_allocation.allocated_balance=100` 保持不变。
-- [ ] `docker compose build && docker compose up -d`。
-- [ ] 等待 1h K 线闭合后检查日志：确认 sell 信号出现。
-- [ ] 若没有实际 `open_short`，检查是否存在 sell 信号对应的 RR/open gate/entry zone 结构化拒绝原因。
+- [x] 同步到 217 服务器实际目录 `/home/ubuntu/appai2/nofx`。
+- [x] 部署前备份并保留 217 本地 Aster 账户配置，不从 161 复制凭证。
+- [x] 部署后确认 `capital_allocation.enabled=true`、`capital_allocation.allocated_balance=100` 保持不变。
+- [x] `docker compose build && docker compose up -d`。
+- [x] 等待 1h K 线闭合后检查日志：确认 sell 信号出现。
+- [x] 若没有实际 `open_short`，检查是否存在 sell 信号对应的 RR/open gate/entry zone 结构化拒绝原因。
+
+### 部署观察记录
+
+- 217：已部署到 `b46a774e4`，`nofx`/`nofx-frontend` 均为 healthy；`aster_chanlun_v2` 已启用，资金分配保持 `enabled=true`、`allocated_balance=100`。
+- 217：最新周期已生成 `ETHUSDT sell3`、`ADAUSDT sell2`、`SOLUSDT sell2` 原始做空信号；当前因 `entry_rr_invalid` 被静默，未触发 `open_short`。
+- 161：已部署到 `b46a774e4`，`nofx`/`nofx-frontend` 均为 healthy；保留 161 本地 Aster 配置，不复制 217 的测试资金配置。
+- 161：最新周期已生成 `ETHUSDT sell3`、`SOLUSDT sell2`、`ADAUSDT sell2` 原始做空结构；当前因剩余净 RR 低于阈值终止，未触发 `open_short`。
 
 ---
 
