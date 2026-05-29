@@ -82,6 +82,7 @@ type OpenRejectionDailyReport struct {
 	ByBucket          map[string]int          `json:"by_bucket"`
 	NearMisses        []OpenRejectionNearMiss `json:"near_misses,omitempty"`
 	RecentExamples    []OpenRejectionEvent    `json:"recent_examples,omitempty"`
+	ChanlunV2NoOpen   *ChanlunV2NoOpenReport  `json:"chanlun_v2_no_open,omitempty"`
 	Notes             []string                `json:"notes,omitempty"`
 }
 
@@ -108,6 +109,82 @@ type OpenRejectionNearMiss struct {
 	Gap         float64   `json:"gap"`
 	Reason      string    `json:"reason"`
 	Source      string    `json:"source"`
+}
+
+// ChanlunV2NoOpenReport 汇总 Chanlun V2 长时间未开仓的可观测路径。
+type ChanlunV2NoOpenReport struct {
+	ActionDistribution         map[string]int                      `json:"action_distribution,omitempty"`
+	FinalActionDistribution    map[string]int                      `json:"final_action_distribution,omitempty"`
+	TradeIntentDistribution    map[string]int                      `json:"trade_intent_distribution,omitempty"`
+	DirectTerminalCount        int                                 `json:"direct_terminal_count,omitempty"`
+	DirectTerminalByReason     map[string]int                      `json:"direct_terminal_by_reason,omitempty"`
+	SuppressedTerminalCount    int                                 `json:"suppressed_terminal_count,omitempty"`
+	SuppressedTerminalByReason map[string]int                      `json:"suppressed_terminal_by_reason,omitempty"`
+	WaitingForTriggerCount     int                                 `json:"waiting_for_trigger_count,omitempty"`
+	TriggerReadyCount          int                                 `json:"trigger_ready_count,omitempty"`
+	TriggerReadyBySymbol       map[string]int                      `json:"trigger_ready_by_symbol,omitempty"`
+	OpenGateRejectionCount     int                                 `json:"open_gate_rejection_count,omitempty"`
+	OpenGateByReason           map[string]int                      `json:"open_gate_by_reason,omitempty"`
+	RRDirectTerminalCount      int                                 `json:"rr_direct_terminal_count,omitempty"`
+	RRDirectBySymbol           map[string]int                      `json:"rr_direct_by_symbol,omitempty"`
+	RRDirectBySignalType       map[string]int                      `json:"rr_direct_by_signal_type,omitempty"`
+	RRDirectByThreshold        map[string]int                      `json:"rr_direct_by_threshold,omitempty"`
+	RRDirectSamples            []ChanlunV2RRDirectTerminalSample   `json:"rr_direct_samples,omitempty"`
+	BTCGateRejectionCount      int                                 `json:"btc_gate_rejection_count,omitempty"`
+	BTCGateDiagnostics         []ChanlunV2BTCGateDiagnosticSample  `json:"btc_gate_diagnostics,omitempty"`
+	ConfidenceOverrideCount    int                                 `json:"confidence_override_count,omitempty"`
+	ConfidenceOverrides        []ChanlunV2ConfidenceOverrideSample `json:"confidence_overrides,omitempty"`
+	Samples                    []ChanlunV2NoOpenSample             `json:"samples,omitempty"`
+}
+
+// ChanlunV2RRDirectTerminalSample 是 RR 直接终态的结构化样本。
+type ChanlunV2RRDirectTerminalSample struct {
+	Timestamp   time.Time `json:"timestamp"`
+	SourceFile  string    `json:"source_file,omitempty"`
+	CycleNumber int       `json:"cycle_number,omitempty"`
+	Symbol      string    `json:"symbol,omitempty"`
+	SignalType  string    `json:"signal_type,omitempty"`
+	RemainingRR float64   `json:"remaining_net_rr,omitempty"`
+	Threshold   float64   `json:"threshold,omitempty"`
+	Reason      string    `json:"reason,omitempty"`
+}
+
+// ChanlunV2BTCGateDiagnosticSample 是 BTC hard veto 的展开样本。
+type ChanlunV2BTCGateDiagnosticSample struct {
+	Timestamp       time.Time      `json:"timestamp"`
+	SourceFile      string         `json:"source_file,omitempty"`
+	CycleNumber     int            `json:"cycle_number,omitempty"`
+	Symbol          string         `json:"symbol,omitempty"`
+	Action          string         `json:"action,omitempty"`
+	ReasonCode      string         `json:"reason_code,omitempty"`
+	Reason          string         `json:"reason,omitempty"`
+	BTC             map[string]any `json:"btc,omitempty"`
+	GateDiagnostics map[string]any `json:"gate_diagnostics,omitempty"`
+}
+
+// ChanlunV2ConfidenceOverrideSample 是 open gate 置信度 override 生效样本。
+type ChanlunV2ConfidenceOverrideSample struct {
+	Timestamp   time.Time      `json:"timestamp"`
+	SourceFile  string         `json:"source_file,omitempty"`
+	CycleNumber int            `json:"cycle_number,omitempty"`
+	Symbol      string         `json:"symbol,omitempty"`
+	Action      string         `json:"action,omitempty"`
+	Rule        string         `json:"rule,omitempty"`
+	From        float64        `json:"from,omitempty"`
+	To          float64        `json:"to,omitempty"`
+	Actual      float64        `json:"actual_confidence,omitempty"`
+	Diagnostics map[string]any `json:"diagnostics,omitempty"`
+}
+
+// ChanlunV2NoOpenSample 是 no-open 报告里的最近样本索引。
+type ChanlunV2NoOpenSample struct {
+	Timestamp   time.Time `json:"timestamp"`
+	SourceFile  string    `json:"source_file,omitempty"`
+	CycleNumber int       `json:"cycle_number,omitempty"`
+	Symbol      string    `json:"symbol,omitempty"`
+	Category    string    `json:"category"`
+	ReasonCode  string    `json:"reason_code,omitempty"`
+	Reason      string    `json:"reason,omitempty"`
 }
 
 // StrategyDiseaseReport 汇总策略病因诊断。
@@ -381,9 +458,11 @@ func BuildReplayReport(records []*DecisionRecord, reportOnly bool, dryRun bool) 
 }
 
 var (
-	rrNearMissPattern    = regexp.MustCompile(`([A-Z0-9]+USDT).*剩余净RR\s*([0-9]+(?:\.[0-9]+)?)低于阈值([0-9]+(?:\.[0-9]+)?)`)
-	chaseNearMissPattern = regexp.MustCompile(`([A-Z0-9]+USDT).*入场追价比例([0-9]+(?:\.[0-9]+)?)超过阈值([0-9]+(?:\.[0-9]+)?)`)
-	suppressedPattern    = regexp.MustCompile(`已因([a-zA-Z0-9_]+)抑制`)
+	rrNearMissPattern               = regexp.MustCompile(`([A-Z0-9]+USDT).*剩余净RR\s*([0-9]+(?:\.[0-9]+)?)低于阈值([0-9]+(?:\.[0-9]+)?)`)
+	chaseNearMissPattern            = regexp.MustCompile(`([A-Z0-9]+USDT).*入场追价比例([0-9]+(?:\.[0-9]+)?)超过阈值([0-9]+(?:\.[0-9]+)?)`)
+	suppressedPattern               = regexp.MustCompile(`已因([a-zA-Z0-9_]+)抑制`)
+	v2RRDirectTerminalPattern       = regexp.MustCompile(`([A-Z0-9]+USDT)\s+([a-zA-Z0-9_]+).*父结构终止:.*剩余净RR\s*([0-9]+(?:\.[0-9]+)?)低于阈值([0-9]+(?:\.[0-9]+)?)`)
+	v2TerminalSuppressedCodePattern = regexp.MustCompile(`(?:终态信号已静默|重复过期信号已静默):\s*([a-zA-Z0-9_.]+)`)
 )
 
 // BuildOpenRejectionDailyReport 基于已过滤记录生成只读开仓拒绝日报。
@@ -402,12 +481,14 @@ func BuildOpenRejectionDailyReport(records []*DecisionRecord, maxNearMisses int)
 		report.Notes = append(report.Notes, "未发现决策日志，日报为空")
 		return report
 	}
+	report.ChanlunV2NoOpen = newChanlunV2NoOpenReport()
 	report.PeriodStart = records[0].Timestamp
 	report.PeriodEnd = records[len(records)-1].Timestamp
 	for _, record := range records {
 		if record == nil {
 			continue
 		}
+		addChanlunV2ActionDistributions(report.ChanlunV2NoOpen, record)
 		for _, action := range record.Decisions {
 			if action.Action != "open_rejected" && !(isOpenAction(action.Action) && isOpenRejection(action)) {
 				continue
@@ -428,11 +509,13 @@ func BuildOpenRejectionDailyReport(records []*DecisionRecord, maxNearMisses int)
 				Source:      "decision_action",
 			}
 			addOpenRejectionEvent(&report, event)
+			addChanlunV2OpenGateRejection(report.ChanlunV2NoOpen, record, action, reasonCode, reason)
 			if !appendNearMissFromText(&report, record, event.Symbol, reasonCode, reason, event.Source) {
 				appendNearMissFromAction(&report, record, action, reasonCode, reason)
 			}
 		}
 		for _, message := range strategyDiagnosticMessages(record) {
+			addChanlunV2DiagnosticMessage(report.ChanlunV2NoOpen, record, message)
 			reasonCode := diagnosticRejectionReasonCode(message)
 			if reasonCode == "" {
 				continue
@@ -483,6 +566,282 @@ func addOpenRejectionEvent(report *OpenRejectionDailyReport, event OpenRejection
 	report.BySymbol[event.Symbol]++
 	report.ByBucket[event.Bucket]++
 	report.RecentExamples = appendLimitedEvent(report.RecentExamples, event, 20)
+}
+
+func newChanlunV2NoOpenReport() *ChanlunV2NoOpenReport {
+	return &ChanlunV2NoOpenReport{
+		ActionDistribution:         make(map[string]int),
+		FinalActionDistribution:    make(map[string]int),
+		TradeIntentDistribution:    make(map[string]int),
+		DirectTerminalByReason:     make(map[string]int),
+		SuppressedTerminalByReason: make(map[string]int),
+		TriggerReadyBySymbol:       make(map[string]int),
+		OpenGateByReason:           make(map[string]int),
+		RRDirectBySymbol:           make(map[string]int),
+		RRDirectBySignalType:       make(map[string]int),
+		RRDirectByThreshold:        make(map[string]int),
+	}
+}
+
+func addChanlunV2ActionDistributions(noOpen *ChanlunV2NoOpenReport, record *DecisionRecord) {
+	if noOpen == nil || record == nil {
+		return
+	}
+	for _, action := range record.Decisions {
+		if value := strings.TrimSpace(action.Action); value != "" {
+			noOpen.ActionDistribution[value]++
+		}
+		if value := strings.TrimSpace(action.FinalAction); value != "" {
+			noOpen.FinalActionDistribution[value]++
+		}
+		tradeIntent := strings.TrimSpace(action.TradeIntent)
+		if tradeIntent == "" {
+			tradeIntent, _ = metadataString(action.StrategyMetadata, "trade_intent")
+		}
+		if tradeIntent != "" {
+			noOpen.TradeIntentDistribution[tradeIntent]++
+		}
+	}
+}
+
+func addChanlunV2OpenGateRejection(noOpen *ChanlunV2NoOpenReport, record *DecisionRecord, action DecisionAction, reasonCode, reason string) {
+	if noOpen == nil || record == nil {
+		return
+	}
+	noOpen.OpenGateRejectionCount++
+	if reasonCode == "" {
+		reasonCode = "unknown"
+	}
+	noOpen.OpenGateByReason[reasonCode]++
+	symbol := marketSymbolOrAction(action.Symbol, reason)
+	appendChanlunV2NoOpenSample(noOpen, record, symbol, "open_gate_rejection", reasonCode, reason)
+	addChanlunV2ConfidenceOverride(noOpen, record, action, symbol)
+	if !chanlunV2ActionHasBTCGate(action, reasonCode, reason) {
+		return
+	}
+	noOpen.BTCGateRejectionCount++
+	sample := ChanlunV2BTCGateDiagnosticSample{
+		Timestamp:       record.Timestamp,
+		SourceFile:      record.SourcePath,
+		CycleNumber:     record.CycleNumber,
+		Symbol:          symbol,
+		Action:          action.Action,
+		ReasonCode:      reasonCode,
+		Reason:          reason,
+		GateDiagnostics: action.GateDiagnostics,
+	}
+	if btc, ok := action.GateDiagnostics["btc"].(map[string]any); ok {
+		sample.BTC = btc
+	}
+	noOpen.BTCGateDiagnostics = appendLimitedBTCGateSamples(noOpen.BTCGateDiagnostics, sample, 20)
+	appendChanlunV2NoOpenSample(noOpen, record, symbol, "btc_gate_rejection", reasonCode, reason)
+}
+
+func addChanlunV2ConfidenceOverride(noOpen *ChanlunV2NoOpenReport, record *DecisionRecord, action DecisionAction, symbol string) {
+	if noOpen == nil || record == nil || len(action.GateDiagnostics) == 0 {
+		return
+	}
+	raw, ok := action.GateDiagnostics["min_confidence_override_applied"]
+	if !ok || raw == nil {
+		return
+	}
+	diagnostics, ok := raw.(map[string]any)
+	if !ok {
+		return
+	}
+	noOpen.ConfidenceOverrideCount++
+	rule, _ := metadataString(diagnostics, "rule")
+	from, _ := metadataFloat(diagnostics, "from")
+	to, _ := metadataFloat(diagnostics, "to")
+	actual, _ := metadataFloat(diagnostics, "actual_confidence")
+	noOpen.ConfidenceOverrides = appendLimitedConfidenceOverrideSamples(noOpen.ConfidenceOverrides, ChanlunV2ConfidenceOverrideSample{
+		Timestamp:   record.Timestamp,
+		SourceFile:  record.SourcePath,
+		CycleNumber: record.CycleNumber,
+		Symbol:      symbol,
+		Action:      action.Action,
+		Rule:        rule,
+		From:        from,
+		To:          to,
+		Actual:      actual,
+		Diagnostics: diagnostics,
+	}, 20)
+}
+
+func addChanlunV2DiagnosticMessage(noOpen *ChanlunV2NoOpenReport, record *DecisionRecord, message string) {
+	if noOpen == nil || record == nil {
+		return
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return
+	}
+	reasonCode := chanlunV2NoOpenReasonCode(message)
+	symbol := marketSymbolOrAction("", message)
+	switch {
+	case strings.Contains(message, "fresh entry trigger ready"):
+		noOpen.TriggerReadyCount++
+		noOpen.TriggerReadyBySymbol[firstNonEmpty(symbol, "UNKNOWN")]++
+		appendChanlunV2NoOpenSample(noOpen, record, symbol, "trigger_ready", reasonCode, message)
+	case strings.Contains(message, "等待") && strings.Contains(message, "fresh entry trigger"):
+		noOpen.WaitingForTriggerCount++
+		appendChanlunV2NoOpenSample(noOpen, record, symbol, "waiting_for_fresh_entry_trigger", firstNonEmpty(reasonCode, "waiting_for_fresh_entry_trigger"), message)
+	case isChanlunV2SuppressedTerminalMessage(message):
+		noOpen.SuppressedTerminalCount++
+		noOpen.SuppressedTerminalByReason[firstNonEmpty(reasonCode, "terminal_suppressed")]++
+		appendChanlunV2NoOpenSample(noOpen, record, symbol, "suppressed_terminal", reasonCode, message)
+	case isChanlunV2DirectTerminalMessage(message):
+		noOpen.DirectTerminalCount++
+		noOpen.DirectTerminalByReason[firstNonEmpty(reasonCode, "terminal")]++
+		appendChanlunV2NoOpenSample(noOpen, record, symbol, "direct_terminal", reasonCode, message)
+		addChanlunV2RRDirectTerminal(noOpen, record, message)
+	}
+}
+
+func addChanlunV2RRDirectTerminal(noOpen *ChanlunV2NoOpenReport, record *DecisionRecord, message string) {
+	if noOpen == nil || record == nil {
+		return
+	}
+	matches := v2RRDirectTerminalPattern.FindStringSubmatch(message)
+	if len(matches) != 5 {
+		return
+	}
+	remainingRR, rrOK := parseReplayFloat(matches[3])
+	threshold, thresholdOK := parseReplayFloat(matches[4])
+	if !rrOK || !thresholdOK {
+		return
+	}
+	symbol := marketSymbolOrAction(matches[1], message)
+	signalType := strings.ToLower(strings.TrimSpace(matches[2]))
+	noOpen.RRDirectTerminalCount++
+	noOpen.RRDirectBySymbol[firstNonEmpty(symbol, "UNKNOWN")]++
+	noOpen.RRDirectBySignalType[firstNonEmpty(signalType, "unknown")]++
+	noOpen.RRDirectByThreshold[fmt.Sprintf("%s@%.2f", firstNonEmpty(signalType, "unknown"), threshold)]++
+	noOpen.RRDirectSamples = appendLimitedRRDirectSamples(noOpen.RRDirectSamples, ChanlunV2RRDirectTerminalSample{
+		Timestamp:   record.Timestamp,
+		SourceFile:  record.SourcePath,
+		CycleNumber: record.CycleNumber,
+		Symbol:      symbol,
+		SignalType:  signalType,
+		RemainingRR: remainingRR,
+		Threshold:   threshold,
+		Reason:      message,
+	}, 20)
+}
+
+func chanlunV2NoOpenReasonCode(message string) string {
+	if matches := v2TerminalSuppressedCodePattern.FindStringSubmatch(message); len(matches) == 2 {
+		return matches[1]
+	}
+	if matches := suppressedPattern.FindStringSubmatch(message); len(matches) == 2 {
+		return matches[1]
+	}
+	switch {
+	case strings.Contains(message, "剩余净RR"):
+		return "entry_rr_invalid"
+	case strings.Contains(message, "观察窗口过期"):
+		return "entry_parent.watch_window_expired"
+	case strings.Contains(message, "当前价") && strings.Contains(message, "已穿越目标"):
+		return "entry_parent.target_crossed"
+	case strings.Contains(message, "止损/止盈结构无效"):
+		return "entry_parent.invalid_structure"
+	case strings.Contains(message, "trigger_skipped: gate_blocked"):
+		return "gate_blocked"
+	case strings.Contains(message, "fresh entry trigger ready"):
+		return "entry_trigger_ready"
+	}
+	return diagnosticRejectionReasonCode(message)
+}
+
+func isChanlunV2DirectTerminalMessage(message string) bool {
+	if strings.Contains(message, "父结构终止:") || strings.Contains(message, "父结构观察窗口过期") || strings.Contains(message, "trigger_skipped: gate_blocked") {
+		return true
+	}
+	return false
+}
+
+func isChanlunV2SuppressedTerminalMessage(message string) bool {
+	return strings.Contains(message, "终态信号已静默") || strings.Contains(message, "重复过期信号已静默") || suppressedPattern.MatchString(message)
+}
+
+func chanlunV2ActionHasBTCGate(action DecisionAction, reasonCode, reason string) bool {
+	if strings.EqualFold(reasonCode, "btc") || strings.Contains(reason, "BTC 1h/4h") || strings.Contains(reason, "高 beta 山寨多单") {
+		return true
+	}
+	for _, gateReason := range action.GateReasons {
+		if strings.EqualFold(strings.TrimSpace(gateReason), "btc") {
+			return true
+		}
+	}
+	if len(action.GateDiagnostics) == 0 {
+		return false
+	}
+	if _, ok := action.GateDiagnostics["btc"]; ok {
+		return true
+	}
+	if code, ok := metadataString(action.GateDiagnostics, "reason_code"); ok && strings.EqualFold(code, "btc") {
+		return true
+	}
+	return false
+}
+
+func appendChanlunV2NoOpenSample(noOpen *ChanlunV2NoOpenReport, record *DecisionRecord, symbol, category, reasonCode, reason string) {
+	if noOpen == nil || record == nil {
+		return
+	}
+	noOpen.Samples = appendLimitedNoOpenSamples(noOpen.Samples, ChanlunV2NoOpenSample{
+		Timestamp:   record.Timestamp,
+		SourceFile:  record.SourcePath,
+		CycleNumber: record.CycleNumber,
+		Symbol:      marketSymbolOrAction(symbol, reason),
+		Category:    category,
+		ReasonCode:  reasonCode,
+		Reason:      reason,
+	}, 30)
+}
+
+func appendLimitedRRDirectSamples(values []ChanlunV2RRDirectTerminalSample, sample ChanlunV2RRDirectTerminalSample, max int) []ChanlunV2RRDirectTerminalSample {
+	if max <= 0 {
+		return values
+	}
+	values = append(values, sample)
+	if len(values) > max {
+		return values[len(values)-max:]
+	}
+	return values
+}
+
+func appendLimitedBTCGateSamples(values []ChanlunV2BTCGateDiagnosticSample, sample ChanlunV2BTCGateDiagnosticSample, max int) []ChanlunV2BTCGateDiagnosticSample {
+	if max <= 0 {
+		return values
+	}
+	values = append(values, sample)
+	if len(values) > max {
+		return values[len(values)-max:]
+	}
+	return values
+}
+
+func appendLimitedConfidenceOverrideSamples(values []ChanlunV2ConfidenceOverrideSample, sample ChanlunV2ConfidenceOverrideSample, max int) []ChanlunV2ConfidenceOverrideSample {
+	if max <= 0 {
+		return values
+	}
+	values = append(values, sample)
+	if len(values) > max {
+		return values[len(values)-max:]
+	}
+	return values
+}
+
+func appendLimitedNoOpenSamples(values []ChanlunV2NoOpenSample, sample ChanlunV2NoOpenSample, max int) []ChanlunV2NoOpenSample {
+	if max <= 0 {
+		return values
+	}
+	values = append(values, sample)
+	if len(values) > max {
+		return values[len(values)-max:]
+	}
+	return values
 }
 
 func appendLimitedEvent(values []OpenRejectionEvent, event OpenRejectionEvent, max int) []OpenRejectionEvent {

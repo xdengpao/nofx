@@ -89,7 +89,7 @@ func (e *Engine) evaluateParentStructureEntry(ctx *decision.Context, symbol stri
 	if action == "" {
 		return parentEntryEvaluation{}
 	}
-	timing := config.NormalizeChanlunV2EntryTiming(e.Config.EntryTiming)
+	timing := e.effectiveEntryTiming(ctx)
 	if timing.Enabled != nil && !*timing.Enabled {
 		return parentEntryEvaluation{Decision: e.signalToDecision(ctx, symbol, sig, timeframes["trade"], decisionCloseTime), ParentSeen: true, TriggerReady: true}
 	}
@@ -268,7 +268,7 @@ func (e *Engine) detectV2EntryTrigger(ctx *decision.Context, symbol string, sig 
 	if ctx == nil || data == nil {
 		return nil, entryTriggerRejection{}
 	}
-	timing := config.NormalizeChanlunV2EntryTiming(e.Config.EntryTiming)
+	timing := e.effectiveEntryTiming(ctx)
 	if timing.MinTriggerConfidence > 0 && sig.Confidence < timing.MinTriggerConfidence {
 		return nil, entryTriggerRejection{
 			ReasonCode: "entry_trigger_low_confidence",

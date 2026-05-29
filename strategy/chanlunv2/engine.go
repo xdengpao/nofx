@@ -24,6 +24,11 @@ type Engine struct {
 	executionLoaded       map[string]bool
 	positionStates        map[string]PositionManagementState
 	configHash            string
+	activeMode            string
+	loosenMinRRDelta      float64
+	loosenChaseBump       float64
+	loosenConfidenceDrop  int
+	loosenConfidenceFloor int
 }
 
 type chanlunV2StaleSuppression struct {
@@ -93,6 +98,7 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 	if err != nil {
 		return nil, err
 	}
+	activeMode := e.loosenModeController(ctx)
 
 	var allDecisions []decision.Decision
 	var diagnostics []string
@@ -102,6 +108,9 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 	parentStructureCount := 0
 	entryTriggerCount := 0
 	triggerRejectionReasons := map[string]int{}
+	if activeMode != "" && activeMode != "normal" {
+		diagnostics = append(diagnostics, fmt.Sprintf("active_mode=%s", activeMode))
+	}
 
 	// 持仓管理优先产出风险降低动作，后续开仓候选不能阻塞这些动作。
 	posDecisions := e.managePositions(ctx, timeframes)
@@ -241,6 +250,8 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 			"messages":                    diagnostics,
 			"timeframes":                  timeframes,
 			"symbols":                     symbols,
+			"active_mode":                 e.activeRuntimeMode(),
+			"effective_entry_timing":      e.effectiveEntryTimingDiagnostics(ctx),
 			"raw_signal_count":            rawSignalCount,
 			"signal_count":                activeSignalCount,
 			"parent_structure_count":      parentStructureCount,
@@ -656,7 +667,8 @@ func (e *Engine) enrichChanlunV2FreshnessMetadata(ctx *decision.Context, d decis
 		decisionClose = signalClose
 	}
 	ageCandles := signalAgeCandles(signalClose, decisionClose, evaluationTF)
-	softAge, maxLifetime := e.chanlunV2FreshnessLimits(policy, d.SignalType)
+	signalType := effectiveChanlunV2DecisionSignalType(d)
+	softAge, maxLifetime := e.chanlunV2FreshnessLimits(policy, signalType)
 	freshnessState := "fresh"
 	if ageCandles > maxLifetime {
 		freshnessState = "expired"
@@ -664,7 +676,7 @@ func (e *Engine) enrichChanlunV2FreshnessMetadata(ctx *decision.Context, d decis
 		freshnessState = "aged"
 	}
 	currentPrice := currentPriceForV2Guard(ctx, d.Symbol, evaluationTF)
-	minRR := e.minRemainingNetRR(ctx, policy)
+	minRR := e.minRemainingNetRR(ctx, policy, signalType)
 	d.StrategyMetadata["signal_close_time"] = signalClose
 	d.StrategyMetadata["decision_close_time"] = decisionClose
 	d.StrategyMetadata["evaluation_close_time"] = decisionClose
@@ -1337,14 +1349,17 @@ func (e *Engine) chanlunV2FreshnessLimits(policy config.ChanlunV2SignalFreshness
 	return soft, maxLifetime
 }
 
-func (e *Engine) minRemainingNetRR(ctx *decision.Context, policy config.ChanlunV2SignalFreshnessConfig) float64 {
+func (e *Engine) minRemainingNetRR(ctx *decision.Context, policy config.ChanlunV2SignalFreshnessConfig, signalType string) float64 {
+	if strings.TrimSpace(signalType) != "" {
+		return minRemainingNetRRForV2Signal(e.effectiveEntryTiming(ctx), signalType)
+	}
 	if policy.MinRemainingNetRR > 0 {
-		return policy.MinRemainingNetRR
+		return e.applyEffectiveV2MinRR(policy.MinRemainingNetRR)
 	}
 	if ctx != nil && ctx.StrategyRiskPolicy != nil && ctx.StrategyRiskPolicy.DefaultMinNetRR > 0 {
-		return ctx.StrategyRiskPolicy.DefaultMinNetRR
+		return e.applyEffectiveV2MinRR(ctx.StrategyRiskPolicy.DefaultMinNetRR)
 	}
-	return 1.2
+	return e.applyEffectiveV2MinRR(1.2)
 }
 
 func currentPriceForV2Guard(ctx *decision.Context, symbol, timeframe string) float64 {

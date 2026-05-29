@@ -31,4 +31,5 @@ func (e *Engine) OnExecutionResult(result ExecutionResult) {
 	d := result.Decision
 	d.Action = finalAction
 	e.markSignalExecuted(result.TraderID, d, result.ExecutedAt)
+	e.setActiveMode("normal")
 }

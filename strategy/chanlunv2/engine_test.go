@@ -632,6 +632,147 @@ func TestV2EntryRRUsesSignalTypeThreshold(t *testing.T) {
 	}
 }
 
+func TestChanlunV2LoosenModeEntersAndAdjustsThresholds(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	ctx.RuntimeMinutes = 13 * 60
+	ctx.FrequencyPolicy = &decision.FrequencyPolicy{
+		Mode:          "balanced",
+		EffectiveMode: "balanced",
+		LoosenMode: decision.LoosenModePolicy{
+			Enabled:                  true,
+			InactivityWindowMinutes:  12 * 60,
+			MinNetRRDelta:            -0.4,
+			MaxChaseRatioBump:        0.05,
+			PilotConfidenceDrop:      10,
+			HardFloorPilotConfidence: 60,
+		},
+	}
+
+	if got := engine.loosenModeController(ctx); got != "loosen" {
+		t.Fatalf("12h+无开仓后应进入loosen: %s", got)
+	}
+	if ctx.FrequencyPolicy.EffectiveMode != "loosen" || engine.activeRuntimeMode() != "loosen" {
+		t.Fatalf("loosen应写入运行态: ctx=%+v engine=%s", ctx.FrequencyPolicy, engine.activeRuntimeMode())
+	}
+	timing := engine.effectiveEntryTiming(ctx)
+	if got := minRemainingNetRRForV2Signal(timing, "sell2"); got < 1.099 || got > 1.101 {
+		t.Fatalf("sell2 RR阈值应按delta降到1.1: %.2f", got)
+	}
+	if timing.EntryZone.MaxChaseRatio < 0.399 || timing.EntryZone.MaxChaseRatio > 0.401 {
+		t.Fatalf("max chase应放宽到0.40: %.2f", timing.EntryZone.MaxChaseRatio)
+	}
+	if timing.MinTriggerConfidence != 60 {
+		t.Fatalf("trigger confidence应降低到floor 60: %d", timing.MinTriggerConfidence)
+	}
+}
+
+func TestChanlunV2LoosenRRAllowsSell2NearMissAcrossEntryAndFreshness(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	ctx.RuntimeMinutes = 13 * 60
+	ctx.FrequencyPolicy = &decision.FrequencyPolicy{
+		Mode:          "balanced",
+		EffectiveMode: "balanced",
+		LoosenMode: decision.LoosenModePolicy{
+			Enabled:                 true,
+			InactivityWindowMinutes: 12 * 60,
+			MinNetRRDelta:           -0.4,
+		},
+	}
+	engine.loosenModeController(ctx)
+	timing := engine.effectiveEntryTiming(ctx)
+	if rejection := validateEntryZoneAndRR("SOLUSDT", "open_short", "sell2", 100, 110, 88.8, 100, timing, 0); rejection.ReasonCode != "" {
+		t.Fatalf("sell2 RR=1.12在loosen阈值1.10下不应直接终态: %+v", rejection)
+	}
+
+	ctx.MarketDataMap["SOLUSDT"] = chanlunV2ValidationMarketData("SOLUSDT", 100)
+	signalClose := int64(1710000000000)
+	d := chanlunV2DecisionFixture(engine, ctx, "SOLUSDT", "sell2", "open_short", signalClose, signalClose, 90, 110, 88.8)
+	valid, rejections, _ := engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{d}, map[string]string{"trade": "1h"})
+	if len(rejections) != 0 || len(valid) != 1 {
+		t.Fatalf("freshness guard应使用同一loosen RR阈值: valid=%+v rejections=%+v", valid, rejections)
+	}
+	if got := metadataFloat64(valid[0].StrategyMetadata, "min_remaining_net_rr"); got < 1.099 || got > 1.101 {
+		t.Fatalf("freshness元数据应记录loosen后的sell2阈值1.1: %.2f", got)
+	}
+}
+
+func TestChanlunV2LoosenDoesNotBypassBTCHardVeto(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	ctx.RuntimeMinutes = 13 * 60
+	ctx.FrequencyPolicy = &decision.FrequencyPolicy{
+		Mode:          "balanced",
+		EffectiveMode: "balanced",
+		LoosenMode: decision.LoosenModePolicy{
+			Enabled:                 true,
+			InactivityWindowMinutes: 12 * 60,
+		},
+	}
+	ctx.MarketDataMap["BNBUSDT"] = chanlunV2ValidationMarketData("BNBUSDT", 100)
+	ctx.MarketDataMap["BTCUSDT"] = chanlunV2BearishBTCMarketData()
+	engine.loosenModeController(ctx)
+
+	d := engine.signalToDecision(ctx, "BNBUSDT", Signal{
+		SignalType: "buy2",
+		Direction:  "long",
+		StopLoss:   95,
+		TakeProfit: 120,
+		Confidence: 95,
+		Timestamp:  1710000000000,
+	}, "1h")
+	valid, rejections := engine.validateChanlunV2Decisions(ctx, []decision.Decision{d}, nil)
+	if len(valid) != 0 || len(rejections) != 1 {
+		t.Fatalf("BTC hard veto应阻断高beta山寨多单: valid=%+v rejections=%+v", valid, rejections)
+	}
+	if !strings.Contains(rejections[0].Reason, "BTC 1h/4h 明显转弱") {
+		t.Fatalf("拒因应保留btc hard veto: %+v", rejections[0])
+	}
+	if btc, ok := rejections[0].GateDiagnostics["btc"].(map[string]any); !ok || btc["confirmed_bearish"] != true {
+		t.Fatalf("应输出BTC confirmed bearish诊断: %+v", rejections[0].GateDiagnostics)
+	}
+}
+
+func TestChanlunV2LoosenExitsAfterOpen(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	ctx.RuntimeMinutes = 13 * 60
+	ctx.FrequencyPolicy = &decision.FrequencyPolicy{
+		Mode:          "balanced",
+		EffectiveMode: "balanced",
+		LoosenMode: decision.LoosenModePolicy{
+			Enabled:                 true,
+			InactivityWindowMinutes: 12 * 60,
+		},
+	}
+	if got := engine.loosenModeController(ctx); got != "loosen" {
+		t.Fatalf("应先进入loosen: %s", got)
+	}
+	d := decision.Decision{Symbol: "SOLUSDT", Action: "open_short", SignalID: "trigger-1"}
+	engine.OnExecutionResult(ExecutionResult{TraderID: ctx.TraderID, Decision: d, Success: true, ExecutedAt: time.Now()})
+	if got := engine.activeRuntimeMode(); got != "normal" {
+		t.Fatalf("成功open后应退出loosen: %s", got)
+	}
+	ctx.FrequencyState.OpenCount24h = 1
+	ctx.FrequencyPolicy.EffectiveMode = "balanced"
+	if got := engine.loosenModeController(ctx); got != "balanced" {
+		t.Fatalf("频率状态记录成功open后应保持原档位: %s", got)
+	}
+}
+
 func TestThirdPointQualityRejectsInvalidCases(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1221,6 +1362,28 @@ func chanlunV2ValidationMarketData(symbol string, price float64) *market.Data {
 			ADXValues: []float64{35},
 			DIPlus:    []float64{30},
 			DIMinus:   []float64{10},
+		},
+	}
+}
+
+func chanlunV2BearishBTCMarketData() *market.Data {
+	return &market.Data{
+		Symbol:         "BTCUSDT",
+		CurrentPrice:   95000,
+		PriceChange1h:  -2.0,
+		PriceChange4h:  -4.0,
+		CurrentDIPlus:  12,
+		CurrentDIMinus: 28,
+		CurrentADX:     32,
+		LongerTermContext: &market.LongerTermData{
+			EMA20:    97000,
+			EMA50:    98000,
+			MACDHist: []float64{-10},
+		},
+		MidTermSeries1h: &market.MidTermData1h{
+			EMA20Values: []float64{96000},
+			EMA50Values: []float64{98000},
+			MACDHist:    []float64{-10},
 		},
 	}
 }

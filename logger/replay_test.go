@@ -134,6 +134,91 @@ func TestBuildOpenRejectionDailyReport(t *testing.T) {
 	}
 }
 
+func TestBuildOpenRejectionDailyReport_ChanlunV2NoOpen(t *testing.T) {
+	now := time.Date(2026, 5, 29, 13, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{{
+		Timestamp:   now,
+		SourcePath:  "/var/log/nofx/decision_20260529.json",
+		CycleNumber: 17,
+		Decisions: []DecisionAction{
+			{Action: "wait", FinalAction: "wait", TradeIntent: "wait", Timestamp: now},
+			{
+				Action:      "open_rejected",
+				FinalAction: "open_rejected",
+				TradeIntent: "open_long",
+				Symbol:      "BNBUSDT",
+				Success:     false,
+				Error:       "BNBUSDT open_long 被拒: BTC 1h/4h 明显转弱，禁止新开高 beta 山寨多单",
+				GateReasons: []string{"btc"},
+				GateDiagnostics: map[string]any{
+					"reason_code": "btc",
+					"min_confidence_override_applied": map[string]any{
+						"rule":              "range_long",
+						"from":              82,
+						"to":                60,
+						"actual_confidence": 70,
+					},
+					"btc": map[string]any{
+						"confirmed_bearish": true,
+						"four_hour_bearish": true,
+						"one_hour_bearish":  true,
+					},
+				},
+				Timestamp: now,
+			},
+		},
+		StrategyDiagnostics: map[string]any{
+			"messages": []any{
+				"DOGEUSDT sell2 父结构终止: 剩余净RR 1.41低于阈值1.50",
+				"ETHUSDT sell3 父结构观察窗口过期: 年龄17根15m超过16根",
+				"SOLUSDT sell2 终态信号已静默: entry_rr_invalid",
+				"BNBUSDT buy2 fresh entry trigger ready: chanlun_v2_entry:abc",
+				"ADAUSDT sell2 作为父结构背景保留，等待15m fresh entry trigger",
+			},
+		},
+	}}
+
+	report := BuildOpenRejectionDailyReport(records, 10)
+	noOpen := report.ChanlunV2NoOpen
+	if noOpen == nil {
+		t.Fatal("应输出Chanlun V2 no-open摘要")
+	}
+	if noOpen.ActionDistribution["wait"] != 1 || noOpen.FinalActionDistribution["open_rejected"] != 1 ||
+		noOpen.TradeIntentDistribution["open_long"] != 1 {
+		t.Fatalf("action/final_action/trade_intent分布错误: %+v", noOpen)
+	}
+	if noOpen.DirectTerminalCount != 2 || noOpen.DirectTerminalByReason["entry_rr_invalid"] != 1 ||
+		noOpen.DirectTerminalByReason["entry_parent.watch_window_expired"] != 1 {
+		t.Fatalf("直接终态统计错误: %+v", noOpen.DirectTerminalByReason)
+	}
+	if noOpen.SuppressedTerminalCount != 1 || noOpen.SuppressedTerminalByReason["entry_rr_invalid"] != 1 {
+		t.Fatalf("静默终态统计错误: %+v", noOpen.SuppressedTerminalByReason)
+	}
+	if noOpen.RRDirectTerminalCount != 1 || noOpen.RRDirectBySymbol["DOGEUSDT"] != 1 ||
+		noOpen.RRDirectBySignalType["sell2"] != 1 || noOpen.RRDirectByThreshold["sell2@1.50"] != 1 {
+		t.Fatalf("RR直接终态统计错误: %+v", noOpen)
+	}
+	if len(noOpen.RRDirectSamples) != 1 || noOpen.RRDirectSamples[0].SourceFile == "" ||
+		noOpen.RRDirectSamples[0].RemainingRR != 1.41 || noOpen.RRDirectSamples[0].Threshold != 1.5 {
+		t.Fatalf("RR样本错误: %+v", noOpen.RRDirectSamples)
+	}
+	if noOpen.TriggerReadyCount != 1 || noOpen.TriggerReadyBySymbol["BNBUSDT"] != 1 ||
+		noOpen.WaitingForTriggerCount != 1 {
+		t.Fatalf("trigger统计错误: %+v", noOpen)
+	}
+	if noOpen.OpenGateRejectionCount != 1 || noOpen.OpenGateByReason["btc"] != 1 ||
+		noOpen.BTCGateRejectionCount != 1 || len(noOpen.BTCGateDiagnostics) != 1 {
+		t.Fatalf("BTC gate统计错误: %+v", noOpen)
+	}
+	if confirmed, _ := noOpen.BTCGateDiagnostics[0].BTC["confirmed_bearish"].(bool); !confirmed {
+		t.Fatalf("BTC diagnostics应展开confirmed_bearish: %+v", noOpen.BTCGateDiagnostics[0])
+	}
+	if noOpen.ConfidenceOverrideCount != 1 || len(noOpen.ConfidenceOverrides) != 1 ||
+		noOpen.ConfidenceOverrides[0].Rule != "range_long" || noOpen.ConfidenceOverrides[0].To != 60 {
+		t.Fatalf("confidence override诊断统计错误: %+v", noOpen.ConfidenceOverrides)
+	}
+}
+
 func TestBuildReplayReport_UsesStructuredSimulationSource(t *testing.T) {
 	now := time.Date(2026, 5, 6, 14, 0, 0, 0, time.UTC)
 	records := []*DecisionRecord{{
