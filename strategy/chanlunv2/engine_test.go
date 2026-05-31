@@ -440,6 +440,91 @@ func TestApplyChanlunV2FreshnessGuardRejectsTargetCrossedAndRRInvalid(t *testing
 	}
 }
 
+func TestApplyChanlunV2FreshnessGuardUsesSignalTypeRRWithoutLoosen(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{
+		EntryTiming: config.ChanlunV2EntryTimingConfig{
+			EntryZone: config.ChanlunV2EntryZoneConfig{
+				MinRemainingNetRR: 2.0,
+				SignalTypeMinRR: map[string]float64{
+					"sell2": 1.1,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	ctx.StrategyRiskPolicy = &decision.StrategyRiskPolicy{
+		DefaultMinNetRR: 2.5,
+		FeeSlippagePct:  0.002,
+	}
+	ctx.MarketDataMap["ADAUSDT"] = chanlunV2ValidationMarketData("ADAUSDT", 0.2348)
+	triggerClose := int64(1780125299999)
+	d := decision.Decision{
+		Symbol:     "ADAUSDT",
+		Action:     "open_short",
+		SignalID:   "chanlun_v2_entry:test-sell2",
+		Confidence: 80,
+		StopLoss:   0.2543,
+		TakeProfit: 0.21159,
+		StrategyMetadata: map[string]any{
+			"layer":                    v2LayerEntryTrigger,
+			"parent_signal_type":       "sell2",
+			"entry_trigger_timeframe":  "15m",
+			"entry_trigger_close_time": triggerClose,
+			"decision_close_time":      triggerClose,
+		},
+	}
+
+	valid, rejections, _ := engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{d}, map[string]string{"trade": "1h"})
+	if len(rejections) != 0 || len(valid) != 1 {
+		t.Fatalf("sell2 RR=1.19应使用1.1阈值通过freshness，而不是被全局2.5拒绝: valid=%+v rejections=%+v", valid, rejections)
+	}
+	if got := metadataFloat64(valid[0].StrategyMetadata, "min_remaining_net_rr"); got < 1.099 || got > 1.101 {
+		t.Fatalf("freshness应记录sell2阈值1.1: %.4f metadata=%+v", got, valid[0].StrategyMetadata)
+	}
+	if got := metadataFloat64(valid[0].StrategyMetadata, "remaining_net_rr"); got < 1.18 || got > 1.20 {
+		t.Fatalf("应记录日志样本附近的剩余净RR: %.4f", got)
+	}
+}
+
+func TestApplyChanlunV2FreshnessGuardFallsBackToDefaultRRWhenSignalTypeMissing(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	ctx.StrategyRiskPolicy = &decision.StrategyRiskPolicy{
+		DefaultMinNetRR: 2.5,
+		FeeSlippagePct:  0.002,
+	}
+	ctx.MarketDataMap["BNBUSDT"] = chanlunV2ValidationMarketData("BNBUSDT", 100)
+	triggerClose := int64(1780125299999)
+	d := decision.Decision{
+		Symbol:     "BNBUSDT",
+		Action:     "open_long",
+		SignalID:   "chanlun_v2_entry:missing-signal-type",
+		Confidence: 90,
+		StopLoss:   90,
+		TakeProfit: 112.4,
+		StrategyMetadata: map[string]any{
+			"layer":                    v2LayerEntryTrigger,
+			"entry_trigger_timeframe":  "15m",
+			"entry_trigger_close_time": triggerClose,
+			"decision_close_time":      triggerClose,
+		},
+	}
+
+	valid, rejections, _ := engine.applyChanlunV2FreshnessGuard(ctx, []decision.Decision{d}, map[string]string{"trade": "1h"})
+	if len(valid) != 0 || len(rejections) != 1 || rejections[0].FreshnessState != "rr_invalid" {
+		t.Fatalf("缺失信号类型时应回退全局2.5并拒绝低RR: valid=%+v rejections=%+v", valid, rejections)
+	}
+	if got, ok := rejections[0].GateDiagnostics["min_remaining_net_rr"].(float64); !ok || got != 2.5 {
+		t.Fatalf("拒绝诊断应记录回退阈值2.5: %+v", rejections[0].GateDiagnostics)
+	}
+}
+
 func TestMarkRejectedOpenMarkersMovesMarkerToDecisionClose(t *testing.T) {
 	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
 	if err != nil {

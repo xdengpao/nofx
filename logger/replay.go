@@ -71,19 +71,62 @@ type AccountSemanticsSummary struct {
 
 // OpenRejectionDailyReport 汇总开仓被拒和接近放行的诊断。
 type OpenRejectionDailyReport struct {
-	GeneratedAt       time.Time               `json:"generated_at"`
-	PeriodStart       time.Time               `json:"period_start,omitempty"`
-	PeriodEnd         time.Time               `json:"period_end,omitempty"`
-	RecordCount       int                     `json:"record_count"`
-	RejectedOpenCount int                     `json:"rejected_open_count"`
-	DiagnosticCount   int                     `json:"diagnostic_count"`
-	ByReason          map[string]int          `json:"by_reason"`
-	BySymbol          map[string]int          `json:"by_symbol"`
-	ByBucket          map[string]int          `json:"by_bucket"`
-	NearMisses        []OpenRejectionNearMiss `json:"near_misses,omitempty"`
-	RecentExamples    []OpenRejectionEvent    `json:"recent_examples,omitempty"`
-	ChanlunV2NoOpen   *ChanlunV2NoOpenReport  `json:"chanlun_v2_no_open,omitempty"`
-	Notes             []string                `json:"notes,omitempty"`
+	GeneratedAt              time.Time                    `json:"generated_at"`
+	PeriodStart              time.Time                    `json:"period_start,omitempty"`
+	PeriodEnd                time.Time                    `json:"period_end,omitempty"`
+	RecordCount              int                          `json:"record_count"`
+	RejectedOpenCount        int                          `json:"rejected_open_count"`
+	DiagnosticCount          int                          `json:"diagnostic_count"`
+	NoSuccessfulOpenHours    float64                      `json:"no_successful_open_hours,omitempty"`
+	VersionDiagnosticMissing bool                         `json:"version_diagnostic_missing,omitempty"`
+	TopNoOpenBuckets         []OpenRejectionBucketSummary `json:"top_no_open_buckets,omitempty"`
+	FreshnessCompatibility   *FreshnessCompatibilityAudit `json:"freshness_compatibility,omitempty"`
+	ByReason                 map[string]int               `json:"by_reason"`
+	BySymbol                 map[string]int               `json:"by_symbol"`
+	ByBucket                 map[string]int               `json:"by_bucket"`
+	NearMisses               []OpenRejectionNearMiss      `json:"near_misses,omitempty"`
+	RecentExamples           []OpenRejectionEvent         `json:"recent_examples,omitempty"`
+	ChanlunV2NoOpen          *ChanlunV2NoOpenReport       `json:"chanlun_v2_no_open,omitempty"`
+	Notes                    []string                     `json:"notes,omitempty"`
+}
+
+// OpenRejectionDailyOptions 控制只读开仓拒绝日报的附加审计。
+type OpenRejectionDailyOptions struct {
+	SignalTypeMinRR map[string]float64
+	ConfigSource    string
+}
+
+// OpenRejectionBucketSummary 是 no-open bucket 的排序摘要。
+type OpenRejectionBucketSummary struct {
+	Bucket string `json:"bucket"`
+	Count  int    `json:"count"`
+}
+
+// FreshnessCompatibilityAudit 识别旧 freshness RR 阈值拒绝、但 signal-type 阈值可通过的样本。
+type FreshnessCompatibilityAudit struct {
+	ConfigSource               string                         `json:"config_source,omitempty"`
+	ConfigProvided             bool                           `json:"config_provided"`
+	CheckedCount               int                            `json:"checked_count"`
+	WouldPassSignalTypeRR      int                            `json:"would_pass_signal_type_rr_count"`
+	BySymbol                   map[string]int                 `json:"by_symbol,omitempty"`
+	BySignalType               map[string]int                 `json:"by_signal_type,omitempty"`
+	Samples                    []FreshnessCompatibilitySample `json:"samples,omitempty"`
+	UsedDefaultSignalTypeMinRR bool                           `json:"used_default_signal_type_min_rr,omitempty"`
+	Notes                      []string                       `json:"notes,omitempty"`
+}
+
+// FreshnessCompatibilitySample 是 freshness RR 兼容审计样本。
+type FreshnessCompatibilitySample struct {
+	Timestamp           time.Time `json:"timestamp"`
+	SourceFile          string    `json:"source_file,omitempty"`
+	CycleNumber         int       `json:"cycle_number,omitempty"`
+	Symbol              string    `json:"symbol,omitempty"`
+	Action              string    `json:"action,omitempty"`
+	SignalType          string    `json:"signal_type,omitempty"`
+	RemainingNetRR      float64   `json:"remaining_net_rr"`
+	OldThreshold        float64   `json:"old_threshold,omitempty"`
+	SignalTypeThreshold float64   `json:"signal_type_threshold"`
+	Reason              string    `json:"reason,omitempty"`
 }
 
 // OpenRejectionEvent 是日报里的单条拒绝/阻塞样本。
@@ -467,6 +510,10 @@ var (
 
 // BuildOpenRejectionDailyReport 基于已过滤记录生成只读开仓拒绝日报。
 func BuildOpenRejectionDailyReport(records []*DecisionRecord, maxNearMisses int) OpenRejectionDailyReport {
+	return BuildOpenRejectionDailyReportWithOptions(records, maxNearMisses, OpenRejectionDailyOptions{})
+}
+
+func BuildOpenRejectionDailyReportWithOptions(records []*DecisionRecord, maxNearMisses int, opts OpenRejectionDailyOptions) OpenRejectionDailyReport {
 	if maxNearMisses <= 0 {
 		maxNearMisses = 20
 	}
@@ -534,6 +581,7 @@ func BuildOpenRejectionDailyReport(records []*DecisionRecord, maxNearMisses int)
 			appendNearMissFromText(&report, record, event.Symbol, reasonCode, message, event.Source)
 		}
 	}
+	finalizeOpenRejectionDailyReport(&report, records, opts)
 	sort.SliceStable(report.NearMisses, func(i, j int) bool {
 		if report.NearMisses[i].Gap == report.NearMisses[j].Gap {
 			return report.NearMisses[i].Timestamp.After(report.NearMisses[j].Timestamp)
@@ -547,6 +595,242 @@ func BuildOpenRejectionDailyReport(records []*DecisionRecord, maxNearMisses int)
 		report.Notes = append(report.Notes, "未发现开仓拒绝或策略阻塞诊断")
 	}
 	return report
+}
+
+func finalizeOpenRejectionDailyReport(report *OpenRejectionDailyReport, records []*DecisionRecord, opts OpenRejectionDailyOptions) {
+	if report == nil || len(records) == 0 {
+		return
+	}
+	report.NoSuccessfulOpenHours = noSuccessfulOpenHours(records, report.PeriodStart, report.PeriodEnd)
+	report.VersionDiagnosticMissing = chanlunV2VersionDiagnosticMissing(records)
+	report.TopNoOpenBuckets = topOpenRejectionBuckets(report.ByBucket, 5)
+	audit := buildFreshnessCompatibilityAudit(records, opts)
+	if audit != nil {
+		report.FreshnessCompatibility = audit
+		if len(audit.Notes) > 0 {
+			report.Notes = append(report.Notes, audit.Notes...)
+		}
+	}
+	if report.VersionDiagnosticMissing {
+		report.Notes = append(report.Notes, "version_diagnostic_missing=true: 部分缠论V2日志缺少active_mode/effective_entry_timing，建议确认运行进程已重启到当前HEAD")
+	}
+}
+
+func noSuccessfulOpenHours(records []*DecisionRecord, periodStart, periodEnd time.Time) float64 {
+	if periodEnd.IsZero() || periodStart.IsZero() || periodEnd.Before(periodStart) {
+		return 0
+	}
+	var lastOpen time.Time
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		for _, action := range record.Decisions {
+			finalAction := strings.TrimSpace(action.FinalAction)
+			if finalAction == "" {
+				finalAction = action.Action
+			}
+			if action.Success && isOpenAction(finalAction) {
+				t := replayActionTime(record, action)
+				if t.After(lastOpen) {
+					lastOpen = t
+				}
+			}
+		}
+	}
+	if lastOpen.IsZero() {
+		return periodEnd.Sub(periodStart).Hours()
+	}
+	if periodEnd.Before(lastOpen) {
+		return 0
+	}
+	return periodEnd.Sub(lastOpen).Hours()
+}
+
+func chanlunV2VersionDiagnosticMissing(records []*DecisionRecord) bool {
+	for _, record := range records {
+		if !isChanlunV2Record(record) {
+			continue
+		}
+		if len(record.StrategyDiagnostics) == 0 {
+			return true
+		}
+		if _, ok := record.StrategyDiagnostics["active_mode"]; !ok {
+			return true
+		}
+		if _, ok := record.StrategyDiagnostics["effective_entry_timing"]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+func isChanlunV2Record(record *DecisionRecord) bool {
+	if record == nil {
+		return false
+	}
+	if strings.EqualFold(record.DecisionMode, "chanlun_v2") || strings.EqualFold(record.StrategyName, "chanlun_v2") {
+		return true
+	}
+	for _, action := range record.Decisions {
+		if strings.EqualFold(action.StrategyName, "chanlun_v2") || strings.EqualFold(action.StrategyMode, "chanlun_v2") {
+			return true
+		}
+		if strings.HasPrefix(strings.TrimSpace(action.SignalID), "chanlun_v2") {
+			return true
+		}
+	}
+	return false
+}
+
+func topOpenRejectionBuckets(values map[string]int, limit int) []OpenRejectionBucketSummary {
+	if limit <= 0 || len(values) == 0 {
+		return nil
+	}
+	out := make([]OpenRejectionBucketSummary, 0, len(values))
+	for bucket, count := range values {
+		if count <= 0 {
+			continue
+		}
+		out = append(out, OpenRejectionBucketSummary{Bucket: bucket, Count: count})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Count == out[j].Count {
+			return out[i].Bucket < out[j].Bucket
+		}
+		return out[i].Count > out[j].Count
+	})
+	if len(out) > limit {
+		return out[:limit]
+	}
+	return out
+}
+
+func buildFreshnessCompatibilityAudit(records []*DecisionRecord, opts OpenRejectionDailyOptions) *FreshnessCompatibilityAudit {
+	thresholds, usedDefault := normalizeFreshnessSignalTypeMinRR(opts.SignalTypeMinRR)
+	audit := &FreshnessCompatibilityAudit{
+		ConfigSource:               strings.TrimSpace(opts.ConfigSource),
+		ConfigProvided:             strings.TrimSpace(opts.ConfigSource) != "",
+		BySymbol:                   map[string]int{},
+		BySignalType:               map[string]int{},
+		UsedDefaultSignalTypeMinRR: usedDefault,
+	}
+	if usedDefault {
+		audit.Notes = append(audit.Notes, "未提供replay配置或配置缺少signal_type_min_rr，兼容审计使用内置默认信号类型RR阈值")
+	}
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		for _, action := range record.Decisions {
+			reason := actionFailureReason(action)
+			if reason == "" {
+				reason = action.Error
+			}
+			if openRejectionReasonCode(reason, action) != "freshness_gate.rr_invalid" {
+				continue
+			}
+			signalType := replayActionSignalType(action)
+			if signalType == "" {
+				continue
+			}
+			threshold, ok := thresholds[signalType]
+			if !ok || threshold <= 0 {
+				continue
+			}
+			remaining, ok := replayActionFloat(action, "remaining_net_rr")
+			if !ok {
+				continue
+			}
+			oldThreshold, _ := replayActionFloat(action, "min_remaining_net_rr")
+			audit.CheckedCount++
+			if remaining+1e-9 < threshold {
+				continue
+			}
+			audit.WouldPassSignalTypeRR++
+			symbol := marketSymbolOrAction(action.Symbol, reason)
+			audit.BySymbol[firstNonEmpty(symbol, "UNKNOWN")]++
+			audit.BySignalType[signalType]++
+			audit.Samples = appendLimitedFreshnessCompatibilitySamples(audit.Samples, FreshnessCompatibilitySample{
+				Timestamp:           replayActionTime(record, action),
+				SourceFile:          record.SourcePath,
+				CycleNumber:         record.CycleNumber,
+				Symbol:              symbol,
+				Action:              action.TradeIntent,
+				SignalType:          signalType,
+				RemainingNetRR:      remaining,
+				OldThreshold:        oldThreshold,
+				SignalTypeThreshold: threshold,
+				Reason:              reason,
+			}, 20)
+		}
+	}
+	if audit.CheckedCount == 0 && audit.ConfigSource == "" {
+		return nil
+	}
+	return audit
+}
+
+func normalizeFreshnessSignalTypeMinRR(values map[string]float64) (map[string]float64, bool) {
+	if len(values) == 0 {
+		return defaultFreshnessSignalTypeMinRR(), true
+	}
+	out := make(map[string]float64, len(values))
+	for key, value := range values {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key == "" || value <= 0 {
+			continue
+		}
+		out[key] = value
+	}
+	if len(out) == 0 {
+		return defaultFreshnessSignalTypeMinRR(), true
+	}
+	return out, false
+}
+
+func defaultFreshnessSignalTypeMinRR() map[string]float64 {
+	return map[string]float64{
+		"buy1":  2.0,
+		"sell1": 2.0,
+		"buy2":  1.5,
+		"sell2": 1.5,
+		"buy3":  1.2,
+		"sell3": 1.2,
+	}
+}
+
+func replayActionSignalType(action DecisionAction) string {
+	if value := strings.ToLower(strings.TrimSpace(action.SignalType)); value != "" {
+		return value
+	}
+	for _, key := range []string{"parent_signal_type", "signal_type"} {
+		if value, ok := metadataString(action.StrategyMetadata, key); ok {
+			return strings.ToLower(strings.TrimSpace(value))
+		}
+	}
+	return ""
+}
+
+func replayActionFloat(action DecisionAction, key string) (float64, bool) {
+	if value, ok := metadataFloat(action.GateDiagnostics, key); ok {
+		return value, true
+	}
+	if value, ok := metadataFloat(action.StrategyMetadata, key); ok {
+		return value, true
+	}
+	return 0, false
+}
+
+func appendLimitedFreshnessCompatibilitySamples(values []FreshnessCompatibilitySample, sample FreshnessCompatibilitySample, max int) []FreshnessCompatibilitySample {
+	if max <= 0 {
+		return values
+	}
+	values = append(values, sample)
+	if len(values) > max {
+		return values[len(values)-max:]
+	}
+	return values
 }
 
 func addOpenRejectionEvent(report *OpenRejectionDailyReport, event OpenRejectionEvent) {

@@ -8,6 +8,8 @@ nofx-auto
 *.exe
 nofx
 nofx_test
+target/
+chanlun_v2/target/
 
 # Go 相关
 *.test
@@ -25,6 +27,9 @@ Thumbs.db
 *.bak
 *.backup
 backups/
+config_backups/
+data_backups/
+decision_logs_backups/
 config.json.bak*
 
 # 环境变量

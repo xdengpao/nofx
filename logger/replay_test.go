@@ -219,6 +219,77 @@ func TestBuildOpenRejectionDailyReport_ChanlunV2NoOpen(t *testing.T) {
 	}
 }
 
+func TestBuildOpenRejectionDailyReport_FreshnessCompatibilityAudit(t *testing.T) {
+	start := time.Date(2026, 5, 29, 17, 25, 0, 0, time.UTC)
+	end := start.Add(48 * time.Hour)
+	diagnostics := map[string]any{
+		"active_mode":            "balanced",
+		"effective_entry_timing": map[string]any{"min_remaining_net_rr": 2.0},
+		"messages":               []any{},
+	}
+	records := []*DecisionRecord{
+		{
+			Timestamp:           start,
+			DecisionMode:        "chanlun_v2",
+			StrategyDiagnostics: diagnostics,
+			Decisions:           []DecisionAction{{Action: "wait", FinalAction: "wait", TradeIntent: "wait", Success: true, Timestamp: start}},
+		},
+		{
+			Timestamp:           end,
+			SourcePath:          "decision_logs/aster_chanlun_v2/decision_20260531_023014_cycle561.json",
+			CycleNumber:         561,
+			DecisionMode:        "chanlun_v2",
+			StrategyDiagnostics: diagnostics,
+			Decisions: []DecisionAction{{
+				Action:      "open_rejected",
+				TradeIntent: "open_short",
+				Symbol:      "DOGEUSDT",
+				Success:     false,
+				Error:       "DOGEUSDT open_short 被信号新鲜度门控拒绝: 剩余净RR 1.90低于阈值2.50",
+				GateReasons: []string{"freshness_gate.rr_invalid"},
+				GateDiagnostics: map[string]any{
+					"reason_code":          "freshness_gate.rr_invalid",
+					"remaining_net_rr":     1.90,
+					"min_remaining_net_rr": 2.50,
+				},
+				StrategyMetadata: map[string]any{
+					"parent_signal_type": "sell2",
+				},
+				Timestamp: end,
+			}},
+		},
+	}
+
+	report := BuildOpenRejectionDailyReportWithOptions(records, 10, OpenRejectionDailyOptions{
+		ConfigSource: "config.json",
+		SignalTypeMinRR: map[string]float64{
+			"sell2": 1.1,
+		},
+	})
+	if report.NoSuccessfulOpenHours < 47.99 || report.NoSuccessfulOpenHours > 48.01 {
+		t.Fatalf("无成功开仓时长应覆盖整个周期: %.4f", report.NoSuccessfulOpenHours)
+	}
+	if report.VersionDiagnosticMissing {
+		t.Fatal("已有active_mode/effective_entry_timing时不应提示版本诊断缺失")
+	}
+	if len(report.TopNoOpenBuckets) == 0 || report.TopNoOpenBuckets[0].Bucket != "rr" {
+		t.Fatalf("应输出按计数排序的top bucket: %+v", report.TopNoOpenBuckets)
+	}
+	audit := report.FreshnessCompatibility
+	if audit == nil || audit.CheckedCount != 1 || audit.WouldPassSignalTypeRR != 1 {
+		t.Fatalf("应识别旧2.5阈值拒绝但sell2=1.1可通过的样本: %+v", audit)
+	}
+	if audit.UsedDefaultSignalTypeMinRR || !audit.ConfigProvided || audit.ConfigSource != "config.json" {
+		t.Fatalf("应记录配置来源而不是默认阈值: %+v", audit)
+	}
+	if audit.BySymbol["DOGEUSDT"] != 1 || audit.BySignalType["sell2"] != 1 {
+		t.Fatalf("兼容审计聚合错误: %+v", audit)
+	}
+	if len(audit.Samples) != 1 || audit.Samples[0].SignalTypeThreshold != 1.1 || audit.Samples[0].OldThreshold != 2.5 {
+		t.Fatalf("兼容审计样本错误: %+v", audit.Samples)
+	}
+}
+
 func TestBuildReplayReport_UsesStructuredSimulationSource(t *testing.T) {
 	now := time.Date(2026, 5, 6, 14, 0, 0, 0, time.UTC)
 	records := []*DecisionRecord{{

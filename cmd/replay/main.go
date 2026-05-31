@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"nofx/config"
 	"nofx/logger"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -19,6 +21,7 @@ func main() {
 	nearMissLimit := flag.Int("near-miss-limit", 20, "maximum near-miss candidates in open rejection daily report")
 	includeBackups := flag.Bool("include-backups", false, "include .bak/backup decision log directories")
 	traderID := flag.String("trader", "", "optional trader id filter")
+	configPath := flag.String("config", "", "optional NOFX config path for signal-type threshold audit")
 	fromText := flag.String("from", "", "optional inclusive start time (RFC3339 or YYYY-MM-DD)")
 	toText := flag.String("to", "", "optional inclusive end time (RFC3339 or YYYY-MM-DD)")
 	exchangeCloseJSON := flag.String("exchange-close-json", "", "optional read-only JSON export of exchange close snapshots")
@@ -46,7 +49,12 @@ func main() {
 		To:             to,
 	})
 	if *openRejectionDaily {
-		writeJSONOutput(logger.BuildOpenRejectionDailyReport(records, *nearMissLimit), *output)
+		opts, err := openRejectionDailyOptions(*configPath, *traderID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "读取replay配置失败: %v\n", err)
+			os.Exit(1)
+		}
+		writeJSONOutput(logger.BuildOpenRejectionDailyReportWithOptions(records, *nearMissLimit, opts), *output)
 		return
 	}
 	report := logger.BuildReplayReport(records, *reportOnly, *dryRun)
@@ -68,6 +76,56 @@ func main() {
 	}
 
 	writeJSONOutput(report, *output)
+}
+
+func openRejectionDailyOptions(configPath, traderID string) (logger.OpenRejectionDailyOptions, error) {
+	configPath = strings.TrimSpace(configPath)
+	if configPath == "" {
+		return logger.OpenRejectionDailyOptions{}, nil
+	}
+	cfg, err := config.LoadConfig(configPath)
+	if err != nil {
+		return logger.OpenRejectionDailyOptions{}, err
+	}
+	trader := selectReplayTraderConfig(cfg.Traders, traderID)
+	if trader == nil {
+		return logger.OpenRejectionDailyOptions{}, fmt.Errorf("未找到可用于replay审计的trader配置: %s", traderID)
+	}
+	thresholds := trader.ChanlunV2Strategy.EntryTiming.EntryZone.SignalTypeMinRR
+	copied := make(map[string]float64, len(thresholds))
+	for key, value := range thresholds {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if key != "" && value > 0 {
+			copied[key] = value
+		}
+	}
+	return logger.OpenRejectionDailyOptions{
+		SignalTypeMinRR: copied,
+		ConfigSource:    configPath,
+	}, nil
+}
+
+func selectReplayTraderConfig(traders []config.TraderConfig, traderID string) *config.TraderConfig {
+	traderID = strings.TrimSpace(traderID)
+	for i := range traders {
+		if traderID != "" && traders[i].ID == traderID {
+			return &traders[i]
+		}
+	}
+	if traderID != "" {
+		return nil
+	}
+	for i := range traders {
+		if traders[i].Enabled && strings.EqualFold(traders[i].DecisionMode, "chanlun_v2") {
+			return &traders[i]
+		}
+	}
+	for i := range traders {
+		if strings.EqualFold(traders[i].DecisionMode, "chanlun_v2") {
+			return &traders[i]
+		}
+	}
+	return nil
 }
 
 func writeJSONOutput(value any, output string) {
