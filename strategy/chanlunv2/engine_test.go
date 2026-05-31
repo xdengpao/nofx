@@ -755,6 +755,96 @@ func TestChanlunV2LoosenModeEntersAndAdjustsThresholds(t *testing.T) {
 	}
 }
 
+func TestChanlunV2LoosenUsesFrequencyInactivityAcrossRestart(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	ctx.RuntimeMinutes = 30
+	ctx.FrequencyState = &decision.FrequencyState{InactivityMinutes: 13 * 60}
+	ctx.FrequencyPolicy = &decision.FrequencyPolicy{
+		Mode:          "balanced",
+		EffectiveMode: "balanced",
+		LoosenMode: decision.LoosenModePolicy{
+			Enabled:                 true,
+			InactivityWindowMinutes: 12 * 60,
+		},
+	}
+
+	if got := engine.loosenModeController(ctx); got != "loosen" {
+		t.Fatalf("应使用跨重启no-open时长进入loosen: %s", got)
+	}
+	if got := inactivityDurationForLoosen(ctx); got != 13*time.Hour {
+		t.Fatalf("inactivityDurationForLoosen应优先使用FrequencyState: %v", got)
+	}
+}
+
+func TestChanlunV2LoosenExitConditionsRemainHardStops(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*decision.Context)
+		want   string
+	}{
+		{
+			name: "open_count_24h",
+			mutate: func(ctx *decision.Context) {
+				ctx.FrequencyState.OpenCount24h = 1
+			},
+			want: "balanced",
+		},
+		{
+			name: "loss_mode_active",
+			mutate: func(ctx *decision.Context) {
+				ctx.LossMode = &decision.LossModeState{Active: true}
+			},
+			want: "loss",
+		},
+		{
+			name: "safe_effective_mode",
+			mutate: func(ctx *decision.Context) {
+				ctx.FrequencyPolicy.EffectiveMode = "safe"
+			},
+			want: "safe",
+		},
+		{
+			name: "loss_effective_mode",
+			mutate: func(ctx *decision.Context) {
+				ctx.FrequencyPolicy.EffectiveMode = "loss"
+			},
+			want: "loss",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+			if err != nil {
+				t.Fatalf("创建缠论V2引擎失败: %v", err)
+			}
+			ctx := chanlunV2ValidationContext(1000)
+			ctx.RuntimeMinutes = 13 * 60
+			ctx.FrequencyState = &decision.FrequencyState{InactivityMinutes: 13 * 60}
+			ctx.FrequencyPolicy = &decision.FrequencyPolicy{
+				Mode:          "balanced",
+				EffectiveMode: "balanced",
+				LoosenMode: decision.LoosenModePolicy{
+					Enabled:                 true,
+					InactivityWindowMinutes: 12 * 60,
+				},
+			}
+			tc.mutate(ctx)
+
+			if got := engine.loosenModeController(ctx); got != tc.want {
+				t.Fatalf("loosen退出条件未保持硬停止: got=%s want=%s", got, tc.want)
+			}
+			if got := engine.activeRuntimeMode(); got != tc.want {
+				t.Fatalf("engine active mode错误: got=%s want=%s", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestChanlunV2LoosenRRAllowsSell2NearMissAcrossEntryAndFreshness(t *testing.T) {
 	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
 	if err != nil {

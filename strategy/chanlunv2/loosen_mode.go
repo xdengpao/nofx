@@ -32,10 +32,7 @@ func (e *Engine) loosenModeController(ctx *decision.Context) string {
 		return exitMode
 	}
 	policy := normalizeV2LoosenPolicy(ctx.FrequencyPolicy.LoosenMode)
-	inactiveFor := time.Duration(ctx.RuntimeMinutes) * time.Minute
-	if ctx.FrequencyState != nil && !ctx.FrequencyState.LastOpenAt.IsZero() {
-		inactiveFor = time.Since(ctx.FrequencyState.LastOpenAt)
-	}
+	inactiveFor := inactivityDurationForLoosen(ctx)
 	if inactiveFor >= time.Duration(policy.InactivityWindowMinutes)*time.Minute {
 		ctx.FrequencyPolicy.EffectiveMode = "loosen"
 		e.setLoosenAdjustments(policy)
@@ -44,6 +41,31 @@ func (e *Engine) loosenModeController(ctx *decision.Context) string {
 	}
 	e.setActiveMode(mode)
 	return mode
+}
+
+func inactivityDurationForLoosen(ctx *decision.Context) time.Duration {
+	if ctx == nil {
+		return 0
+	}
+	if ctx.FrequencyState != nil {
+		if ctx.FrequencyState.InactivityMinutes > 0 {
+			return time.Duration(ctx.FrequencyState.InactivityMinutes) * time.Minute
+		}
+		if !ctx.FrequencyState.NoOpenSince.IsZero() {
+			if elapsed := time.Since(ctx.FrequencyState.NoOpenSince); elapsed > 0 {
+				return elapsed
+			}
+		}
+		if !ctx.FrequencyState.LastOpenAt.IsZero() {
+			if elapsed := time.Since(ctx.FrequencyState.LastOpenAt); elapsed > 0 {
+				return elapsed
+			}
+		}
+	}
+	if ctx.RuntimeMinutes > 0 {
+		return time.Duration(ctx.RuntimeMinutes) * time.Minute
+	}
+	return 0
 }
 
 func normalizeV2LoosenPolicy(policy decision.LoosenModePolicy) decision.LoosenModePolicy {
@@ -180,11 +202,19 @@ func effectiveChanlunV2DecisionSignalType(d decision.Decision) string {
 
 func (e *Engine) effectiveEntryTimingDiagnostics(ctx *decision.Context) map[string]any {
 	timing := e.effectiveEntryTiming(ctx)
-	return map[string]any{
+	diagnostics := map[string]any{
 		"active_mode":            e.activeRuntimeMode(),
 		"min_trigger_confidence": timing.MinTriggerConfidence,
 		"max_chase_ratio":        timing.EntryZone.MaxChaseRatio,
 		"min_remaining_net_rr":   timing.EntryZone.MinRemainingNetRR,
 		"signal_type_min_rr":     timing.EntryZone.SignalTypeMinRR,
 	}
+	if ctx != nil && ctx.FrequencyState != nil {
+		diagnostics["inactivity_minutes"] = ctx.FrequencyState.InactivityMinutes
+		diagnostics["inactivity_source"] = ctx.FrequencyState.InactivitySource
+		if !ctx.FrequencyState.NoOpenSince.IsZero() {
+			diagnostics["no_open_since"] = ctx.FrequencyState.NoOpenSince.Format(time.RFC3339)
+		}
+	}
+	return diagnostics
 }

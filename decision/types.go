@@ -441,6 +441,12 @@ type FrequencyState struct {
 	LastCloseAt        time.Time `json:"last_close_at,omitempty"`
 	OpenRejected24h    int       `json:"open_rejected_24h,omitempty"`
 	SignalCount24h     int       `json:"signal_count_24h,omitempty"`
+	InactivityMinutes  int       `json:"inactivity_minutes,omitempty"`
+	InactivitySource   string    `json:"inactivity_source,omitempty"`
+	NoOpenSince        time.Time `json:"no_open_since,omitempty"`
+	LogWindowStart     time.Time `json:"log_window_start,omitempty"`
+	LogWindowEnd       time.Time `json:"log_window_end,omitempty"`
+	InactivityWarning  string    `json:"inactivity_warning,omitempty"`
 }
 
 // LossModeState 是去重后亏损模式的确定性风控状态。

@@ -71,23 +71,27 @@ type AccountSemanticsSummary struct {
 
 // OpenRejectionDailyReport 汇总开仓被拒和接近放行的诊断。
 type OpenRejectionDailyReport struct {
-	GeneratedAt              time.Time                    `json:"generated_at"`
-	PeriodStart              time.Time                    `json:"period_start,omitempty"`
-	PeriodEnd                time.Time                    `json:"period_end,omitempty"`
-	RecordCount              int                          `json:"record_count"`
-	RejectedOpenCount        int                          `json:"rejected_open_count"`
-	DiagnosticCount          int                          `json:"diagnostic_count"`
-	NoSuccessfulOpenHours    float64                      `json:"no_successful_open_hours,omitempty"`
-	VersionDiagnosticMissing bool                         `json:"version_diagnostic_missing,omitempty"`
-	TopNoOpenBuckets         []OpenRejectionBucketSummary `json:"top_no_open_buckets,omitempty"`
-	FreshnessCompatibility   *FreshnessCompatibilityAudit `json:"freshness_compatibility,omitempty"`
-	ByReason                 map[string]int               `json:"by_reason"`
-	BySymbol                 map[string]int               `json:"by_symbol"`
-	ByBucket                 map[string]int               `json:"by_bucket"`
-	NearMisses               []OpenRejectionNearMiss      `json:"near_misses,omitempty"`
-	RecentExamples           []OpenRejectionEvent         `json:"recent_examples,omitempty"`
-	ChanlunV2NoOpen          *ChanlunV2NoOpenReport       `json:"chanlun_v2_no_open,omitempty"`
-	Notes                    []string                     `json:"notes,omitempty"`
+	GeneratedAt                          time.Time                    `json:"generated_at"`
+	PeriodStart                          time.Time                    `json:"period_start,omitempty"`
+	PeriodEnd                            time.Time                    `json:"period_end,omitempty"`
+	RecordCount                          int                          `json:"record_count"`
+	RejectedOpenCount                    int                          `json:"rejected_open_count"`
+	DiagnosticCount                      int                          `json:"diagnostic_count"`
+	NoSuccessfulOpenHours                float64                      `json:"no_successful_open_hours,omitempty"`
+	VersionDiagnosticMissing             bool                         `json:"version_diagnostic_missing,omitempty"`
+	VersionDiagnosticMissingCount        int                          `json:"version_diagnostic_missing_count,omitempty"`
+	CurrentVersionDiagnosticMissing      bool                         `json:"current_version_diagnostic_missing,omitempty"`
+	CurrentVersionDiagnosticMissingCount int                          `json:"current_version_diagnostic_missing_count,omitempty"`
+	CurrentVersionWindowStart            string                       `json:"current_version_window_start,omitempty"`
+	TopNoOpenBuckets                     []OpenRejectionBucketSummary `json:"top_no_open_buckets,omitempty"`
+	FreshnessCompatibility               *FreshnessCompatibilityAudit `json:"freshness_compatibility,omitempty"`
+	ByReason                             map[string]int               `json:"by_reason"`
+	BySymbol                             map[string]int               `json:"by_symbol"`
+	ByBucket                             map[string]int               `json:"by_bucket"`
+	NearMisses                           []OpenRejectionNearMiss      `json:"near_misses,omitempty"`
+	RecentExamples                       []OpenRejectionEvent         `json:"recent_examples,omitempty"`
+	ChanlunV2NoOpen                      *ChanlunV2NoOpenReport       `json:"chanlun_v2_no_open,omitempty"`
+	Notes                                []string                     `json:"notes,omitempty"`
 }
 
 // OpenRejectionDailyOptions 控制只读开仓拒绝日报的附加审计。
@@ -602,7 +606,14 @@ func finalizeOpenRejectionDailyReport(report *OpenRejectionDailyReport, records 
 		return
 	}
 	report.NoSuccessfulOpenHours = noSuccessfulOpenHours(records, report.PeriodStart, report.PeriodEnd)
-	report.VersionDiagnosticMissing = chanlunV2VersionDiagnosticMissing(records)
+	versionStatus := chanlunV2VersionDiagnosticStatus(records)
+	report.VersionDiagnosticMissing = versionStatus.Missing
+	report.VersionDiagnosticMissingCount = versionStatus.MissingCount
+	report.CurrentVersionDiagnosticMissing = versionStatus.CurrentWindowMissing
+	report.CurrentVersionDiagnosticMissingCount = versionStatus.CurrentWindowMissingCount
+	if !versionStatus.CurrentWindowStart.IsZero() {
+		report.CurrentVersionWindowStart = versionStatus.CurrentWindowStart.Format(time.RFC3339)
+	}
 	report.TopNoOpenBuckets = topOpenRejectionBuckets(report.ByBucket, 5)
 	audit := buildFreshnessCompatibilityAudit(records, opts)
 	if audit != nil {
@@ -611,8 +622,10 @@ func finalizeOpenRejectionDailyReport(report *OpenRejectionDailyReport, records 
 			report.Notes = append(report.Notes, audit.Notes...)
 		}
 	}
-	if report.VersionDiagnosticMissing {
+	if report.CurrentVersionDiagnosticMissing {
 		report.Notes = append(report.Notes, "version_diagnostic_missing=true: 部分缠论V2日志缺少active_mode/effective_entry_timing，建议确认运行进程已重启到当前HEAD")
+	} else if report.VersionDiagnosticMissing {
+		report.Notes = append(report.Notes, "version_diagnostic_missing=historical_only: 历史缠论V2日志含旧格式，当前重启窗口已具备active_mode/effective_entry_timing")
 	}
 }
 
@@ -647,20 +660,72 @@ func noSuccessfulOpenHours(records []*DecisionRecord, periodStart, periodEnd tim
 	return periodEnd.Sub(lastOpen).Hours()
 }
 
-func chanlunV2VersionDiagnosticMissing(records []*DecisionRecord) bool {
+type chanlunV2VersionDiagnosticStatusResult struct {
+	Missing                   bool
+	CurrentWindowMissing      bool
+	MissingCount              int
+	CurrentWindowMissingCount int
+	CurrentWindowStart        time.Time
+}
+
+func chanlunV2VersionDiagnosticStatus(records []*DecisionRecord) chanlunV2VersionDiagnosticStatusResult {
+	var v2Records []*DecisionRecord
 	for _, record := range records {
-		if !isChanlunV2Record(record) {
+		if isChanlunV2Record(record) {
+			v2Records = append(v2Records, record)
+		}
+	}
+	sort.SliceStable(v2Records, func(i, j int) bool {
+		return v2Records[i].Timestamp.Before(v2Records[j].Timestamp)
+	})
+	status := chanlunV2VersionDiagnosticStatusResult{}
+	if len(v2Records) == 0 {
+		return status
+	}
+	currentStart := 0
+	prevCycle := 0
+	prevCycleSet := false
+	for i, record := range v2Records {
+		if record == nil || record.CycleNumber <= 0 {
 			continue
 		}
-		if len(record.StrategyDiagnostics) == 0 {
-			return true
+		if prevCycleSet && prevCycle > 0 && record.CycleNumber < prevCycle {
+			currentStart = i
 		}
-		if _, ok := record.StrategyDiagnostics["active_mode"]; !ok {
-			return true
+		prevCycle = record.CycleNumber
+		prevCycleSet = true
+	}
+	status.CurrentWindowStart = v2Records[currentStart].Timestamp
+	for i, record := range v2Records {
+		if !chanlunV2RecordDiagnosticMissing(record) {
+			continue
 		}
-		if _, ok := record.StrategyDiagnostics["effective_entry_timing"]; !ok {
-			return true
+		status.Missing = true
+		status.MissingCount++
+		if i >= currentStart {
+			status.CurrentWindowMissing = true
+			status.CurrentWindowMissingCount++
 		}
+	}
+	return status
+}
+
+func chanlunV2VersionDiagnosticMissing(records []*DecisionRecord) bool {
+	return chanlunV2VersionDiagnosticStatus(records).Missing
+}
+
+func chanlunV2RecordDiagnosticMissing(record *DecisionRecord) bool {
+	if record == nil {
+		return false
+	}
+	if len(record.StrategyDiagnostics) == 0 {
+		return true
+	}
+	if _, ok := record.StrategyDiagnostics["active_mode"]; !ok {
+		return true
+	}
+	if _, ok := record.StrategyDiagnostics["effective_entry_timing"]; !ok {
+		return true
 	}
 	return false
 }

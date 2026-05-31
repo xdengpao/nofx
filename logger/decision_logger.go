@@ -58,6 +58,11 @@ type RiskStateSnapshot struct {
 	LossMode                 *LossModeSnapshot        `json:"loss_mode,omitempty"`
 	ActiveMode               string                   `json:"active_mode,omitempty"`
 	InactivityMinutes        int                      `json:"inactivity_minutes,omitempty"`
+	InactivitySource         string                   `json:"inactivity_source,omitempty"`
+	NoOpenSince              string                   `json:"no_open_since,omitempty"`
+	LogWindowStart           string                   `json:"log_window_start,omitempty"`
+	LogWindowEnd             string                   `json:"log_window_end,omitempty"`
+	InactivityWarning        string                   `json:"inactivity_warning,omitempty"`
 	LastOpenAt               string                   `json:"last_open_at,omitempty"`
 	LastCloseAt              string                   `json:"last_close_at,omitempty"`
 	OpenCount24h             int                      `json:"open_count_24h,omitempty"`
@@ -107,6 +112,12 @@ type FrequencyStateSnapshot struct {
 	LastCloseAt        string  `json:"last_close_at,omitempty"`
 	OpenRejected24h    int     `json:"open_rejected_24h,omitempty"`
 	SignalCount24h     int     `json:"signal_count_24h,omitempty"`
+	InactivityMinutes  int     `json:"inactivity_minutes,omitempty"`
+	InactivitySource   string  `json:"inactivity_source,omitempty"`
+	NoOpenSince        string  `json:"no_open_since,omitempty"`
+	LogWindowStart     string  `json:"log_window_start,omitempty"`
+	LogWindowEnd       string  `json:"log_window_end,omitempty"`
+	InactivityWarning  string  `json:"inactivity_warning,omitempty"`
 }
 
 // LossModeSnapshot 是日志层的亏损模式状态快照，避免 logger 依赖 decision 包。
@@ -351,6 +362,7 @@ func (l *DecisionLogger) GetLatestRecords(n int) ([]*DecisionRecord, error) {
 		if err := json.Unmarshal(data, &record); err != nil {
 			continue
 		}
+		record.SourcePath = fp
 
 		allRecords = append(allRecords, &record)
 	}
@@ -862,7 +874,11 @@ func CountSuccessfulOpens(records []*DecisionRecord, since time.Time, traderID s
 			continue
 		}
 		for _, action := range record.Decisions {
-			if !isOpenAction(action.Action) || !action.Success {
+			finalAction := strings.TrimSpace(action.FinalAction)
+			if finalAction == "" {
+				finalAction = action.Action
+			}
+			if !isOpenAction(finalAction) || !action.Success {
 				continue
 			}
 			actionTime := action.Timestamp

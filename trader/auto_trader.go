@@ -1104,18 +1104,26 @@ func (at *AutoTrader) buildRiskStateSnapshot(ctx *decision.Context, rejections [
 		snapshot.OpenCount24h = ctx.FrequencyState.OpenCount24h
 		snapshot.OpenRejected24h = ctx.FrequencyState.OpenRejected24h
 		snapshot.SignalCount24h = ctx.FrequencyState.SignalCount24h
+		snapshot.InactivityMinutes = ctx.FrequencyState.InactivityMinutes
+		snapshot.InactivitySource = ctx.FrequencyState.InactivitySource
+		snapshot.NoOpenSince = formatOptionalRFC3339(ctx.FrequencyState.NoOpenSince)
+		snapshot.LogWindowStart = formatOptionalRFC3339(ctx.FrequencyState.LogWindowStart)
+		snapshot.LogWindowEnd = formatOptionalRFC3339(ctx.FrequencyState.LogWindowEnd)
+		snapshot.InactivityWarning = ctx.FrequencyState.InactivityWarning
 		if !ctx.FrequencyState.LastOpenAt.IsZero() {
 			snapshot.LastOpenAt = ctx.FrequencyState.LastOpenAt.Format(time.RFC3339)
-			snapshot.InactivityMinutes = int(time.Since(ctx.FrequencyState.LastOpenAt).Minutes())
-		} else if ctx.RuntimeMinutes > 0 {
+		} else if snapshot.InactivityMinutes <= 0 && ctx.RuntimeMinutes > 0 {
 			snapshot.InactivityMinutes = ctx.RuntimeMinutes
 		}
 		if !ctx.FrequencyState.LastCloseAt.IsZero() {
 			snapshot.LastCloseAt = ctx.FrequencyState.LastCloseAt.Format(time.RFC3339)
 		}
+		if ctx.FrequencyState.InactivityWarning != "" {
+			addRiskStateWarning(snapshot, ctx.FrequencyState.InactivityWarning)
+		}
 	}
 	if snapshot.OpenRejected24h >= 10 && snapshot.OpenCount24h == 0 {
-		snapshot.Warnings = map[string]bool{"runaway_rejection_loop": true}
+		addRiskStateWarning(snapshot, "runaway_rejection_loop")
 	}
 	if !ctx.AIBackoffUntil.IsZero() {
 		snapshot.AIBackoffUntil = ctx.AIBackoffUntil.Format(time.RFC3339)
@@ -1131,6 +1139,23 @@ func (at *AutoTrader) buildRiskStateSnapshot(ctx *decision.Context, rejections [
 		snapshot.OpenGateReasons = append(snapshot.OpenGateReasons, rejection.GateReasons...)
 	}
 	return snapshot
+}
+
+func addRiskStateWarning(snapshot *logger.RiskStateSnapshot, key string) {
+	if snapshot == nil || strings.TrimSpace(key) == "" {
+		return
+	}
+	if snapshot.Warnings == nil {
+		snapshot.Warnings = map[string]bool{}
+	}
+	snapshot.Warnings[key] = true
+}
+
+func formatOptionalRFC3339(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.Format(time.RFC3339)
 }
 
 func copyOpenFrequencySimulations(source []decision.OpenFrequencySimulation) []logger.OpenFrequencySimulationSnapshot {
@@ -1197,6 +1222,12 @@ func copyFrequencyStateSnapshot(state *decision.FrequencyState) *logger.Frequenc
 		AutoRollbackReason: state.AutoRollbackReason,
 		OpenRejected24h:    state.OpenRejected24h,
 		SignalCount24h:     state.SignalCount24h,
+		InactivityMinutes:  state.InactivityMinutes,
+		InactivitySource:   state.InactivitySource,
+		NoOpenSince:        formatOptionalRFC3339(state.NoOpenSince),
+		LogWindowStart:     formatOptionalRFC3339(state.LogWindowStart),
+		LogWindowEnd:       formatOptionalRFC3339(state.LogWindowEnd),
+		InactivityWarning:  state.InactivityWarning,
 	}
 	if !state.LastOpenAt.IsZero() {
 		snapshot.LastOpenAt = state.LastOpenAt.Format(time.RFC3339)
@@ -1459,7 +1490,7 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		// 不影响主流程，继续执行（但设置performance为nil以避免传递错误数据）
 		performance = nil
 	}
-	frequencyRecords := at.loadRecentDecisionRecords(500)
+	frequencyRecords := at.loadRecentDecisionRecords(at.frequencyRecordLimit())
 	frequencyState := at.buildFrequencyState(frequencyRecords, totalEquity)
 	totalRealized24h := totalRealizedPnLSince(frequencyRecords, time.Now().Add(-24*time.Hour))
 	frequencyPolicy := at.effectiveFrequencyPolicy(frequencyState)
@@ -1647,24 +1678,70 @@ func (at *AutoTrader) loadRecentDecisionRecords(limit int) []*logger.DecisionRec
 	return records
 }
 
+func (at *AutoTrader) frequencyRecordLimit() int {
+	const (
+		defaultFrequencyRecordLimit = 500
+		maxFrequencyRecordLimit     = 10000
+	)
+	limit := defaultFrequencyRecordLimit
+	if at == nil {
+		return limit
+	}
+	windowMinutes := at.config.FrequencyPolicy.LoosenMode.InactivityWindowMinutes
+	scanInterval := at.config.ScanInterval
+	if scanInterval <= 0 {
+		scanInterval = 3 * time.Minute
+	}
+	if windowMinutes > 0 && scanInterval > 0 {
+		windowDuration := time.Duration(windowMinutes) * time.Minute
+		needed := int(math.Ceil(float64(windowDuration)/float64(scanInterval)))*2 + 20
+		if needed > limit {
+			limit = needed
+		}
+	}
+	if limit > maxFrequencyRecordLimit {
+		return maxFrequencyRecordLimit
+	}
+	return limit
+}
+
 func (at *AutoTrader) buildFrequencyState(records []*logger.DecisionRecord, accountEquity float64) decision.FrequencyState {
+	return at.buildFrequencyStateAt(records, accountEquity, time.Now())
+}
+
+func (at *AutoTrader) buildFrequencyStateAt(records []*logger.DecisionRecord, accountEquity float64, now time.Time) decision.FrequencyState {
 	policy := at.config.FrequencyPolicy
 	windowHours := policy.RollbackWindowHours
 	if windowHours <= 0 {
 		windowHours = 24
 	}
-	since := time.Now().Add(-time.Duration(windowHours) * time.Hour)
-	outcomes, _ := logger.BuildTradeOutcomes(records)
+	if now.IsZero() {
+		now = time.Now()
+	}
+	scopedRecords := filterNoOpenRecordsForTrader(records, at.id)
+	since := now.Add(-time.Duration(windowHours) * time.Hour)
+	outcomes, _ := logger.BuildTradeOutcomes(scopedRecords)
 	stats := logger.BuildRecentClosedTradeStats(outcomes, since)
 	state := decision.FrequencyState{
-		OpenCount24h:    logger.CountSuccessfulOpens(records, since, ""),
+		OpenCount24h:    logger.CountSuccessfulOpens(scopedRecords, since, ""),
 		ClosedTrades24h: stats.ClosedTrades,
 		ProfitFactor24h: stats.ProfitFactor,
 	}
-	state.LastOpenAt = lastSuccessfulOpenAt(records)
-	state.LastCloseAt = lastCloseAt(records)
-	state.OpenRejected24h = countOpenRejected(records, since)
-	state.SignalCount24h = countSignals24h(records, since)
+	runtimeMinutes := 0
+	if at != nil && !at.startTime.IsZero() {
+		runtimeMinutes = int(now.Sub(at.startTime).Minutes())
+	}
+	noOpen := deriveNoOpenState(scopedRecords, at.id, now, runtimeMinutes)
+	state.LastOpenAt = noOpen.LastSuccessfulOpenAt
+	state.LastCloseAt = lastCloseAt(scopedRecords)
+	state.OpenRejected24h = countOpenRejected(scopedRecords, since)
+	state.SignalCount24h = countSignals24h(scopedRecords, since)
+	state.InactivityMinutes = noOpen.Minutes
+	state.InactivitySource = noOpen.Source
+	state.NoOpenSince = noOpen.Since
+	state.LogWindowStart = noOpen.LogWindowStart
+	state.LogWindowEnd = noOpen.LogWindowEnd
+	state.InactivityWarning = noOpen.Warning
 	if accountEquity > 0 {
 		state.Drawdown24hPct = stats.MaxDrawdownUSD / accountEquity * 100
 	}
@@ -1691,6 +1768,122 @@ func (at *AutoTrader) buildFrequencyState(records []*logger.DecisionRecord, acco
 	return state
 }
 
+type noOpenState struct {
+	Minutes              int
+	Source               string
+	Since                time.Time
+	LogWindowStart       time.Time
+	LogWindowEnd         time.Time
+	LastSuccessfulOpenAt time.Time
+	Warning              string
+}
+
+func deriveNoOpenState(records []*logger.DecisionRecord, traderID string, now time.Time, runtimeMinutes int) noOpenState {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if runtimeMinutes < 0 {
+		runtimeMinutes = 0
+	}
+	var state noOpenState
+	for _, record := range records {
+		if record == nil || record.Timestamp.IsZero() || !noOpenRecordMatchesTrader(record, traderID) {
+			continue
+		}
+		if state.LogWindowStart.IsZero() || record.Timestamp.Before(state.LogWindowStart) {
+			state.LogWindowStart = record.Timestamp
+		}
+		if state.LogWindowEnd.IsZero() || record.Timestamp.After(state.LogWindowEnd) {
+			state.LogWindowEnd = record.Timestamp
+		}
+		for _, action := range record.Decisions {
+			if !action.Success || !isOpenActionName(effectiveDecisionActionName(action)) {
+				continue
+			}
+			actionTime := action.Timestamp
+			if actionTime.IsZero() {
+				actionTime = record.Timestamp
+			}
+			if state.LastSuccessfulOpenAt.IsZero() || actionTime.After(state.LastSuccessfulOpenAt) {
+				state.LastSuccessfulOpenAt = actionTime
+			}
+		}
+	}
+	if !state.LastSuccessfulOpenAt.IsZero() {
+		state.Source = "last_successful_open"
+		state.Since = state.LastSuccessfulOpenAt
+		state.Minutes = minutesBetween(state.Since, now)
+		return state
+	}
+	if !state.LogWindowStart.IsZero() {
+		state.Source = "log_window_start"
+		state.Since = state.LogWindowStart
+		state.Minutes = minutesBetween(state.Since, now)
+		return state
+	}
+	state.Source = "runtime_fallback"
+	state.Minutes = runtimeMinutes
+	state.Since = now.Add(-time.Duration(runtimeMinutes) * time.Minute)
+	state.Warning = "frequency_history_unavailable"
+	return state
+}
+
+func filterNoOpenRecordsForTrader(records []*logger.DecisionRecord, traderID string) []*logger.DecisionRecord {
+	if strings.TrimSpace(traderID) == "" {
+		return records
+	}
+	filtered := make([]*logger.DecisionRecord, 0, len(records))
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		if noOpenRecordMatchesTrader(record, traderID) {
+			filtered = append(filtered, record)
+		}
+	}
+	return filtered
+}
+
+func noOpenRecordMatchesTrader(record *logger.DecisionRecord, traderID string) bool {
+	traderID = strings.TrimSpace(traderID)
+	if traderID == "" || record == nil {
+		return true
+	}
+	if record.RiskState != nil {
+		recordTraderID := strings.TrimSpace(record.RiskState.TraderID)
+		if recordTraderID != "" {
+			return recordTraderID == traderID
+		}
+	}
+	source := strings.ReplaceAll(record.SourcePath, "\\", "/")
+	parts := strings.Split(source, "/")
+	for i, part := range parts {
+		if part == traderID {
+			return true
+		}
+		if part == "decision_logs" && i+1 < len(parts) && parts[i+1] != "" {
+			return parts[i+1] == traderID
+		}
+	}
+	// GetLatestRecords already reads from a trader-scoped logger. Old logs may not
+	// carry explicit trader_id, so unknown ownership is treated as scoped input.
+	return source == ""
+}
+
+func minutesBetween(start, end time.Time) int {
+	if start.IsZero() || end.IsZero() || end.Before(start) {
+		return 0
+	}
+	return int(end.Sub(start).Minutes())
+}
+
+func effectiveDecisionActionName(action logger.DecisionAction) string {
+	if value := strings.TrimSpace(action.FinalAction); value != "" {
+		return value
+	}
+	return strings.TrimSpace(action.Action)
+}
+
 func lastSuccessfulOpenAt(records []*logger.DecisionRecord) time.Time {
 	var latest time.Time
 	for _, record := range records {
@@ -1698,7 +1891,7 @@ func lastSuccessfulOpenAt(records []*logger.DecisionRecord) time.Time {
 			continue
 		}
 		for _, action := range record.Decisions {
-			if !isOpenActionName(action.Action) || !action.Success {
+			if !isOpenActionName(effectiveDecisionActionName(action)) || !action.Success {
 				continue
 			}
 			actionTime := action.Timestamp
@@ -3358,7 +3551,7 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
 	} else if at.config.UseQwen {
 		aiProvider = "Qwen"
 	}
-	frequencyState := at.buildFrequencyState(at.loadRecentDecisionRecords(500), 0)
+	frequencyState := at.buildFrequencyState(at.loadRecentDecisionRecords(at.frequencyRecordLimit()), 0)
 	frequencyPolicy := at.effectiveFrequencyPolicy(frequencyState)
 
 	return map[string]interface{}{

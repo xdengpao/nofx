@@ -6,7 +6,7 @@ BUILD_TIME := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 LDFLAGS := -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME) -X main.GitCommit=$(GIT_COMMIT)
 
-.PHONY: build build-quick run test test-backend test-frontend test-coverage dev docker-up docker-down clean install
+.PHONY: build build-quick run test test-backend test-frontend test-coverage dev docker-up docker-down clean install check-native-chanlunv2 native-chanlunv2 test-chanlunv2 test-chanlunv2-go
 
 ## 后端编译（注入版本信息）
 build:
@@ -58,3 +58,19 @@ clean:
 install:
 	go mod download
 	cd web && npm ci
+
+## 检查 Chanlun V2 native 依赖状态（只读）
+check-native-chanlunv2:
+	./scripts/check-chanlun-v2-native.sh
+
+## 构建 Chanlun V2 Rust 静态库到 chanlun_v2/target/release
+native-chanlunv2:
+	./scripts/prepare-chanlun-v2-native.sh
+
+## 使用 CGO 链接 Chanlun V2 native 库运行测试
+test-chanlunv2:
+	CGO_LDFLAGS="-L$(PWD)/chanlun_v2/target/release" go test ./strategy/chanlunv2
+
+## 仅验证 Chanlun V2 Go 层逻辑，不替代生产 native 链接验证
+test-chanlunv2-go:
+	CGO_ENABLED=0 go test ./strategy/chanlunv2

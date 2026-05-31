@@ -3,6 +3,7 @@ package logger
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -132,6 +133,90 @@ func TestBuildOpenRejectionDailyReport(t *testing.T) {
 		report.NearMisses[0].Gap > 0.021 {
 		t.Fatalf("near miss排序/解析错误: %+v", report.NearMisses)
 	}
+}
+
+func TestBuildOpenRejectionDailyReportVersionDiagnosticHistoricalOnly(t *testing.T) {
+	now := time.Date(2026, 5, 31, 8, 0, 0, 0, time.UTC)
+	currentStart := now.Add(time.Hour)
+	records := []*DecisionRecord{
+		{
+			Timestamp:    now,
+			CycleNumber:  88,
+			DecisionMode: "chanlun_v2",
+		},
+		{
+			Timestamp:    currentStart,
+			CycleNumber:  1,
+			DecisionMode: "chanlun_v2",
+			StrategyDiagnostics: map[string]any{
+				"active_mode":            "balanced",
+				"effective_entry_timing": map[string]any{"min_remaining_net_rr": 1.5},
+			},
+		},
+	}
+
+	report := BuildOpenRejectionDailyReport(records, 10)
+
+	if !report.VersionDiagnosticMissing || report.VersionDiagnosticMissingCount != 1 {
+		t.Fatalf("历史旧格式应保持全窗口missing语义: %+v", report)
+	}
+	if report.CurrentVersionDiagnosticMissing || report.CurrentVersionDiagnosticMissingCount != 0 {
+		t.Fatalf("当前窗口新格式不应误报当前进程缺字段: %+v", report)
+	}
+	if report.CurrentVersionWindowStart != currentStart.Format(time.RFC3339) {
+		t.Fatalf("当前重启窗口起点错误: got=%q want=%q", report.CurrentVersionWindowStart, currentStart.Format(time.RFC3339))
+	}
+	if !containsText(report.Notes, "historical_only") {
+		t.Fatalf("应提示仅历史旧格式: %+v", report.Notes)
+	}
+}
+
+func TestBuildOpenRejectionDailyReportVersionDiagnosticCurrentWindowMissing(t *testing.T) {
+	now := time.Date(2026, 5, 31, 8, 0, 0, 0, time.UTC)
+	currentStart := now.Add(time.Hour)
+	records := []*DecisionRecord{
+		{
+			Timestamp:    now,
+			CycleNumber:  12,
+			DecisionMode: "chanlun_v2",
+			StrategyDiagnostics: map[string]any{
+				"active_mode":            "balanced",
+				"effective_entry_timing": map[string]any{"min_remaining_net_rr": 1.5},
+			},
+		},
+		{
+			Timestamp:    currentStart,
+			CycleNumber:  1,
+			DecisionMode: "chanlun_v2",
+			StrategyDiagnostics: map[string]any{
+				"messages": []any{"SOLUSDT sell2 结构信号不进入开仓: 入场追价比例0.37超过阈值0.35"},
+			},
+		},
+	}
+
+	report := BuildOpenRejectionDailyReport(records, 10)
+
+	if !report.VersionDiagnosticMissing || report.VersionDiagnosticMissingCount != 1 {
+		t.Fatalf("当前窗口缺字段也应保持全窗口missing语义: %+v", report)
+	}
+	if !report.CurrentVersionDiagnosticMissing || report.CurrentVersionDiagnosticMissingCount != 1 {
+		t.Fatalf("当前窗口缺字段应输出当前进程missing: %+v", report)
+	}
+	if report.CurrentVersionWindowStart != currentStart.Format(time.RFC3339) {
+		t.Fatalf("当前重启窗口起点错误: got=%q want=%q", report.CurrentVersionWindowStart, currentStart.Format(time.RFC3339))
+	}
+	if !containsText(report.Notes, "建议确认运行进程已重启到当前HEAD") {
+		t.Fatalf("应提示当前运行进程可能未部署HEAD: %+v", report.Notes)
+	}
+}
+
+func containsText(values []string, needle string) bool {
+	for _, value := range values {
+		if strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestBuildOpenRejectionDailyReport_ChanlunV2NoOpen(t *testing.T) {
