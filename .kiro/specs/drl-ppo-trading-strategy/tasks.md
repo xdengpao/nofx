@@ -73,13 +73,21 @@
 
 ## Phase 7: Trader 路由集成
 
-- [ ] 在 `trader/auto_trader.go` 的 mode-aware 路由中增加 `drl` 分支：创建 DRL engine 并调用 `GetFullDecision`。
-- [ ] 确保 `decision_mode=drl` 时不初始化 AI provider，启动日志显示"DRL 策略模式"。
-- [ ] 将 DRL engine 生命周期绑定到 trader：启动时 `NewEngine()`，停止时 `engine.Close()`。
-- [ ] DRL 策略输出经过 `decision.ValidateStrategyDecisions()` 公共风控验证。
-- [ ] DRL 策略输出经过 `decision.MergePublicAndStrategyDecisions()` 与持仓管理决策合并。
-- [ ] 确保 DRL 决策写入决策日志，格式与现有模式一致（含 DecisionMode="drl"、StrategyName、StrategyVersion）。
-- [ ] 验证：`go test ./trader/... ./decision/...`。
+> **文件路径说明**：trader 包位于 `trader/auto_trader.go`，`AutoTrader` 结构体在第 132 行，`AutoTraderConfig` 在第 30 行，决策模式路由在 `NewAutoTrader()` 函数中（约第 233 行）通过 `config.DecisionMode` 分支初始化对应引擎。
+
+- [ ] 在 `trader/auto_trader.go` 的 `AutoTraderConfig` 结构体中新增 `DRLStrategyConfig config.DRLStrategyConfig` 字段（与已有 `ProgrammaticStrategyPolicy` 和 `ChanlunV2StrategyConfig` 同级）。
+- [ ] 在 `trader/auto_trader.go` 的 `AutoTrader` 结构体中新增 `drlEngine *drl.Engine` 字段（与已有 `programmaticEngine` 和 `chanlunV2Engine` 同级）。
+- [ ] 在 `NewAutoTrader()` 函数的 DecisionMode 分支中增加 `drl` 分支：当 `config.DecisionMode == "drl"` 时创建 DRL engine（`drl.NewEngine()`），初始化失败返回中文错误 "初始化DRL策略引擎失败"。
+- [ ] 确保 `decision_mode=drl` 时不初始化 `mcp.Client`（AI provider），且 `config.AIModel` 自动设为 `"drl"`。
+- [ ] 启动日志使用与现有模式一致的格式：`log.Printf("🧮 [%s] 使用DRL策略: 模型=%s", config.Name, config.DRLStrategyConfig.ModelPath)`。
+- [ ] 将 DRL engine 生命周期绑定到 trader：启动时 `NewEngine()`，停止/优雅关闭时调用 `drlEngine.Close()` 释放 ONNX 资源。
+- [ ] 在交易决策循环（`runCycle` 或等效函数）中，当 `DecisionMode=="drl"` 时调用 `drlEngine.GetFullDecision(ctx)` 获取决策。
+- [ ] DRL 策略输出经过 `decision.ValidateStrategyDecisions()` 公共风控验证（与 programmatic/chanlun_v2 一致）。
+- [ ] DRL 策略输出与持仓管理决策通过现有 merge 逻辑合并（与 programmatic/chanlun_v2 一致）。
+- [ ] 确保 DRL 决策写入决策日志，`FullDecision.DecisionMode` 设为 `"drl"`，`StrategyName` 和 `StrategyVersion` 从模型配置填充。
+- [ ] 在 `manager/trader_manager.go` 的 `AddTrader()` 中确认 DRL 配置透传路径：`config.DRLStrategy` → `AutoTraderConfig.DRLStrategyConfig`。
+- [ ] 验证 ONNX Runtime 依赖兼容性：确认 `CGO_ENABLED=1` 环境下 `go build ./trader/...` 编译通过（需系统安装 libonnxruntime）。使用 build tag `//go:build drl` 隔离 ONNX 依赖，确保无 ONNX Runtime 环境下其他模式仍可编译。
+- [ ] 验证：`go test ./trader/... ./decision/...`（DRL 相关测试使用 mock 或 build tag 隔离）。
 
 ## Phase 8: 回测集成
 
@@ -131,11 +139,23 @@
 
 ## Phase 12: 模型生命周期管理
 
-- [ ] 在 `strategy/drl/lifecycle.go` 中实现 `ModelLifecycleManager`：管理模型加载、验证和热更新。
-- [ ] 实现自动重训练调度：按 `retrain_interval_hours` 触发 Python 训练脚本（通过 `os/exec`）。
-- [ ] 实现模型热更新验证：加载新模型，在最近验证数据上检查方向准确性 ≥ `validation_min_da`。
-- [ ] 实现热更新原子切换：验证通过后原子替换 Engine 中的 ONNXModel 引用。
-- [ ] 实现更新失败回滚：验证不通过或加载失败时保留旧模型，记录中文警告日志。
+> **设计对应**：对应 design.md §11 模型生命周期管理组件。该组件管理 DRL 模型的自动重训练调度、验证、热更新原子切换和故障回滚，确保推理服务在更新全过程中不中断。
+
+- [ ] 在 `strategy/drl/lifecycle.go` 中实现 `ModelLifecycleManager` 结构体：持有 `*Engine` 引用、`currentModel`（`*ONNXModel`）、`modelVersion`、`sync.RWMutex` 读写锁、`lastRetrainAt`/`lastValidateAt` 时间戳。
+- [ ] 实现 `NewModelLifecycleManager(engine *Engine, cfg *DRLEngineConfig) *ModelLifecycleManager` 构造函数。
+- [ ] 实现 `GetModelForInference() *ONNXModel`：使用 `mu.RLock()` 读锁保护，确保推理线程在热更新过程中不阻塞。
+- [ ] 实现 `RetrainScheduler` 结构体：持有重训练间隔、脚本路径、输出目录，使用 `time.Ticker` 驱动定时检查。
+- [ ] 实现 `RetrainScheduler.Start()` 和 `Stop()`：在后台 goroutine 中按 `retrain_interval_hours` 周期触发训练。
+- [ ] 实现重训练触发逻辑：通过 `os/exec.CommandContext` 调用 Python 训练脚本，设置 30 分钟超时上下文，超时则 kill 进程并记录中文错误 "DRL 自动重训练超时（30分钟）"。
+- [ ] 实现 `ValidateCandidate(candidatePath string) (*ModelValidationResult, error)`：加载候选模型，在最近验证窗口数据上逐步推理，计算方向准确性 DA。
+- [ ] 实现原子切换逻辑 `HotSwap(candidatePath string) error`：
+  - 加载候选模型 → 验证 DA ≥ `validation_min_da` → `mu.Lock()` → 替换 `currentModel` 引用 → `mu.Unlock()` → 旧模型 `Close()` → 归档旧模型到 `models/drl/archive/`。
+- [ ] 实现验证不通过处理：`candidateModel.Close()` → 删除候选文件 → 记录中文警告 "候选模型验证不通过: DA={da:.4f} < 阈值{min_da}, 保留当前模型"。
+- [ ] 实现 `Rollback(reason string) error`：从 `models/drl/archive/` 扫描最近备份 → 加载 → 原子替换 → 记录 "模型已回滚: 原因={reason}, 恢复到 v{version}"。
+- [ ] 实现回滚失败降级逻辑：当归档目录无可用模型时，设置引擎为纯 wait 模式（所有推理返回 0.0），记录严重错误日志。
+- [ ] 实现连续推理异常检测：在 `Engine.GetFullDecision()` 中维护 `consecutiveInferErrors` 计数器，连续 3 次推理错误触发 `Rollback()`。
+- [ ] 实现与 Engine 的集成：`Engine.activeModel()` 方法优先通过 `Lifecycle.GetModelForInference()` 获取模型（当 `auto_retrain=true` 时），否则直接返回 `e.Model`。
+- [ ] 在 `lifecycle_test.go` 中编写测试：热更新成功/失败、回滚成功/失败、并发读取安全、超时处理。
 - [ ] 验证：`go test ./strategy/drl/...`。
 
 ## Phase 13: API 端点

@@ -126,16 +126,25 @@
 
 ### 7. 模型生命周期管理
 
-**User Story:** 作为量化研究员，我希望能管理 DRL 模型的训练、验证、部署和更新流程。
+**User Story:** 作为量化研究员，我希望能管理 DRL 模型的训练、验证、部署和更新流程，并在更新失败时自动回滚到上一可用版本。
 
 #### Acceptance Criteria
 
 1. WHEN 系统启动且 `decision_mode=drl` THEN SHALL 从配置的 `model_path` 加载 ONNX 模型。
-2. WHEN 模型文件不存在或格式损坏 THEN 系统 SHALL 启动失败并返回清晰中文错误。
-3. WHEN 配置启用 `auto_retrain` THEN 系统 SHALL 按配置周期（默认每周）使用最新数据重新训练并热更新模型。
+2. WHEN 模型文件不存在或格式损坏 THEN 系统 SHALL 启动失败并返回清晰中文错误（如 "DRL 模型文件不存在: {path}" 或 "DRL 模型格式损坏: {path}"）。
+3. WHEN 配置启用 `auto_retrain` THEN 系统 SHALL 按配置周期（默认每周 168 小时）使用最新数据重新训练并热更新模型。
 4. WHEN 模型热更新 THEN SHALL 验证新模型在最近验证集上的方向准确性不低于阈值（默认 55%），否则保留旧模型。
-5. WHEN 模型推理 THEN SHALL 记录每次推理的输入特征摘要、输出动作和推理耗时到决策日志。
-6. WHEN 多个 trader 使用 DRL 模式 THEN 每个 trader SHALL 可独立指定不同模型文件。
+5. WHEN 模型热更新验证通过 THEN SHALL 通过读写锁保护的原子替换完成模型切换，确保推理线程在切换过程中不阻塞且不读到中间状态。
+6. WHEN 模型热更新验证通过 THEN SHALL 在原子切换前将旧模型文件归档到 `models/drl/archive/` 目录，归档文件名包含版本号和时间戳。
+7. WHEN 模型热更新验证不通过（DA < 阈值）THEN SHALL 关闭并删除候选模型文件，保留当前模型继续服务，并记录中文警告日志。
+8. WHEN 候选模型加载失败（文件损坏或维度不匹配）THEN SHALL 视为更新失败，保留当前模型，记录中文错误日志。
+9. WHEN 当前活跃模型出现连续推理异常（连续 3 次推理错误）THEN SHALL 触发自动回滚：从 `models/drl/archive/` 加载最近一个备份模型恢复服务。
+10. WHEN 自动回滚成功 THEN SHALL 记录中文日志 "模型已回滚: 原因={reason}, 恢复到 v{version}"。
+11. WHEN 自动回滚失败（归档目录无可用模型）THEN SHALL 将引擎降级为纯 wait 模式（所有决策输出 wait），并触发告警日志。
+12. WHEN 自动重训练脚本执行超时（默认 30 分钟）THEN SHALL 终止训练进程，记录超时错误，保留当前模型。
+13. WHEN 模型推理 THEN SHALL 记录每次推理的输入特征摘要、输出动作和推理耗时到决策日志。
+14. WHEN 多个 trader 使用 DRL 模式 THEN 每个 trader SHALL 可独立指定不同模型文件，各自维护独立的生命周期管理器实例。
+15. WHEN 热更新进行中（训练或验证阶段）THEN 当前模型 SHALL 继续正常服务推理请求，不受更新流程影响。
 
 ### 8. 可观测性与诊断
 

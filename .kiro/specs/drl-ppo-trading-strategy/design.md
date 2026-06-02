@@ -443,6 +443,17 @@ training/drl/
 
 #### 训练环境设计
 
+> **手续费与滑点对齐说明**：Python 训练环境的交易成本参数必须与 Go 侧 `backtest.PaperBroker` 保持一致，以确保训练-回测-实盘三者的行为一致性。当前对齐关系如下：
+> 
+> | 参数 | Python 训练环境 | Go PaperBroker | 说明 |
+> |------|----------------|----------------|------|
+> | Taker 手续费 | `taker_fee=0.0005` (5bps) | `DefaultTakerFeeBPS=5` (5bps) | ✅ 一致 |
+> | Maker 手续费 | `maker_fee=0.0002` (2bps) | `DefaultMakerFeeBPS=2` (2bps) | ✅ 一致 |
+> | 滑点 | `slippage=0.0003` (3bps) | `DefaultSlippageBPS=3` (3bps) | ✅ 一致 |
+> | 初始资金 | `initial_balance=10000` | `DefaultInitialEquity=10_000` | ✅ 一致 |
+> 
+> 如果回测配置中自定义了 `costs` 字段，训练脚本也应使用相同数值。训练脚本通过 `--taker-fee`、`--maker-fee`、`--slippage` CLI 参数支持覆盖默认值。
+
 ```python
 class CryptoTradingEnv(gym.Env):
     """
@@ -626,6 +637,174 @@ go run cmd/backtest/main.go run -config backtest_drl.json
 }
 ```
 
+### 11. 模型生命周期管理
+
+#### Package: `strategy/drl`
+
+#### Files
+
+- `strategy/drl/lifecycle.go` — 模型生命周期管理器主逻辑
+- `strategy/drl/lifecycle_test.go` — 生命周期管理测试
+
+#### 核心结构
+
+```go
+// ModelLifecycleManager 管理 DRL 模型的加载、验证、热更新与回滚
+type ModelLifecycleManager struct {
+    engine          *Engine
+    config          *DRLEngineConfig
+    scheduler       *RetrainScheduler
+    currentModel    *ONNXModel          // 当前活跃模型（原子引用）
+    modelVersion    string              // 当前模型版本标记
+    lastRetrainAt   time.Time           // 上次重训练时间
+    lastValidateAt  time.Time           // 上次验证时间
+    mu              sync.RWMutex        // 热更新读写锁
+    logger          *log.Logger
+}
+
+// RetrainScheduler 重训练调度器
+type RetrainScheduler struct {
+    IntervalHours   int                 // 重训练间隔（小时）
+    TrainScriptPath string              // Python 训练脚本路径
+    DataPath        string              // 历史数据路径
+    OutputDir       string              // 模型输出目录
+    ticker          *time.Ticker
+    stopCh          chan struct{}
+}
+
+// ModelValidationResult 模型验证结果
+type ModelValidationResult struct {
+    Passed              bool    `json:"passed"`
+    DirectionalAccuracy float64 `json:"directional_accuracy"`
+    MinRequired         float64 `json:"min_required"`
+    SampleCount         int     `json:"sample_count"`
+    ValidationPeriod    string  `json:"validation_period"`
+    Reason              string  `json:"reason,omitempty"`
+}
+```
+
+#### 热更新流程
+
+```
+自动重训练调度（按 retrain_interval_hours 周期触发）:
+  1. RetrainScheduler.tick()
+  2. 调用 Python 训练脚本（os/exec）:
+     python training/drl/scripts/train.py \
+       --data-path <historydb_path> \
+       --symbol <symbol> \
+       --output <models/drl/candidate_<timestamp>.onnx>
+  3. 等待训练完成（超时 30 分钟）
+  4. IF 训练成功:
+     → 进入验证流程
+  5. ELIF 训练失败:
+     → 记录中文错误日志 "DRL 自动重训练失败: {error}"
+     → 保留当前模型，不做任何更改
+```
+
+#### 原子切换机制
+
+```
+模型热更新验证与切换:
+  1. Load(candidateModelPath) → candidateModel
+  2. IF 加载失败:
+     → 记录 "候选模型加载失败: {error}"
+     → 回滚：保留 currentModel，删除候选文件
+     → 返回
+  3. 在最近 validation_window 的历史数据上运行验证:
+     a. 构建验证集观测向量序列
+     b. 使用 candidateModel 逐步推理
+     c. 计算方向准确性 DA = correct_direction_count / total_count
+  4. IF DA >= validation_min_da (默认 0.55):
+     → mu.Lock()
+     → oldModel := currentModel
+     → currentModel = candidateModel  // 原子替换引用
+     → modelVersion = new_version
+     → mu.Unlock()
+     → oldModel.Close()  // 释放旧模型资源
+     → 记录 "模型热更新成功: v{old} → v{new}, DA={da:.4f}"
+     → 备份旧模型到 models/drl/archive/
+  5. ELIF DA < validation_min_da:
+     → candidateModel.Close()
+     → 记录 "候选模型验证不通过: DA={da:.4f} < 阈值{min_da}, 保留当前模型 v{current}"
+     → 删除候选模型文件
+```
+
+#### 回滚机制
+
+```go
+// Rollback 回滚到上一个已知可用模型版本
+func (m *ModelLifecycleManager) Rollback(reason string) error {
+    // 1. 从 models/drl/archive/ 中查找最近一个备份模型
+    // 2. 加载备份模型
+    // 3. 原子替换 currentModel
+    // 4. 记录 "模型已回滚: 原因={reason}, 恢复到 v{archive_version}"
+}
+
+// GetModelForInference 获取当前活跃模型（读锁保护，推理时不阻塞）
+func (m *ModelLifecycleManager) GetModelForInference() *ONNXModel {
+    m.mu.RLock()
+    defer m.mu.RUnlock()
+    return m.currentModel
+}
+```
+
+#### 生命周期状态机
+
+```
+                    ┌──────────────────────┐
+                    │   LOADED (正常运行)    │
+                    │  currentModel 活跃    │
+                    └──────────┬───────────┘
+                               │ retrain_interval 到达
+                               ▼
+                    ┌──────────────────────┐
+                    │  RETRAINING (训练中)  │
+                    │  currentModel 继续服务 │
+                    └──────────┬───────────┘
+                               │ 训练完成
+                    ┌──────────┴───────────┐
+                    │                      │
+                    ▼                      ▼
+        ┌─────────────────┐    ┌─────────────────┐
+        │ VALIDATING       │    │ RETRAIN_FAILED   │
+        │ 验证候选模型     │    │ 保留当前模型     │
+        └────────┬────────┘    └─────────────────┘
+                 │
+        ┌────────┴────────┐
+        │                 │
+        ▼                 ▼
+┌──────────────┐  ┌──────────────┐
+│ UPDATED      │  │ REJECTED     │
+│ 原子切换成功  │  │ 验证不通过    │
+│ 旧模型归档   │  │ 保留当前模型  │
+└──────────────┘  └──────────────┘
+```
+
+#### 与 Engine 的集成
+
+```go
+// Engine 扩展
+type Engine struct {
+    // ...existing fields...
+    Lifecycle *ModelLifecycleManager  // 生命周期管理器（auto_retrain=true 时初始化）
+}
+
+// GetFullDecision 中使用生命周期管理器获取模型
+func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision, error) {
+    // 如果启用了生命周期管理，通过 Lifecycle.GetModelForInference() 获取模型
+    // 否则直接使用 e.Model
+    model := e.activeModel()
+    // ...推理流程...
+}
+
+func (e *Engine) activeModel() *ONNXModel {
+    if e.Lifecycle != nil {
+        return e.Lifecycle.GetModelForInference()
+    }
+    return e.Model
+}
+```
+
 ## Data Flow
 
 ### 实时交易模式
@@ -667,6 +846,47 @@ go run cmd/backtest/main.go run -config backtest_drl.json
 
 ```
 github.com/yalue/onnxruntime_go  // ONNX Runtime Go 绑定
+```
+
+#### ONNX Runtime 兼容性说明
+
+`github.com/yalue/onnxruntime_go` 是 ONNX Runtime C API 的 Go 绑定库。兼容性注意事项：
+
+| 项目 | 要求 |
+|------|------|
+| Go 版本 | 需要 Go 1.21+（当前项目 go.mod 声明 `go 1.25.0`，✅ 兼容） |
+| ONNX Runtime | 需要系统安装 ONNX Runtime 共享库 (`libonnxruntime.so`)，版本 ≥ 1.16 |
+| CGO | 需要启用 CGO（`CGO_ENABLED=1`），Linux 环境默认启用 |
+| 平台 | 支持 Linux amd64/arm64、macOS、Windows |
+| Docker | Dockerfile 需增加 ONNX Runtime 库安装步骤 |
+
+**备选方案**（若 `yalue/onnxruntime_go` 出现兼容性问题）：
+
+1. **`github.com/nicholasgasior/onnxruntime-go`**：另一个活跃的 Go ONNX Runtime 绑定，API 风格略有不同但功能等价。
+2. **gRPC 推理服务**：将 ONNX 推理封装为独立 Python gRPC 微服务，Go 侧通过 RPC 调用。优点是完全消除 CGO 依赖，缺点是增加网络延迟（约 5-20ms）和运维复杂度。
+3. **`github.com/owulveryck/onnx-go`**：纯 Go 实现的 ONNX 推理（无 CGO），但性能较低且算子覆盖不完整，仅作为最后手段。
+
+**推荐实施策略**：优先使用 `yalue/onnxruntime_go`，在项目中通过接口抽象推理层，使后续可无侵入替换底层实现：
+
+```go
+// strategy/drl/inference.go
+type InferenceBackend interface {
+    Load(modelPath string, inputShape []int64) error
+    Infer(observation []float32) (float32, error)
+    Close() error
+}
+
+// 实现：ONNXRuntimeBackend（默认）、GRPCBackend（备选）
+```
+
+**Docker 部署补充**：在 `docker/Dockerfile.backend` 中需增加：
+
+```dockerfile
+# 安装 ONNX Runtime 共享库
+RUN wget -q https://github.com/microsoft/onnxruntime/releases/download/v1.17.0/onnxruntime-linux-x64-1.17.0.tgz \
+    && tar -xzf onnxruntime-linux-x64-1.17.0.tgz \
+    && cp onnxruntime-linux-x64-1.17.0/lib/libonnxruntime.so* /usr/lib/ \
+    && rm -rf onnxruntime-linux-x64-1.17.0*
 ```
 
 ### Python 侧依赖
