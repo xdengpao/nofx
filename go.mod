@@ -65,6 +65,7 @@ require (
 	github.com/valyala/fastjson v1.6.4 // indirect
 	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
 	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
+	github.com/yalue/onnxruntime_go v1.30.1 // indirect
 	go.elastic.co/apm/module/apmzerolog/v2 v2.7.1 // indirect
 	go.elastic.co/apm/v2 v2.7.1 // indirect
 	go.elastic.co/fastjson v1.5.1 // indirect

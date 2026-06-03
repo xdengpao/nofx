@@ -43,6 +43,14 @@ data/
 data/trade_plans.json
 data/dynamic_candidate_pool.json
 nofx_test
+!training/drl/data/
+!training/drl/data/**
+
+# Python 本地环境与缓存
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
 
 # 本地回测数据与报告
 backtest_data/

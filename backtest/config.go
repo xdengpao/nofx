@@ -55,7 +55,9 @@ type BacktestConfig struct {
 	backtestFromTime time.Time
 	backtestToTime   time.Time
 	warmupFromTime   time.Time
+	decisionMode     string
 	programmatic     decision.ProgrammaticStrategyPolicy
+	drlStrategy      config.DRLStrategyConfig
 	configHash       string
 }
 
@@ -86,6 +88,7 @@ type DataConfig struct {
 type StrategyConfig struct {
 	DecisionMode         string                            `json:"decision_mode,omitempty"`
 	ProgrammaticStrategy config.ProgrammaticStrategyConfig `json:"programmatic_strategy,omitempty"`
+	DRLStrategy          config.DRLStrategyConfig          `json:"drl_strategy,omitempty"`
 }
 
 type BatchConfig struct {
@@ -172,6 +175,14 @@ func (c *BacktestConfig) NormalizeAndValidate() error {
 	if c.ScanIntervalMinutes < 1 || c.ScanIntervalMinutes > 240 {
 		return fmt.Errorf("scan_interval_minutes必须在1-240之间: %d", c.ScanIntervalMinutes)
 	}
+	mode, err := normalizeBacktestDecisionMode(c.Strategy.DecisionMode)
+	if err != nil {
+		return err
+	}
+	c.decisionMode = mode
+	if len(c.Symbols) == 0 && mode == config.DecisionModeDRL {
+		c.Symbols = append([]string(nil), c.Strategy.DRLStrategy.Symbols...)
+	}
 	if len(c.Symbols) == 0 {
 		c.Symbols = append([]string(nil), c.Strategy.ProgrammaticStrategy.SymbolPool.Symbols...)
 	}
@@ -198,13 +209,24 @@ func (c *BacktestConfig) NormalizeAndValidate() error {
 		return err
 	}
 
-	policy, err := normalizeProgrammaticPolicy(c.Strategy)
-	if err != nil {
-		return err
-	}
-	c.programmatic = policy
-	if c.programmatic.State.Path == "" {
-		c.programmatic.State.Path = "state/programmatic_strategy_state.json"
+	if mode == config.DecisionModeDRL {
+		drlCfg, err := config.NormalizeDRLStrategy(c.Strategy.DRLStrategy)
+		if err != nil {
+			return fmt.Errorf("drl_strategy: %w", err)
+		}
+		if len(drlCfg.Symbols) == 0 {
+			drlCfg.Symbols = append([]string(nil), c.Symbols...)
+		}
+		c.drlStrategy = drlCfg
+	} else {
+		policy, err := normalizeProgrammaticPolicy(c.Strategy)
+		if err != nil {
+			return err
+		}
+		c.programmatic = policy
+		if c.programmatic.State.Path == "" {
+			c.programmatic.State.Path = "state/programmatic_strategy_state.json"
+		}
 	}
 	c.warmupFromTime = c.calculateWarmupFrom()
 	hash, err := hashConfigSnapshot(c.sanitizedSnapshot())
@@ -212,7 +234,7 @@ func (c *BacktestConfig) NormalizeAndValidate() error {
 		return err
 	}
 	c.configHash = hash
-	if c.programmatic.ConfigHash == "" || c.programmatic.ConfigHash == "default" {
+	if mode == config.DecisionModeProgrammatic && (c.programmatic.ConfigHash == "" || c.programmatic.ConfigHash == "default") {
 		c.programmatic.ConfigHash = hash
 	}
 	return nil
@@ -245,7 +267,14 @@ func (c *BacktestConfig) Location() *time.Location    { return c.loc }
 func (c *BacktestConfig) ProgrammaticPolicy() decision.ProgrammaticStrategyPolicy {
 	return c.programmatic
 }
-func (c *BacktestConfig) ConfigHash() string { return c.configHash }
+func (c *BacktestConfig) DecisionMode() string {
+	if c.decisionMode == "" {
+		return config.DecisionModeProgrammatic
+	}
+	return c.decisionMode
+}
+func (c *BacktestConfig) DRLStrategy() config.DRLStrategyConfig { return c.drlStrategy }
+func (c *BacktestConfig) ConfigHash() string                    { return c.configHash }
 
 func (c *BacktestConfig) ValidateHistoryCoverage(ctx context.Context, checker HistoryCoverageChecker) error {
 	if checker == nil {
@@ -270,6 +299,17 @@ func RequiredTimeframes() []string {
 }
 
 func (c *BacktestConfig) calculateWarmupFrom() time.Time {
+	if c.DecisionMode() == config.DecisionModeDRL {
+		depth := c.drlStrategy.ObservationWindow + 80
+		if depth < 120 {
+			depth = 120
+		}
+		maxDuration := time.Duration(depth) * 4 * time.Hour
+		if byTimeframe := time.Duration(depth) * time.Hour; byTimeframe > maxDuration {
+			maxDuration = byTimeframe
+		}
+		return c.backtestFromTime.Add(-maxDuration)
+	}
 	depth := c.programmatic.HistoryDepth
 	maxDuration := time.Duration(depth.M3) * 3 * time.Minute
 	candidates := []time.Duration{
@@ -451,6 +491,19 @@ func normalizeProgrammaticPolicy(strategy StrategyConfig) (decision.Programmatic
 	return programmaticProfileToPolicy(profiles["backtest"]), nil
 }
 
+func normalizeBacktestDecisionMode(mode string) (string, error) {
+	mode = strings.TrimSpace(strings.ToLower(mode))
+	if mode == "" {
+		return config.DecisionModeProgrammatic, nil
+	}
+	switch mode {
+	case config.DecisionModeProgrammatic, config.DecisionModeDRL:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("回测仅支持programmatic或drl策略: %s", mode)
+	}
+}
+
 func programmaticProfileToPolicy(profile config.ProgrammaticStrategyProfile) decision.ProgrammaticStrategyPolicy {
 	return decision.ProgrammaticStrategyPolicy{
 		DecisionMode:    profile.DecisionMode,
@@ -558,6 +611,21 @@ func programmaticProfileToPolicy(profile config.ProgrammaticStrategyProfile) dec
 }
 
 func (c *BacktestConfig) sanitizedSnapshot() map[string]any {
+	strategySnapshot := map[string]any{
+		"decision_mode": c.DecisionMode(),
+	}
+	if c.DecisionMode() == config.DecisionModeDRL {
+		strategySnapshot["name"] = "drl_ppo"
+		strategySnapshot["version"] = c.drlStrategy.ModelVersion
+		strategySnapshot["timeframe"] = c.drlStrategy.Timeframe
+		strategySnapshot["observation_window"] = c.drlStrategy.ObservationWindow
+		strategySnapshot["model_path"] = sanitizePath(c.drlStrategy.ModelPath)
+	} else {
+		strategySnapshot["name"] = c.programmatic.StrategyName
+		strategySnapshot["version"] = c.programmatic.StrategyVersion
+		strategySnapshot["timeframes"] = c.programmatic.Timeframes
+		strategySnapshot["history_depth"] = c.programmatic.HistoryDepth
+	}
 	return map[string]any{
 		"backtest_from":         c.BacktestFrom,
 		"backtest_to":           c.BacktestTo,
@@ -576,13 +644,7 @@ func (c *BacktestConfig) sanitizedSnapshot() map[string]any {
 			"candidate_pool_mode": c.Data.CandidatePoolMode,
 			"allow_auto_fetch":    c.Data.AllowAutoFetch,
 		},
-		"strategy": map[string]any{
-			"decision_mode": c.programmatic.DecisionMode,
-			"name":          c.programmatic.StrategyName,
-			"version":       c.programmatic.StrategyVersion,
-			"timeframes":    c.programmatic.Timeframes,
-			"history_depth": c.programmatic.HistoryDepth,
-		},
+		"strategy": strategySnapshot,
 	}
 }
 

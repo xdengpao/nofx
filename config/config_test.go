@@ -585,6 +585,87 @@ func TestNormalizeProgrammaticStrategies_ProgrammaticDefaults(t *testing.T) {
 	}
 }
 
+func TestConfigValidate_DRLDefaultsAndSkipsAIKeyValidation(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].DecisionMode = DecisionModeDRL
+	cfg.Traders[0].AIModel = ""
+	cfg.Traders[0].DeepSeekKey = ""
+	cfg.Traders[0].DRLStrategy = DRLStrategyConfig{
+		ModelPath: "models/drl/test.onnx",
+		Symbols:   []string{"btcusdt", "ETHUSDT", "ETHUSDT"},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("合法DRL配置不应失败: %v", err)
+	}
+	trader := cfg.Traders[0]
+	if trader.AIModel != DecisionModeDRL {
+		t.Fatalf("DRL模式应设置AIModel=drl，实际=%q", trader.AIModel)
+	}
+	drl := trader.DRLStrategy
+	if drl.ObservationWindow != 60 || drl.Timeframe != "4h" || drl.ActionThreshold != 0.1 || drl.MaxPositionPct != 0.3 {
+		t.Fatalf("DRL默认值异常: %+v", drl)
+	}
+	if drl.DefaultLeverage != 5 || drl.StopLossATRMult != 2.0 || drl.TakeProfitATRMult != 3.0 || drl.MaxDrawdownPct != 20 {
+		t.Fatalf("DRL风控默认值异常: %+v", drl)
+	}
+	if drl.RetrainIntervalH != 168 || drl.ValidationMinDA != 0.55 || drl.MonteCarloPaths != 2000 || drl.StressTestDelta != 0.3 || drl.StablecoinRatio != 0.3 {
+		t.Fatalf("DRL生命周期/回测默认值异常: %+v", drl)
+	}
+	if len(drl.Symbols) != 2 || drl.Symbols[0] != "BTCUSDT" || drl.Symbols[1] != "ETHUSDT" {
+		t.Fatalf("DRL symbols归一化异常: %+v", drl.Symbols)
+	}
+	if drl.Features.IncludeMACD == nil || !*drl.Features.IncludeMACD || drl.Features.EMAShortPeriod != 12 || drl.Features.BollingerStdDev != 2.0 {
+		t.Fatalf("DRL feature默认值异常: %+v", drl.Features)
+	}
+}
+
+func TestConfigValidate_DRLInvalidValues(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*TraderConfig)
+	}{
+		{name: "missing model path", mutate: func(trader *TraderConfig) { trader.DRLStrategy.ModelPath = "" }},
+		{name: "small observation window", mutate: func(trader *TraderConfig) { trader.DRLStrategy.ObservationWindow = 9 }},
+		{name: "large observation window", mutate: func(trader *TraderConfig) { trader.DRLStrategy.ObservationWindow = 201 }},
+		{name: "bad action threshold", mutate: func(trader *TraderConfig) { trader.DRLStrategy.ActionThreshold = 1 }},
+		{name: "bad max position pct", mutate: func(trader *TraderConfig) { trader.DRLStrategy.MaxPositionPct = 1.01 }},
+		{name: "bad timeframe", mutate: func(trader *TraderConfig) { trader.DRLStrategy.Timeframe = "5m" }},
+		{name: "bad symbol", mutate: func(trader *TraderConfig) { trader.DRLStrategy.Symbols = []string{"bad symbol"} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Traders[0].DecisionMode = DecisionModeDRL
+			cfg.Traders[0].AIModel = ""
+			cfg.Traders[0].DeepSeekKey = ""
+			cfg.Traders[0].DRLStrategy = DRLStrategyConfig{ModelPath: "models/drl/test.onnx"}
+			tt.mutate(&cfg.Traders[0])
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("非法DRL配置应失败")
+			}
+		})
+	}
+}
+
+func TestNormalizeProgrammaticStrategies_DRLExplicitlySplit(t *testing.T) {
+	cfg := validConfig()
+	cfg.Traders[0].DecisionMode = DecisionModeDRL
+	cfg.Traders[0].ProgrammaticStrategy.SymbolPool.Mode = "bad"
+
+	profiles, err := cfg.NormalizeProgrammaticStrategies()
+	if err != nil {
+		t.Fatalf("DRL不应进入programmatic归一化: %v", err)
+	}
+	profile := profiles["trader1"]
+	if profile.DecisionMode != DecisionModeDRL {
+		t.Fatalf("DRL模式不应改写为programmatic: %+v", profile)
+	}
+	if profile.ConfigHash != "" {
+		t.Fatalf("DRL占位profile不应生成programmatic config hash: %+v", profile)
+	}
+}
+
 func TestNormalizeProgrammaticStrategies_DefectFixPackRollbackDefaults(t *testing.T) {
 	cfg := validConfig()
 	cfg.Traders[0].DecisionMode = DecisionModeProgrammatic

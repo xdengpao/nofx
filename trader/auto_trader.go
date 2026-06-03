@@ -13,6 +13,7 @@ import (
 	"nofx/pool"
 	"nofx/strategy/chanlun"
 	"nofx/strategy/chanlunv2"
+	"nofx/strategy/drl"
 	"strconv"
 	"strings"
 	"time"
@@ -32,7 +33,7 @@ type AutoTraderConfig struct {
 	ID           string // Trader唯一标识（用于日志目录等）
 	Name         string // Trader显示名称
 	AIModel      string // AI模型: "qwen" 或 "deepseek"
-	DecisionMode string // ai、programmatic 或 chanlun_v2
+	DecisionMode string // ai、programmatic、chanlun_v2 或 drl
 
 	// 交易平台选择
 	Exchange string // "binance", "hyperliquid" 或 "aster"
@@ -86,6 +87,7 @@ type AutoTraderConfig struct {
 	StrategyRiskPolicy         decision.StrategyRiskPolicy
 	ProgrammaticStrategyPolicy decision.ProgrammaticStrategyPolicy
 	ChanlunV2StrategyConfig    config.ChanlunV2StrategyConfig
+	DRLStrategyConfig          config.DRLStrategyConfig
 }
 
 const (
@@ -140,6 +142,7 @@ type AutoTrader struct {
 	mcpClient             *mcp.Client
 	programmaticEngine    *chanlun.Engine
 	chanlunV2Engine       ChanlunV2EngineInterface
+	drlEngine             *drl.Engine
 	decisionLogger        *logger.DecisionLogger // 决策日志记录器
 	initialBalance        float64
 	dailyPnL              float64
@@ -180,6 +183,8 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 			config.AIModel = "programmatic"
 		} else if config.DecisionMode == "chanlun_v2" {
 			config.AIModel = "chanlun_v2"
+		} else if config.DecisionMode == "drl" {
+			config.AIModel = "drl"
 		} else if config.UseQwen {
 			config.AIModel = "qwen"
 		} else {
@@ -227,6 +232,7 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 	var mcpClient *mcp.Client
 	var programmaticEngine *chanlun.Engine
 	var chanlunV2Engine ChanlunV2EngineInterface
+	var drlEngine *drl.Engine
 	if config.DecisionMode == "programmatic" {
 		config.ProgrammaticStrategyPolicy.DecisionMode = "programmatic"
 		engine, engineErr := chanlun.NewEngine(config.ProgrammaticStrategyPolicy)
@@ -245,6 +251,14 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		}
 		chanlunV2Engine = v2Eng
 		log.Printf("🧮 [%s] 使用缠论V2策略 (Rust引擎)", config.Name)
+	} else if config.DecisionMode == "drl" {
+		engine, engineErr := drl.NewEngine(config.DRLStrategyConfig)
+		if engineErr != nil {
+			return nil, fmt.Errorf("初始化DRL策略引擎失败: %w", engineErr)
+		}
+		drlEngine = engine
+		config.AIModel = "drl"
+		log.Printf("🧮 [%s] 使用DRL策略: 模型=%s", config.Name, config.DRLStrategyConfig.ModelPath)
 	} else {
 		mcpClient = mcp.New()
 		// 初始化AI
@@ -319,6 +333,7 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		mcpClient:             mcpClient,
 		programmaticEngine:    programmaticEngine,
 		chanlunV2Engine:       chanlunV2Engine,
+		drlEngine:             drlEngine,
 		decisionLogger:        decisionLogger,
 		initialBalance:        config.InitialBalance,
 		lastResetTime:         time.Now(),
@@ -341,6 +356,8 @@ func (at *AutoTrader) Run() error {
 		log.Println("🚀 程序化策略自动交易系统启动")
 	case "chanlun_v2":
 		log.Println("🚀 缠论V2策略自动交易系统启动")
+	case "drl":
+		log.Println("🚀 DRL策略自动交易系统启动")
 	default:
 		log.Println("🚀 AI驱动自动交易系统启动")
 	}
@@ -351,6 +368,8 @@ func (at *AutoTrader) Run() error {
 		log.Println("🧮 程序化策略将生成开仓、加仓、减仓和平仓决策")
 	case "chanlun_v2":
 		log.Println("🧩 缠论V2策略将生成交易决策")
+	case "drl":
+		log.Println("🧠 DRL策略将生成标准交易决策，并交由公共风控和执行链路处理")
 	default:
 		log.Println("🤖 AI将全权决定杠杆、仓位大小、止损止盈等参数")
 	}
@@ -444,6 +463,11 @@ func (at *AutoTrader) syncExistingPositions() error {
 // Stop 停止自动交易
 func (at *AutoTrader) Stop() {
 	at.isRunning = false
+	if at.drlEngine != nil {
+		if err := at.drlEngine.Close(); err != nil {
+			log.Printf("⚠ DRL策略引擎关闭失败: %v", err)
+		}
+	}
 	log.Println("⏹ 自动交易系统停止")
 }
 
@@ -666,6 +690,8 @@ func (at *AutoTrader) decisionModeLabel() string {
 		return "程序化策略"
 	case "chanlun_v2":
 		return "缠论V2策略"
+	case "drl":
+		return "DRL策略"
 	default:
 		return fmt.Sprintf("策略(%s)", mode)
 	}
@@ -677,6 +703,8 @@ func (at *AutoTrader) decisionModeActionLog() string {
 		return "🧮 正在运行程序化策略分析并决策..."
 	case "chanlun_v2":
 		return "🧩 正在运行缠论V2策略分析并决策..."
+	case "drl":
+		return "🧠 正在运行DRL策略推理并决策..."
 	default:
 		return "🤖 正在请求AI分析并决策..."
 	}
@@ -695,7 +723,33 @@ func (at *AutoTrader) getFullDecision(ctx *decision.Context) (*decision.FullDeci
 		}
 		return at.chanlunV2Engine.GetFullDecision(ctx)
 	}
+	if at.config.DecisionMode == "drl" {
+		if at.drlEngine == nil {
+			return nil, fmt.Errorf("DRL策略引擎未初始化")
+		}
+		return at.drlEngine.GetFullDecision(ctx)
+	}
 	return decision.GetFullDecision(ctx, at.mcpClient)
+}
+
+// SetDRLMarketDataProviderForTest 注入DRL行情提供器，避免测试触网。
+func (at *AutoTrader) SetDRLMarketDataProviderForTest(provider func(symbol string, opts decision.CyclePreparationOptions) (*market.Data, error)) func() {
+	if at == nil || at.drlEngine == nil {
+		return func() {}
+	}
+	previous := at.drlEngine.MarketDataProvider
+	previousDisableOITop := at.drlEngine.DisableOITopFetch
+	at.drlEngine.MarketDataProvider = provider
+	at.drlEngine.DisableOITopFetch = true
+	return func() {
+		at.drlEngine.MarketDataProvider = previous
+		at.drlEngine.DisableOITopFetch = previousDisableOITop
+	}
+}
+
+// GetFullDecisionForTest 触发一次决策，用于API/manager测试预热策略诊断。
+func (at *AutoTrader) GetFullDecisionForTest(ctx *decision.Context) (*decision.FullDecision, error) {
+	return at.getFullDecision(ctx)
 }
 
 func firstNonEmpty(values ...string) string {
@@ -3430,6 +3484,22 @@ func (at *AutoTrader) GetDecisionLogger() *logger.DecisionLogger {
 	return at.decisionLogger
 }
 
+// GetDRLStatus 返回DRL策略推理状态。
+func (at *AutoTrader) GetDRLStatus() (drl.Status, error) {
+	if at.GetDecisionMode() != "drl" || at.drlEngine == nil {
+		return drl.Status{}, fmt.Errorf("trader不是DRL策略模式: %s", at.id)
+	}
+	return at.drlEngine.Status(), nil
+}
+
+// GetDRLFeatureSnapshot 返回DRL最近一次观测向量快照。
+func (at *AutoTrader) GetDRLFeatureSnapshot() (map[string]any, error) {
+	if at.GetDecisionMode() != "drl" || at.drlEngine == nil {
+		return nil, fmt.Errorf("trader不是DRL策略模式: %s", at.id)
+	}
+	return at.drlEngine.FeatureSnapshot(), nil
+}
+
 // GetStrategySymbols 返回程序化策略最近一次解析出的分析标的池。
 func (at *AutoTrader) GetStrategySymbols() []chanlun.StrategySymbol {
 	if at.programmaticEngine != nil {
@@ -3548,13 +3618,15 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
 		aiProvider = "Programmatic"
 	} else if at.config.DecisionMode == "chanlun_v2" {
 		aiProvider = "Chanlun V2"
+	} else if at.config.DecisionMode == "drl" {
+		aiProvider = "DRL"
 	} else if at.config.UseQwen {
 		aiProvider = "Qwen"
 	}
 	frequencyState := at.buildFrequencyState(at.loadRecentDecisionRecords(at.frequencyRecordLimit()), 0)
 	frequencyPolicy := at.effectiveFrequencyPolicy(frequencyState)
 
-	return map[string]interface{}{
+	status := map[string]interface{}{
 		"trader_id":          at.id,
 		"trader_name":        at.name,
 		"ai_model":           at.aiModel,
@@ -3589,6 +3661,10 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
 			"profile_defaults":           strategyRiskProfileSummaries(at.config.StrategyRiskPolicy.Profiles),
 		},
 	}
+	if at.drlEngine != nil {
+		status["drl_status"] = at.drlEngine.Status()
+	}
+	return status
 }
 
 func strategyRiskProfileNames(profiles []decision.InstrumentProfile) []string {

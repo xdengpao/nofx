@@ -62,6 +62,35 @@ func TestBacktestConfigRejectsInvalidTimezone(t *testing.T) {
 	}
 }
 
+func TestBacktestConfigNormalizeDRLStrategy(t *testing.T) {
+	cfg := &BacktestConfig{
+		BacktestFrom: "2026-01-01",
+		BacktestTo:   "2026-01-02",
+		Strategy: StrategyConfig{
+			DecisionMode: config.DecisionModeDRL,
+			DRLStrategy: config.DRLStrategyConfig{
+				ModelPath: "models/drl/test.onnx",
+				Symbols:   []string{"ethusdt", "BTCUSDT"},
+			},
+		},
+	}
+	if err := cfg.NormalizeAndValidate(); err != nil {
+		t.Fatalf("合法DRL回测配置不应失败: %v", err)
+	}
+	if cfg.DecisionMode() != config.DecisionModeDRL {
+		t.Fatalf("回测模式应为DRL: %s", cfg.DecisionMode())
+	}
+	if got := strings.Join(cfg.Symbols, ","); got != "BTCUSDT,ETHUSDT" {
+		t.Fatalf("DRL symbols fallback异常: %s", got)
+	}
+	if cfg.DRLStrategy().ObservationWindow != 60 || cfg.DRLStrategy().Timeframe != "4h" {
+		t.Fatalf("DRL默认配置未归一化: %+v", cfg.DRLStrategy())
+	}
+	if !cfg.WarmupFromTime().Before(cfg.BacktestFromTime()) {
+		t.Fatal("DRL warmup_from应早于backtest_from")
+	}
+}
+
 func TestBacktestConfigValidatesHistoryCoverage(t *testing.T) {
 	cfg := &BacktestConfig{
 		BacktestFrom: "2026-01-01",

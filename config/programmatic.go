@@ -15,6 +15,7 @@ const (
 	DecisionModeAI           = "ai"
 	DecisionModeProgrammatic = "programmatic"
 	DecisionModeChanlunV2    = "chanlun_v2"
+	DecisionModeDRL          = "drl"
 
 	defaultProgrammaticStrategyName    = "chanlun_programmatic"
 	defaultProgrammaticStrategyVersion = "v1"
@@ -515,6 +516,14 @@ func (c *Config) NormalizeProgrammaticStrategies() (map[string]ProgrammaticStrat
 			profiles[trader.ID] = ProgrammaticStrategyProfile{DecisionMode: DecisionModeAI}
 			continue
 		}
+		if mode == DecisionModeDRL {
+			profiles[trader.ID] = ProgrammaticStrategyProfile{DecisionMode: DecisionModeDRL}
+			continue
+		}
+		if mode == DecisionModeChanlunV2 {
+			profiles[trader.ID] = ProgrammaticStrategyProfile{DecisionMode: DecisionModeChanlunV2}
+			continue
+		}
 		profile, err := normalizeProgrammaticStrategyConfig(trader.ProgrammaticStrategy)
 		if err != nil {
 			return nil, fmt.Errorf("trader[%d] programmatic_strategy: %w", i, err)
@@ -532,10 +541,10 @@ func normalizeDecisionMode(mode string) (string, error) {
 		return DecisionModeAI, nil
 	}
 	switch mode {
-	case DecisionModeAI, DecisionModeProgrammatic, DecisionModeChanlunV2:
+	case DecisionModeAI, DecisionModeProgrammatic, DecisionModeChanlunV2, DecisionModeDRL:
 		return mode, nil
 	default:
-		return "", fmt.Errorf("decision_mode必须是 ai、programmatic 或 chanlun_v2: %q", mode)
+		return "", fmt.Errorf("decision_mode必须是 ai、programmatic、chanlun_v2 或 drl: %q", mode)
 	}
 }
 

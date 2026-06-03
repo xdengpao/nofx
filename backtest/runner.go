@@ -13,10 +13,12 @@ import (
 	"strings"
 	"time"
 
+	"nofx/config"
 	"nofx/decision"
 	"nofx/historydb"
 	"nofx/market"
 	"nofx/strategy/chanlun"
+	"nofx/strategy/drl"
 )
 
 type Runner struct {
@@ -47,6 +49,10 @@ type RunResult struct {
 	OutputDir string   `json:"output_dir"`
 	Report    Report   `json:"report"`
 	Progress  Progress `json:"progress"`
+}
+
+type backtestDecisionEngine interface {
+	GetFullDecision(ctx *decision.Context) (*decision.FullDecision, error)
 }
 
 func NewRunner(cfg *BacktestConfig, store *historydb.Store) (*Runner, error) {
@@ -91,15 +97,10 @@ func (r *Runner) Run(ctx context.Context) (RunResult, error) {
 			return r.CurrentTime
 		},
 	}
-	policy := r.Config.ProgrammaticPolicy()
-	policy.State.Path = filepath.Join(stateDir, "programmatic_strategy_state.json")
-	engine, err := chanlun.NewEngine(policy)
+	engine, chanlunEngine, err := r.newStrategyEngine(stateDir, provider)
 	if err != nil {
 		return RunResult{}, err
 	}
-	engine.Clock = func() time.Time { return r.CurrentTime }
-	engine.MarketDataProvider = provider.GetMarketData
-	engine.DisableOITopFetch = true
 
 	var equity []EquityPoint
 	var rejections []decision.OpenRejection
@@ -140,13 +141,16 @@ func (r *Runner) Run(ctx context.Context) (RunResult, error) {
 			}
 			broker.SubmitDecision(d, current)
 		}
-		for _, symbol := range r.Config.Symbols {
-			report, ok := engine.LatestSignals("backtest", symbol)
-			if !ok {
-				report = engine.EmptySignalReport("backtest", symbol)
+		if chanlunEngine != nil {
+			policy := r.Config.ProgrammaticPolicy()
+			for _, symbol := range r.Config.Symbols {
+				report, ok := chanlunEngine.LatestSignals("backtest", symbol)
+				if !ok {
+					report = chanlunEngine.EmptySignalReport("backtest", symbol)
+				}
+				key := fmt.Sprintf("%s_%s", symbol, policy.Timeframes.Trade)
+				markers[key] = report.SignalMarkers
 			}
-			key := fmt.Sprintf("%s_%s", symbol, policy.Timeframes.Trade)
-			markers[key] = report.SignalMarkers
 		}
 		broker.recomputeAccount()
 		if broker.Account.Equity > lastEquityPeak {
@@ -190,6 +194,7 @@ func (r *Runner) Run(ctx context.Context) (RunResult, error) {
 	allRejections := append([]decision.OpenRejection{}, rejections...)
 	allRejections = append(allRejections, broker.OpenRejections...)
 	structures := BuildStructureSnapshots("backtest", r.Config.Exchange, markers)
+	drlMonteCarlo, drlStress, drlHedge := buildDRLExtendedRiskForReport(r.Config.DecisionMode(), r.Config.DRLStrategy(), equity, r.Config.InitialEquity)
 	report := Report{
 		RunID:                    runID,
 		GeneratedAt:              time.Now().UTC(),
@@ -227,6 +232,10 @@ func (r *Runner) Run(ctx context.Context) (RunResult, error) {
 		BySymbolCategory:   BuildBucketStats(trades, func(t TradeLifecycle) string { return SymbolCategory(t.Symbol) }),
 		RejectionBuckets:   buildRejectionBuckets(allRejections),
 		MinNotionalRejects: CountMinNotionalRejects(allRejections),
+		DRLMetrics:         buildDRLMetricsForMode(r.Config.DecisionMode(), equity, trades, r.Config.BacktestFromTime(), r.Config.BacktestToTime()),
+		DRLMonteCarlo:      drlMonteCarlo,
+		DRLStressTest:      drlStress,
+		DRLHedgeComparison: drlHedge,
 		Files:              ArtifactFiles(),
 		Cancelled:          r.Progress.Status == "cancelled",
 	}
@@ -247,6 +256,34 @@ func (r *Runner) Run(ctx context.Context) (RunResult, error) {
 		return RunResult{}, err
 	}
 	return RunResult{RunID: runID, OutputDir: runDir, Report: report, Progress: r.Progress}, nil
+}
+
+func (r *Runner) newStrategyEngine(stateDir string, provider *HistoricalMarketDataProvider) (backtestDecisionEngine, *chanlun.Engine, error) {
+	switch r.Config.DecisionMode() {
+	case config.DecisionModeDRL:
+		engine, err := drl.NewEngineWithBackend(
+			r.Config.DRLStrategy(),
+			drl.NewStubBackend(0),
+			drl.WithMarketDataProvider(provider.GetMarketData),
+			drl.WithDisableOITopFetch(true),
+			drl.WithClock(func() time.Time { return r.CurrentTime }),
+		)
+		if err != nil {
+			return nil, nil, fmt.Errorf("初始化DRL回测引擎失败: %w", err)
+		}
+		return engine, nil, nil
+	default:
+		policy := r.Config.ProgrammaticPolicy()
+		policy.State.Path = filepath.Join(stateDir, "programmatic_strategy_state.json")
+		engine, err := chanlun.NewEngine(policy)
+		if err != nil {
+			return nil, nil, err
+		}
+		engine.Clock = func() time.Time { return r.CurrentTime }
+		engine.MarketDataProvider = provider.GetMarketData
+		engine.DisableOITopFetch = true
+		return engine, engine, nil
+	}
 }
 
 func (r *Runner) lastBar(ctx context.Context, symbol string, current time.Time) (market.Kline, bool, error) {
@@ -270,6 +307,7 @@ func (r *Runner) buildDecisionContext(broker *PaperBroker, now time.Time) *decis
 		CurrentTime:              now.Format("2006-01-02 15:04:05"),
 		TraderID:                 "backtest",
 		Exchange:                 r.Config.Exchange,
+		DecisionMode:             r.Config.DecisionMode(),
 		RuntimeMinutes:           int(now.Sub(r.Config.BacktestFromTime()).Minutes()),
 		Account:                  broker.AccountInfo(),
 		Positions:                broker.DecisionPositions(now),

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"nofx/backtest"
 	"nofx/logger"
 	"nofx/manager"
 	"nofx/strategy/chanlun"
@@ -88,6 +89,10 @@ func (s *Server) setupRoutes() {
 		api.GET("/performance", s.handlePerformance)
 		api.GET("/strategy/symbols", s.handleStrategySymbols)
 		api.GET("/strategy/signals", s.handleStrategySignals)
+		api.GET("/strategy/drl/status", s.handleDRLStatus)
+		api.GET("/strategy/drl/features", s.handleDRLFeatures)
+		api.POST("/strategy/drl/backtest/monte-carlo", s.handleDRLMonteCarlo)
+		api.POST("/strategy/drl/backtest/stress-test", s.handleDRLStressTest)
 		api.GET("/market/klines", s.handleMarketKlines)
 		if backtestAPIEnabled() {
 			s.registerBacktestRoutes(api.Group("/backtest"))
@@ -162,6 +167,127 @@ func (s *Server) handleStatus(c *gin.Context) {
 
 	status := trader.GetStatus()
 	c.JSON(http.StatusOK, status)
+}
+
+func (s *Server) handleDRLStatus(c *gin.Context) {
+	traderID := strings.TrimSpace(c.Query("trader_id"))
+	if traderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trader_id不能为空"})
+		return
+	}
+	status, err := s.traderManager.GetDRLStatus(traderID)
+	if err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "不存在") {
+			code = http.StatusNotFound
+		}
+		c.JSON(code, gin.H{"error": err.Error()})
+		return
+	}
+	status["trader_id"] = traderID
+	c.JSON(http.StatusOK, status)
+}
+
+func (s *Server) handleDRLFeatures(c *gin.Context) {
+	traderID := strings.TrimSpace(c.Query("trader_id"))
+	if traderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trader_id不能为空"})
+		return
+	}
+	features, err := s.traderManager.GetDRLFeatureSnapshot(traderID)
+	if err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "不存在") {
+			code = http.StatusNotFound
+		}
+		c.JSON(code, gin.H{"error": err.Error()})
+		return
+	}
+	if features == nil {
+		features = map[string]any{
+			"trader_id": traderID,
+			"message":   "DRL策略尚未完成推理，暂无特征快照",
+		}
+	} else {
+		features["trader_id"] = traderID
+	}
+	c.JSON(http.StatusOK, features)
+}
+
+type drlMonteCarloRequest struct {
+	Prices       []float64 `json:"prices"`
+	InitialValue float64   `json:"initial_value"`
+	Paths        int       `json:"paths,omitempty"`
+	HorizonSteps int       `json:"horizon_steps,omitempty"`
+	Seed         int64     `json:"seed,omitempty"`
+}
+
+func (s *Server) handleDRLMonteCarlo(c *gin.Context) {
+	traderID := strings.TrimSpace(c.Query("trader_id"))
+	if traderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trader_id不能为空"})
+		return
+	}
+	if _, err := s.traderManager.GetDRLStatus(traderID); err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "不存在") {
+			code = http.StatusNotFound
+		}
+		c.JSON(code, gin.H{"error": err.Error()})
+		return
+	}
+	var req drlMonteCarloRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("请求体无效: %v", err)})
+		return
+	}
+	result, err := (backtest.MonteCarloSimulator{
+		Paths:        req.Paths,
+		HorizonSteps: req.HorizonSteps,
+		Seed:         req.Seed,
+	}).Simulate(req.Prices, req.InitialValue)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"trader_id": traderID, "result": result})
+}
+
+type drlStressTestRequest struct {
+	Prices       []float64 `json:"prices"`
+	InitialValue float64   `json:"initial_value"`
+	Delta        float64   `json:"delta,omitempty"`
+	ShockIndex   int       `json:"shock_index,omitempty"`
+}
+
+func (s *Server) handleDRLStressTest(c *gin.Context) {
+	traderID := strings.TrimSpace(c.Query("trader_id"))
+	if traderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trader_id不能为空"})
+		return
+	}
+	if _, err := s.traderManager.GetDRLStatus(traderID); err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "不存在") {
+			code = http.StatusNotFound
+		}
+		c.JSON(code, gin.H{"error": err.Error()})
+		return
+	}
+	var req drlStressTestRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("请求体无效: %v", err)})
+		return
+	}
+	result, err := (backtest.StressTester{
+		Delta:      req.Delta,
+		ShockIndex: req.ShockIndex,
+	}).Test(req.Prices, req.InitialValue)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"trader_id": traderID, "result": result})
 }
 
 // handleAccount 账户信息
@@ -668,6 +794,7 @@ func (s *Server) Start() error {
 	log.Printf("  • GET  /api/statistics?trader_id=xxx - 指定trader的统计信息")
 	log.Printf("  • GET  /api/equity-history?trader_id=xxx - 指定trader的收益率历史数据")
 	log.Printf("  • GET  /api/performance?trader_id=xxx - 指定trader的AI学习表现分析")
+	log.Printf("  • GET  /api/strategy/drl/status?trader_id=xxx - 指定DRL trader的推理状态")
 	log.Printf("  • GET  /health               - 健康检查")
 	log.Println()
 

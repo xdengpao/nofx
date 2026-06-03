@@ -128,6 +128,57 @@ func TestRunnerGeneratesReportFiles(t *testing.T) {
 	}
 }
 
+func TestRunnerGeneratesDRLReportMetrics(t *testing.T) {
+	store := openBacktestStore(t)
+	defer store.Close()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	writeAllTimeframes(t, store, "BTCUSDT", start, 240)
+	modelPath := filepath.Join(t.TempDir(), "ppo.onnx")
+	if err := os.WriteFile(modelPath, []byte("stub"), 0o600); err != nil {
+		t.Fatalf("写入DRL模型fixture失败: %v", err)
+	}
+	cfg := &BacktestConfig{
+		BacktestFrom:  start.Add(48 * time.Hour).Format(time.RFC3339),
+		BacktestTo:    start.Add(49 * time.Hour).Format(time.RFC3339),
+		OutputDir:     filepath.Join(t.TempDir(), "runs"),
+		HistoryDB:     store.Path(),
+		InitialEquity: 1000,
+		Data:          DataConfig{AllowAutoFetch: true},
+		Strategy: StrategyConfig{
+			DecisionMode: config.DecisionModeDRL,
+			DRLStrategy: config.DRLStrategyConfig{
+				ModelPath:         modelPath,
+				ModelVersion:      "test-v1",
+				ObservationWindow: 10,
+				Timeframe:         "4h",
+				Symbols:           []string{"BTCUSDT"},
+				MonteCarloEnabled: true,
+				MonteCarloPaths:   32,
+				StressTestEnabled: true,
+				StablecoinHedge:   true,
+			},
+		},
+	}
+	runner, err := NewRunner(cfg, store)
+	if err != nil {
+		t.Fatalf("DRL runner初始化失败: %v", err)
+	}
+	result, err := runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("DRL runner执行失败: %v", err)
+	}
+	if result.Report.DRLMetrics == nil {
+		t.Fatalf("DRL报告应包含drl_metrics: %+v", result.Report)
+	}
+	if result.Report.DRLMonteCarlo == nil || result.Report.DRLStressTest == nil || result.Report.DRLHedgeComparison == nil {
+		t.Fatalf("DRL报告应包含扩展风险结果: %+v", result.Report)
+	}
+	strategy, ok := result.Report.ConfigSnapshot["strategy"].(map[string]any)
+	if !ok || strategy["decision_mode"] != config.DecisionModeDRL {
+		t.Fatalf("DRL报告配置快照异常: %+v", result.Report.ConfigSnapshot)
+	}
+}
+
 func openBacktestStore(t *testing.T) *historydb.Store {
 	t.Helper()
 	store, err := historydb.Open(filepath.Join(t.TempDir(), "history.sqlite"))

@@ -14,9 +14,10 @@ type TraderConfig struct {
 	Name                 string                     `json:"name"`
 	Enabled              bool                       `json:"enabled"`                 // 是否启用该trader
 	AIModel              string                     `json:"ai_model"`                // "qwen" or "deepseek"
-	DecisionMode         string                     `json:"decision_mode,omitempty"` // ai or programmatic or chanlun_v2
+	DecisionMode         string                     `json:"decision_mode,omitempty"` // ai, programmatic, chanlun_v2 or drl
 	ProgrammaticStrategy ProgrammaticStrategyConfig `json:"programmatic_strategy,omitempty"`
 	ChanlunV2Strategy    ChanlunV2StrategyConfig    `json:"chanlun_v2_strategy,omitempty"`
+	DRLStrategy          DRLStrategyConfig          `json:"drl_strategy,omitempty"`
 
 	// 交易平台选择（二选一）
 	Exchange string `json:"exchange"` // "binance" or "hyperliquid"
@@ -1273,6 +1274,13 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("trader[%d]: chanlun_v2模式下ai_model如配置必须是 'qwen', 'deepseek' 或 'custom'", i)
 			}
 			trader.ChanlunV2Strategy = NormalizeChanlunV2StrategyConfig(trader.ChanlunV2Strategy)
+		} else if mode == DecisionModeDRL {
+			trader.AIModel = DecisionModeDRL
+			normalized, err := NormalizeDRLStrategy(trader.DRLStrategy)
+			if err != nil {
+				return fmt.Errorf("trader[%d] drl_strategy: %w", i, err)
+			}
+			trader.DRLStrategy = normalized
 		} else if trader.AIModel != "qwen" && trader.AIModel != "deepseek" && trader.AIModel != "custom" {
 			return fmt.Errorf("trader[%d]: ai_model必须是 'qwen', 'deepseek' 或 'custom'", i)
 		}

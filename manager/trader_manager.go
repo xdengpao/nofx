@@ -120,6 +120,7 @@ func (tm *TraderManager) AddTraderWithPolicies(cfg config.TraderConfig, coinPool
 		StrategyRiskPolicy:      decisionStrategyRiskPolicy(strategyRisk),
 		DecisionMode:            cfg.DecisionMode,
 		ChanlunV2StrategyConfig: cfg.ChanlunV2Strategy,
+		DRLStrategyConfig:       cfg.DRLStrategy,
 	}
 	if len(programmaticProfiles) > 0 {
 		traderConfig.ProgrammaticStrategyPolicy = decisionProgrammaticStrategyPolicy(programmaticProfiles[0])
@@ -609,6 +610,37 @@ func (tm *TraderManager) GetTrader(id string) (*trader.AutoTrader, error) {
 		return nil, fmt.Errorf("trader ID '%s' 不存在", id)
 	}
 	return t, nil
+}
+
+func (tm *TraderManager) GetDRLStatus(traderID string) (map[string]any, error) {
+	t, err := tm.GetTrader(traderID)
+	if err != nil {
+		return nil, err
+	}
+	status, err := t.GetDRLStatus()
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"model_path":                status.ModelPath,
+		"model_version":             status.ModelVersion,
+		"last_inference_at":         status.LastInferenceAt,
+		"inference_count":           status.InferenceCount,
+		"average_inference_time_ms": status.AverageInferenceTimeMS,
+		"max_inference_time_ms":     status.MaxInferenceTimeMS,
+		"last_raw_action":           status.LastRawAction,
+		"last_mapped_action":        status.LastMappedAction,
+		"last_symbol":               status.LastSymbol,
+		"last_error":                status.LastError,
+	}, nil
+}
+
+func (tm *TraderManager) GetDRLFeatureSnapshot(traderID string) (map[string]any, error) {
+	t, err := tm.GetTrader(traderID)
+	if err != nil {
+		return nil, err
+	}
+	return t.GetDRLFeatureSnapshot()
 }
 
 func (tm *TraderManager) GetStrategySymbols(traderID string) ([]chanlun.StrategySymbol, error) {

@@ -6,7 +6,7 @@ BUILD_TIME := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 LDFLAGS := -X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME) -X main.GitCommit=$(GIT_COMMIT)
 
-.PHONY: build build-quick run test test-backend test-frontend test-coverage dev docker-up docker-down clean install check-native-chanlunv2 native-chanlunv2 test-chanlunv2 test-chanlunv2-go
+.PHONY: build build-quick run test test-backend test-frontend test-coverage dev docker-up docker-down clean install check-native-chanlunv2 native-chanlunv2 test-chanlunv2 test-chanlunv2-go drl-train drl-backtest drl-export
 
 ## 后端编译（注入版本信息）
 build:
@@ -74,3 +74,15 @@ test-chanlunv2:
 ## 仅验证 Chanlun V2 Go 层逻辑，不替代生产 native 链接验证
 test-chanlunv2-go:
 	CGO_ENABLED=0 go test ./strategy/chanlunv2
+
+## 训练 DRL/PPO 模型（参数通过 DRL_TRAIN_ARGS 传入）
+drl-train:
+	cd training/drl && python scripts/train.py $(DRL_TRAIN_ARGS)
+
+## 运行 DRL 回测（参数通过 DRL_BACKTEST_ARGS 传入）
+drl-backtest:
+	go run ./cmd/backtest $(DRL_BACKTEST_ARGS)
+
+## 导出 DRL/PPO ONNX 模型（参数通过 DRL_EXPORT_ARGS 传入）
+drl-export:
+	cd training/drl && python scripts/export_model.py $(DRL_EXPORT_ARGS)

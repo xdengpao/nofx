@@ -46,6 +46,10 @@ type Report struct {
 	BySymbolCategory         map[string]BucketStats `json:"by_symbol_category,omitempty"`
 	RejectionBuckets         map[string]int         `json:"rejection_buckets"`
 	MinNotionalRejects       int                    `json:"min_notional_rejects,omitempty"`
+	DRLMetrics               *DRLBacktestMetrics    `json:"drl_metrics,omitempty"`
+	DRLMonteCarlo            *MonteCarloResult      `json:"drl_monte_carlo,omitempty"`
+	DRLStressTest            *StressTestResult      `json:"drl_stress_test,omitempty"`
+	DRLHedgeComparison       *HedgeComparisonResult `json:"drl_hedge_comparison,omitempty"`
 	CircuitBreakerEvents     []CircuitBreakerEvent  `json:"circuit_breaker_events,omitempty"`
 	Files                    map[string]string      `json:"files"`
 	Cancelled                bool                   `json:"cancelled,omitempty"`

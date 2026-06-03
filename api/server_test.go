@@ -4,14 +4,17 @@ package api
 // 覆盖需求: 12.1, 12.2, 12.3, 12.4, 12.5
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"nofx/config"
+	"nofx/decision"
 	"nofx/logger"
 	"nofx/manager"
 	"nofx/market"
 	"nofx/trader"
+	"os"
 	"testing"
 	"time"
 )
@@ -86,6 +89,40 @@ func newProgrammaticTestServer(t *testing.T, configure ...func(*config.Config)) 
 	return NewServer(tm, 8080)
 }
 
+func newDRLTestServer(t *testing.T) *Server {
+	t.Helper()
+	tm := manager.NewTraderManager()
+	modelPath := t.TempDir() + "/ppo.onnx"
+	if err := os.WriteFile(modelPath, []byte("stub"), 0o600); err != nil {
+		t.Fatalf("创建DRL模型fixture失败: %v", err)
+	}
+	cfg := config.TraderConfig{
+		ID:                  "drl-trader",
+		Name:                "DRL Trader",
+		DecisionMode:        config.DecisionModeDRL,
+		Exchange:            "binance",
+		BinanceAPIKey:       "fake-api-key-for-test",
+		BinanceSecretKey:    "fake-secret-key-for-test",
+		InitialBalance:      10000.0,
+		ScanIntervalMinutes: 3,
+		DRLStrategy: config.DRLStrategyConfig{
+			ModelPath:         modelPath,
+			ModelVersion:      "test-v1",
+			ObservationWindow: 10,
+			Timeframe:         "4h",
+			Symbols:           []string{"ETHUSDT"},
+		},
+	}
+	root := &config.Config{Traders: []config.TraderConfig{cfg}}
+	if err := root.Validate(); err != nil {
+		t.Fatalf("DRL配置校验失败: %v", err)
+	}
+	if err := tm.AddTrader(root.Traders[0], "", 10, 20, 60, config.LeverageConfig{BTCETHLeverage: 5, AltcoinLeverage: 5}); err != nil {
+		t.Fatalf("添加DRL trader失败: %v", err)
+	}
+	return NewServer(tm, 8080)
+}
+
 func newChanlunV2TestServer(t *testing.T, configure ...func(*config.TraderConfig)) *Server {
 	t.Helper()
 	tm := manager.NewTraderManager()
@@ -121,6 +158,19 @@ func newChanlunV2TestServer(t *testing.T, configure ...func(*config.TraderConfig
 // doRequest 执行 HTTP 请求并返回 recorder
 func doRequest(s *Server, method, path string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, nil)
+	w := httptest.NewRecorder()
+	s.router.ServeHTTP(w, req)
+	return w
+}
+
+func doJSONRequest(t *testing.T, s *Server, method, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("序列化请求失败: %v", err)
+	}
+	req := httptest.NewRequest(method, path, bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	s.router.ServeHTTP(w, req)
 	return w
@@ -554,6 +604,152 @@ func TestStrategySignalsEmptyReportIncludesTimeframes(t *testing.T) {
 	body := parseJSON(t, w)
 	if body["trade_timeframe"] != "4h" || body["micro_timeframe"] != "3m" {
 		t.Fatalf("空信号报告应返回timeframe元数据: %+v", body)
+	}
+}
+
+func TestDRLStatusEndpointSuccess(t *testing.T) {
+	s := newDRLTestServer(t)
+	w := doRequest(s, "GET", "/api/strategy/drl/status?trader_id=drl-trader")
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/strategy/drl/status: 期望200，实际=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSON(t, w)
+	if body["trader_id"] != "drl-trader" || body["model_version"] != "test-v1" {
+		t.Fatalf("DRL状态响应字段异常: %+v", body)
+	}
+	if body["model_path"] == "" {
+		t.Fatalf("DRL状态应返回model_path: %+v", body)
+	}
+}
+
+func TestDRLFeaturesEndpointReturnsRawAndNormalizedVectors(t *testing.T) {
+	s := newDRLTestServer(t)
+	tm := s.traderManager
+	drlTrader, err := tm.GetTrader("drl-trader")
+	if err != nil {
+		t.Fatalf("获取DRL trader失败: %v", err)
+	}
+	ctx := &decision.Context{
+		TraderID:     "drl-trader",
+		DecisionMode: config.DecisionModeDRL,
+		Account: decision.AccountInfo{
+			TotalEquity:      10000,
+			AvailableBalance: 8000,
+			SizingEquity:     10000,
+		},
+	}
+	restore := drlTrader.SetDRLMarketDataProviderForTest(func(symbol string, opts decision.CyclePreparationOptions) (*market.Data, error) {
+		return makeAPITestMarketData(t, symbol, 120), nil
+	})
+	defer restore()
+	if _, err := drlTrader.GetFullDecisionForTest(ctx); err != nil {
+		t.Fatalf("生成DRL决策失败: %v", err)
+	}
+
+	w := doRequest(s, "GET", "/api/strategy/drl/features?trader_id=drl-trader")
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /api/strategy/drl/features: 期望200，实际=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSON(t, w)
+	if body["trader_id"] != "drl-trader" || body["dimension"].(float64) == 0 {
+		t.Fatalf("DRL features基础字段异常: %+v", body)
+	}
+	raw, ok := body["raw_features"].([]interface{})
+	if !ok || len(raw) == 0 {
+		t.Fatalf("DRL features应返回raw_features: %+v", body)
+	}
+	normalized, ok := body["normalized_features"].([]interface{})
+	if !ok || len(normalized) != len(raw) {
+		t.Fatalf("DRL features应返回同维度normalized_features: raw=%d body=%+v", len(raw), body)
+	}
+}
+
+func makeAPITestMarketData(t *testing.T, symbol string, count int) *market.Data {
+	t.Helper()
+	klines := make([]market.Kline, count)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli()
+	for i := range klines {
+		close := 1000 + float64(i)
+		klines[i] = market.Kline{
+			OpenTime:  base + int64(i)*60_000,
+			Open:      close - 1,
+			High:      close + 4,
+			Low:       close - 4,
+			Close:     close,
+			Volume:    100 + float64(i),
+			CloseTime: base + int64(i+1)*60_000 - 1,
+		}
+	}
+	data, err := market.BuildDataFromKlines(symbol, market.KlineBundle{
+		M3:  klines,
+		M15: klines,
+		H1:  klines,
+		H4:  klines,
+	}, market.BuildDataOptions{EnrichmentMode: "disabled"})
+	if err != nil {
+		t.Fatalf("构造API测试行情失败: %v", err)
+	}
+	return data
+}
+
+func TestDRLStatusEndpointRejectsNonDRLTrader(t *testing.T) {
+	s := newTestServerWithTrader(t)
+	w := doRequest(s, "GET", "/api/strategy/drl/status?trader_id=test-trader-1")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("非DRL trader应返回400，实际=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSON(t, w)
+	if body["error"] != "trader不是DRL策略模式: test-trader-1" {
+		t.Fatalf("非DRL trader错误信息不清晰: %+v", body)
+	}
+}
+
+func TestDRLStatusEndpointMissingTrader(t *testing.T) {
+	s := newDRLTestServer(t)
+	w := doRequest(s, "GET", "/api/strategy/drl/status?trader_id=missing")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("缺失trader应返回404，实际=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSON(t, w)
+	if body["error"] == "" {
+		t.Fatalf("缺失trader应返回error字段: %+v", body)
+	}
+}
+
+func TestDRLMonteCarloEndpoint(t *testing.T) {
+	s := newDRLTestServer(t)
+	w := doJSONRequest(t, s, "POST", "/api/strategy/drl/backtest/monte-carlo?trader_id=drl-trader", map[string]any{
+		"prices":        []float64{100, 101, 102, 103},
+		"initial_value": 1000,
+		"paths":         16,
+		"horizon_steps": 4,
+		"seed":          42,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST monte-carlo期望200，实际=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSON(t, w)
+	result, ok := body["result"].(map[string]interface{})
+	if !ok || result["paths"].(float64) != 16 {
+		t.Fatalf("蒙特卡洛响应异常: %+v", body)
+	}
+}
+
+func TestDRLStressTestEndpoint(t *testing.T) {
+	s := newDRLTestServer(t)
+	w := doJSONRequest(t, s, "POST", "/api/strategy/drl/backtest/stress-test?trader_id=drl-trader", map[string]any{
+		"prices":        []float64{100, 105, 110, 115},
+		"initial_value": 1000,
+		"delta":         0.2,
+		"shock_index":   2,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST stress-test期望200，实际=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSON(t, w)
+	result, ok := body["result"].(map[string]interface{})
+	if !ok || result["shock_terminal_value"].(float64) >= result["base_terminal_value"].(float64) {
+		t.Fatalf("压力测试响应异常: %+v", body)
 	}
 }
 

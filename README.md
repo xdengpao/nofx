@@ -20,6 +20,7 @@
 
 - **Universal Data & Backtesting Layer**: Cross-market, cross-timeframe, cross-exchange unified representation and factor library, accumulating transferable "strategy memory"
 - **Multi-Agent Self-Play & Self-Evolution**: Strategies automatically compete and select the best, continuously iterating based on account-level PnL and risk constraints
+- **DRL Strategy Mode**: Experimental PPO/DRL trader mode with deterministic risk validation, feature diagnostics, and backtest integration
 - **Integrated Execution & Risk Control**: Low-latency routing, slippage/risk control sandbox, account-level limits, one-click market switching
 
 ### 🏢 Backed by [Amber.ac](https://amber.ac)

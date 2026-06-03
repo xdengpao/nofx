@@ -13,8 +13,8 @@
 ## Design Principles
 
 1. **公共风控优先**：熔断、账户回撤硬停、交易计划失效、保护单同步、open gate、仓位 sizing、最小名义额和 preflight 可覆盖 DRL 策略输出。
-2. **策略只产出决策，不执行订单**：DRL 引擎返回 `decision.Decision` 和诊断信息，实际执行仍由 `trader.AutoTrader` 负责。
-3. **训练推理解耦**：训练使用 Python 生态（Stable-Baselines3 + PyTorch），推理使用 Go ONNX Runtime，通过标准模型格式桥接。
+2. **策略只产出决策，不执行订单**：DRL 引擎返回 `decision.Decision` 和诊断信息，实际执行仍由 `trader.AutoTrader` 通过现有 `trader.Trader` 交易所抽象负责，不引入 CCXT 执行层。
+3. **训练推理解耦**：训练使用 Python 生态（Stable-Baselines3 + PyTorch），Go 侧通过 `InferenceBackend` 接口推理；默认构建使用 mock/stub 后端不依赖系统 `libonnxruntime`，真实 ONNX Runtime 后端使用 `//go:build drl` 隔离。
 4. **增量集成**：复用现有 `backtest.Runner`、`decision.Context`、`market.Data` 和公共验证管线，最小化对已有代码的侵入。
 5. **确定性推理**：相同观测输入下，ONNX 模型推理输出确定性（无随机采样），保证回测可复现。
 6. **可观测性**：每次推理记录完整特征、原始输出、映射动作和耗时，支持事后分析。
@@ -23,35 +23,38 @@
 
 ```mermaid
 flowchart TD
-    Config[config.json traders[].decision_mode=drl / drl_strategy] --> Normalize[config.NormalizeDRLStrategy]
-    Normalize --> Manager[manager.TraderManager]
+    Config[config.json traders[].decision_mode=drl / drl_strategy] --> Normalize[Config.Validate / config.NormalizeDRLStrategy]
+    Normalize --> Split[显式分流DRL / 不进入programmatic归一化]
+    Split --> Manager[manager.TraderManager]
     Manager --> AT[trader.AutoTrader]
 
     AT --> Context[buildTradingContext]
-    Context --> Prep[decision.PrepareCycleContext]
-    Prep --> Market[market.GetWithHistory]
-    Prep --> PublicRisk[熔断 / 账户硬停 / 交易计划 / 持仓评估]
-
     AT --> Mode{decision_mode}
     Mode -->|ai| AI[decision.GetFullDecision AI path]
     Mode -->|programmatic| Chanlun[strategy/chanlun.Engine]
     Mode -->|drl| DRL[strategy/drl.Engine]
 
+    Context --> DRL
+    DRL --> Prep[decision.PrepareCycleContext(MarketHistoryDepth)]
+    Prep --> Market[market.GetWithHistory]
+    Prep --> PublicRisk[熔断 / 账户硬停 / 交易计划 / 持仓评估]
     PublicRisk --> DRL
     Market --> DRL
 
     subgraph DRL Engine
         DRL --> FE[FeatureBuilder 特征工程]
         FE --> Obs[Observation Vector 观测向量]
-        Obs --> ONNX[ONNX Runtime 模型推理]
-        ONNX --> RawAction[Raw Action ∈ [-1, +1]]
+        Obs --> Backend[InferenceBackend]
+        Backend --> RawAction[Raw Action ∈ [-1, +1]]
         RawAction --> Mapper[ActionMapper 动作映射]
         Mapper --> SL_TP[StopLoss/TakeProfit 计算]
     end
 
     SL_TP --> Decisions[[]decision.Decision]
-    Decisions --> Validate[decision.ValidateStrategyDecisions]
-    Validate --> Merge[decision.MergePublicAndStrategyDecisions]
+    Decisions --> ValidateOpen[ValidateStrategyDecisions open/add]
+    Decisions --> ValidateRisk[ValidateRiskReducingStrategyDecisions close/risk-reducing]
+    ValidateOpen --> Merge[decision.MergePublicAndStrategyDecisions]
+    ValidateRisk --> Merge
     AI --> Merge
     Chanlun --> Merge
     Merge --> Execute[executeDecisionWithRecord]
@@ -59,7 +62,7 @@ flowchart TD
 
     DRL --> Diag[StrategyDiagnostics]
     Diag --> Logs[decision_logs]
-    Logs --> API[/api/strategy/drl/*]
+    Logs --> API[/api/strategy/drl/*?trader_id=...]
 
     subgraph Training Subsystem (Python)
         HistDB[(历史数据 SQLite)] --> Env[TradingEnv Gym]
@@ -78,7 +81,7 @@ flowchart TD
 #### Files
 
 - `config/config.go` — 新增 `DRLStrategyConfig` 结构
-- `config/programmatic.go` — 注册 `drl` 到 `normalizeDecisionMode`
+- `config/programmatic.go` — 注册 `drl` 到 `normalizeDecisionMode`，并确保 programmatic 归一化显式跳过 DRL trader
 - `config/config_test.go` — DRL 配置校验测试
 - `config.json.example` — DRL trader 示例
 
@@ -151,6 +154,16 @@ type TraderConfig struct {
 }
 ```
 
+#### 配置归一化流程
+
+`Config.Validate()` 是 `config.LoadConfig()` 的早期校验入口，因此 DRL 模式必须在配置阶段完成显式分流：
+
+1. `normalizeDecisionMode()` 返回 `DecisionModeDRL`。
+2. `Config.Validate()` 或 `NormalizeDRLStrategy()` 在 `decision_mode=drl` 时归一化 `DRLStrategy`，校验 `model_path`、`timeframe`、`observation_window`、`action_threshold`、`max_position_pct` 等字段。
+3. `decision_mode=drl` 时运行时 `AIModel` 标识设置为 `drl`，并跳过 Qwen/DeepSeek/custom AI key 校验。
+4. `NormalizeProgrammaticStrategies()` 对 `DecisionModeDRL` 返回仅包含 `DecisionMode: "drl"` 的占位 profile 或由新的统一策略 profile 显式分流，不能调用 `normalizeProgrammaticStrategyConfig()`，不能把 DRL 改写成 `programmatic`。
+5. `manager.TraderManager` 将 `config.TraderConfig.DRLStrategy` 透传到 `trader.AutoTraderConfig.DRLStrategyConfig`。
+
 ### 2. DRL Strategy Engine（Go 推理侧）
 
 #### Package: `strategy/drl`
@@ -176,7 +189,7 @@ import "nofx/decision"
 // Engine DRL 策略引擎
 type Engine struct {
     Config      *DRLEngineConfig
-    Model       *ONNXModel
+    Backend     InferenceBackend
     Features    *FeatureBuilder
     Mapper      *ActionMapper
     Clock       func() time.Time
@@ -197,14 +210,18 @@ func (e *Engine) Close() error
 
 ```
 GetFullDecision(ctx):
-  1. 从 ctx.MarketDataMap 获取各 symbol 的 K 线数据
-  2. 对每个 symbol:
+  1. 根据 cfg.Symbols、当前持仓和候选币生成本周期 symbol universe
+  2. 调用 decision.PrepareCycleContext(ctx, CyclePreparationOptions{MarketSymbols, MarketHistoryDepth, ClosedKlinesOnly:true, AllowRiskReducingOnHalt:true})
+  3. 从 ctx.MarketDataMap 获取各 symbol 的 K 线数据
+  4. 对每个 symbol:
      a. FeatureBuilder.Build(klines, account) → observation []float32
-     b. Model.Infer(observation) → rawAction float32
+     b. Backend.Infer(observation) → rawAction float32
      c. ActionMapper.Map(rawAction, currentPosition, ctx) → []decision.Decision
-  3. 合并所有 symbol 决策
-  4. 填充 StrategyDiagnostics 和 CoTTrace
-  5. 返回 *decision.FullDecision
+  5. 将 open/add 动作交给 decision.ValidateStrategyDecisions()
+  6. 将 close_long/close_short/partial_close/update_stop_loss 等风险降低动作交给 decision.ValidateRiskReducingStrategyDecisions()
+  7. 使用 decision.MergePublicAndStrategyDecisionsWithContext() 合并公共持仓管理和 DRL 策略输出
+  8. 填充 DecisionMode/StrategyName/StrategyVersion/ConfigHash、StrategyDiagnostics 和 CoTTrace
+  9. 返回 *decision.FullDecision
 ```
 
 ### 3. Feature Builder（特征工程）
@@ -251,30 +268,33 @@ func (n *ZScoreNormalizer) Normalize(raw []float64) []float32 {
 }
 ```
 
-### 4. ONNX Model Wrapper
+### 4. Inference Backend / ONNX Model Wrapper
 
-#### 依赖
+#### 默认构建策略
 
-使用 `github.com/yalue/onnxruntime_go` 作为 Go ONNX Runtime 绑定。
+Go 侧先定义推理接口并提供 mock/stub 后端，确保默认 `go test ./...` 和非 DRL 模式构建不需要系统安装 `libonnxruntime`。真实 ONNX Runtime 后端放在带 `//go:build drl` 的文件中，只有显式启用 DRL build tag 时才编译。
 
 ```go
-// ONNXModel ONNX 模型封装
-type ONNXModel struct {
+// InferenceBackend 是 DRL 推理后端抽象。默认构建使用 mock/stub，真实 ONNX 后端使用 //go:build drl。
+type InferenceBackend interface {
+    Load(modelPath string, inputShape []int64) error
+    Infer(observation []float32) (float32, error)
+    Close() error
+}
+
+// StubBackend 默认构建后端：用于配置、动作映射、诊断和回测测试，不链接 libonnxruntime。
+type StubBackend struct {
+    FixedOutput float32
+}
+
+// ONNXRuntimeBackend ONNX Runtime 后端（//go:build drl）
+type ONNXRuntimeBackend struct {
     session    *ort.Session
     inputName  string
     outputName string
     inputShape []int64
     mu         sync.Mutex // 推理线程安全
 }
-
-// Load 加载 ONNX 模型
-func Load(modelPath string, inputShape []int64) (*ONNXModel, error)
-
-// Infer 执行推理，返回动作值
-func (m *ONNXModel) Infer(observation []float32) (float32, error)
-
-// Close 释放 session 资源
-func (m *ONNXModel) Close() error
 ```
 
 #### 模型输入输出规范
@@ -329,6 +349,14 @@ IF rawAction < -threshold:
 止盈 = entryPrice ± ATR * takeProfitATRMult
 Confidence = int(|rawAction| * 100)
 ```
+
+#### 风控验证拆分
+
+DRL 输出在 engine 内完成公共验证后才能返回给 `AutoTrader`：
+
+- `open_long`、`open_short`、`add_long`、`add_short` 使用 `decision.ValidateStrategyDecisions(ctx, openLike, StrategyValidationOptions{Source:"drl"})`，继续复用 open gate、仓位 sizing、最小下单额、相关性和最终持仓限制。
+- `close_long`、`close_short`、`partial_close`、`update_stop_loss` 等风险降低动作使用 `decision.ValidateRiskReducingStrategyDecisions(ctx, riskReducing, RiskReducingValidationOptions{Source:"drl"})`，校验已有持仓、方向和动作安全性。
+- 验证后的 DRL 输出与 `PrepareCycleContext()` 产生的公共持仓管理动作通过 `decision.MergePublicAndStrategyDecisionsWithContext(ctx, prep.PositionDecisions, validDRL)` 合并，公共风险降低动作优先。
 
 ### 6. 回测集成
 
@@ -605,10 +633,12 @@ func (t *StressTester) Test(engine *Engine, historicalData []market.Kline) *Stre
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/api/strategy/drl/status` | GET | 模型版本、推理统计 |
-| `/api/strategy/drl/features` | GET | 最近一次观测向量 |
-| `/api/strategy/drl/backtest/monte-carlo` | POST | 触发蒙特卡洛模拟 |
-| `/api/strategy/drl/backtest/stress-test` | POST | 触发压力测试 |
+| `/api/strategy/drl/status?trader_id={id}` | GET | 指定 DRL trader 的模型版本、推理统计 |
+| `/api/strategy/drl/features?trader_id={id}` | GET | 指定 DRL trader 最近一次观测向量 |
+| `/api/strategy/drl/backtest/monte-carlo?trader_id={id}` | POST | 指定 DRL trader 触发蒙特卡洛模拟 |
+| `/api/strategy/drl/backtest/stress-test?trader_id={id}` | POST | 指定 DRL trader 触发压力测试 |
+
+所有 DRL API 都必须解析 `trader_id` 并确认目标 trader 的 `decision_mode=="drl"`；若不是 DRL trader，返回 `{"error":"trader不是DRL策略模式: {trader_id}"}`。
 
 ### 10. 与 Backtest CLI 集成
 
@@ -654,7 +684,7 @@ type ModelLifecycleManager struct {
     engine          *Engine
     config          *DRLEngineConfig
     scheduler       *RetrainScheduler
-    currentModel    *ONNXModel          // 当前活跃模型（原子引用）
+    currentBackend  InferenceBackend    // 当前活跃推理后端（原子引用）
     modelVersion    string              // 当前模型版本标记
     lastRetrainAt   time.Time           // 上次重训练时间
     lastValidateAt  time.Time           // 上次验证时间
@@ -705,26 +735,26 @@ type ModelValidationResult struct {
 
 ```
 模型热更新验证与切换:
-  1. Load(candidateModelPath) → candidateModel
+  1. Load(candidateModelPath) → candidateBackend
   2. IF 加载失败:
      → 记录 "候选模型加载失败: {error}"
-     → 回滚：保留 currentModel，删除候选文件
+     → 回滚：保留 currentBackend，删除候选文件
      → 返回
   3. 在最近 validation_window 的历史数据上运行验证:
      a. 构建验证集观测向量序列
-     b. 使用 candidateModel 逐步推理
+     b. 使用 candidateBackend 逐步推理
      c. 计算方向准确性 DA = correct_direction_count / total_count
   4. IF DA >= validation_min_da (默认 0.55):
      → mu.Lock()
-     → oldModel := currentModel
-     → currentModel = candidateModel  // 原子替换引用
+     → oldBackend := currentBackend
+     → currentBackend = candidateBackend  // 原子替换引用
      → modelVersion = new_version
      → mu.Unlock()
-     → oldModel.Close()  // 释放旧模型资源
+     → oldBackend.Close()  // 释放旧后端资源
      → 记录 "模型热更新成功: v{old} → v{new}, DA={da:.4f}"
      → 备份旧模型到 models/drl/archive/
   5. ELIF DA < validation_min_da:
-     → candidateModel.Close()
+     → candidateBackend.Close()
      → 记录 "候选模型验证不通过: DA={da:.4f} < 阈值{min_da}, 保留当前模型 v{current}"
      → 删除候选模型文件
 ```
@@ -736,15 +766,15 @@ type ModelValidationResult struct {
 func (m *ModelLifecycleManager) Rollback(reason string) error {
     // 1. 从 models/drl/archive/ 中查找最近一个备份模型
     // 2. 加载备份模型
-    // 3. 原子替换 currentModel
+    // 3. 原子替换 currentBackend
     // 4. 记录 "模型已回滚: 原因={reason}, 恢复到 v{archive_version}"
 }
 
-// GetModelForInference 获取当前活跃模型（读锁保护，推理时不阻塞）
-func (m *ModelLifecycleManager) GetModelForInference() *ONNXModel {
+// GetBackendForInference 获取当前活跃推理后端（读锁保护，推理时不阻塞）
+func (m *ModelLifecycleManager) GetBackendForInference() InferenceBackend {
     m.mu.RLock()
     defer m.mu.RUnlock()
-    return m.currentModel
+    return m.currentBackend
 }
 ```
 
@@ -753,13 +783,13 @@ func (m *ModelLifecycleManager) GetModelForInference() *ONNXModel {
 ```
                     ┌──────────────────────┐
                     │   LOADED (正常运行)    │
-                    │  currentModel 活跃    │
+                    │ currentBackend 活跃   │
                     └──────────┬───────────┘
                                │ retrain_interval 到达
                                ▼
                     ┌──────────────────────┐
                     │  RETRAINING (训练中)  │
-                    │  currentModel 继续服务 │
+                    │ currentBackend 继续服务│
                     └──────────┬───────────┘
                                │ 训练完成
                     ┌──────────┴───────────┐
@@ -789,19 +819,19 @@ type Engine struct {
     Lifecycle *ModelLifecycleManager  // 生命周期管理器（auto_retrain=true 时初始化）
 }
 
-// GetFullDecision 中使用生命周期管理器获取模型
+// GetFullDecision 中使用生命周期管理器获取推理后端
 func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision, error) {
-    // 如果启用了生命周期管理，通过 Lifecycle.GetModelForInference() 获取模型
-    // 否则直接使用 e.Model
-    model := e.activeModel()
+    // 如果启用了生命周期管理，通过 Lifecycle.GetBackendForInference() 获取后端
+    // 否则直接使用 e.Backend
+    backend := e.activeBackend()
     // ...推理流程...
 }
 
-func (e *Engine) activeModel() *ONNXModel {
+func (e *Engine) activeBackend() InferenceBackend {
     if e.Lifecycle != nil {
-        return e.Lifecycle.GetModelForInference()
+        return e.Lifecycle.GetBackendForInference()
     }
-    return e.Model
+    return e.Backend
 }
 ```
 
@@ -813,13 +843,13 @@ func (e *Engine) activeModel() *ONNXModel {
 每个扫描周期 (scan_interval_minutes):
   1. AutoTrader.runCycle()
   2. buildTradingContext() → decision.Context
-  3. PrepareCycleContext() → 公共风控前置检查
+  3. drl.Engine.GetFullDecision(ctx) 内调用 PrepareCycleContext(MarketHistoryDepth) → 公共风控前置检查 + 历史K线获取
   4. drl.Engine.GetFullDecision(ctx):
      a. 获取最近 60 根 K 线 + 指标
      b. 构建 963 维观测向量
-     c. ONNX 推理 → rawAction
+     c. InferenceBackend 推理 → rawAction
      d. 映射为 Decision（含 SL/TP）
-  5. ValidateStrategyDecisions() → 风控过滤
+  5. ValidateStrategyDecisions(open/add) + ValidateRiskReducingStrategyDecisions(close/risk-reducing) → 风控过滤
   6. executeDecisionWithRecord() → 交易所执行
   7. 写入决策日志
 ```
@@ -845,12 +875,13 @@ func (e *Engine) activeModel() *ONNXModel {
 ### Go 侧新增依赖
 
 ```
-github.com/yalue/onnxruntime_go  // ONNX Runtime Go 绑定
+默认构建无新增必需依赖。
+//go:build drl 后端引入 github.com/yalue/onnxruntime_go
 ```
 
 #### ONNX Runtime 兼容性说明
 
-`github.com/yalue/onnxruntime_go` 是 ONNX Runtime C API 的 Go 绑定库。兼容性注意事项：
+`github.com/yalue/onnxruntime_go` 是 ONNX Runtime C API 的 Go 绑定库，只在 `//go:build drl` 文件中引用。兼容性注意事项：
 
 | 项目 | 要求 |
 |------|------|
@@ -866,7 +897,7 @@ github.com/yalue/onnxruntime_go  // ONNX Runtime Go 绑定
 2. **gRPC 推理服务**：将 ONNX 推理封装为独立 Python gRPC 微服务，Go 侧通过 RPC 调用。优点是完全消除 CGO 依赖，缺点是增加网络延迟（约 5-20ms）和运维复杂度。
 3. **`github.com/owulveryck/onnx-go`**：纯 Go 实现的 ONNX 推理（无 CGO），但性能较低且算子覆盖不完整，仅作为最后手段。
 
-**推荐实施策略**：优先使用 `yalue/onnxruntime_go`，在项目中通过接口抽象推理层，使后续可无侵入替换底层实现：
+**推荐实施策略**：先实现 `InferenceBackend` 接口、`StubBackend` 和测试注入点，保证默认构建不链接 `libonnxruntime`；真实推理优先使用 `yalue/onnxruntime_go`，放在 `model_onnx_drl.go` 等带 `//go:build drl` 的文件中，使后续可无侵入替换底层实现：
 
 ```go
 // strategy/drl/inference.go
@@ -876,7 +907,7 @@ type InferenceBackend interface {
     Close() error
 }
 
-// 实现：ONNXRuntimeBackend（默认）、GRPCBackend（备选）
+// 实现：StubBackend（默认）、ONNXRuntimeBackend（//go:build drl）、GRPCBackend（备选）
 ```
 
 **Docker 部署补充**：在 `docker/Dockerfile.backend` 中需增加：

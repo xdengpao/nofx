@@ -6,7 +6,7 @@
 
 为增强系统在高波动加密货币市场的趋势捕获能力，需新增基于**近端策略优化（Proximal Policy Optimization, PPO）**的深度强化学习决策模式。PPO 在相关研究中对加密货币市场（如 ETH-USDT）展现出极强的盈利潜力，其核心优势在于训练过程稳定、能处理连续动作空间、并能通过自适应学习捕捉市场体制变化。
 
-本策略采用多维技术指标作为观测空间输入，输出连续仓位信号（-1 到 +1），结合 CCXT 统一交易接口实现多交易所自动化执行，并通过蒙特卡洛模拟和波动率压力测试进行严谨的风险回测。
+本策略采用多维技术指标作为观测空间输入，输出连续仓位信号（-1 到 +1），并映射为 NOFX 标准 `decision.Decision`。实际下单继续走现有 `trader.Trader` 交易所抽象和 `trader.AutoTrader` 执行链路，通过蒙特卡洛模拟和波动率压力测试进行严谨的风险回测。
 
 ## 目标
 
@@ -22,7 +22,7 @@
 - 本阶段不要求实现分布式训练或 GPU 集群支持；单机 CPU/GPU 训练即可。
 - 本阶段不要求实现 PMformer（部分多变量 Transformer）预测增强；预留接口但不实现。
 - 本阶段不要求支持多资产组合级 DRL（如 A2C/SAC 多币同时决策）；聚焦单币 PPO。
-- 本阶段不要求用 CCXT 替换现有交易所连接器；DRL 策略输出仍走现有执行链路。
+- 本阶段不引入 CCXT 执行层，也不替换现有 Binance Futures、Hyperliquid、Aster 连接器；DRL 策略输出仍走现有执行链路。
 - 本阶段不要求保证策略盈利，所有行为只保证可配置、可训练、可回测、可验证。
 - 本阶段不实现稳定币避险的自动对冲执行；仅在回测报告中提供模拟分析。
 
@@ -54,6 +54,7 @@
 4. WHEN 同一系统运行多个 trader THEN 每个 trader SHALL 可独立选择 `drl` 模式，互不影响。
 5. WHEN DRL 策略运行 THEN 现有公共风控层（熔断、回撤硬停、交易计划、保护单同步、open gate、仓位 sizing）SHALL 可覆盖或拒绝策略输出。
 6. WHEN `decision_mode` 为不支持的值 THEN 配置校验 SHALL 失败并返回清晰中文错误。
+7. WHEN `decision_mode=drl` THEN 配置归一化 SHALL 显式分流 DRL，不得将该 trader 透传给 programmatic/chanlun 归一化逻辑。
 
 ### 2. DRL 策略配置
 
@@ -68,6 +69,7 @@
 5. WHEN 配置指定 `timeframe` THEN 系统 SHALL 按该时间框架获取行情数据（支持 3m/15m/1h/4h）。
 6. WHEN 配置指定 `action_threshold` THEN Agent 输出绝对值低于阈值时 SHALL 映射为 `wait` 动作。
 7. WHEN 配置指定 `max_position_pct` THEN 单次开仓不得超过账户净值的该比例。
+8. WHEN `decision_mode=drl` THEN `Config.Validate()` 或 `NormalizeDRLStrategy()` SHALL 允许并设置运行时 `AIModel` 标识为 `drl`，且不得要求 Qwen/DeepSeek/custom AI key。
 
 ### 3. 观测空间与特征工程
 
@@ -95,6 +97,7 @@
 5. WHEN 已有空头持仓且 Agent 输出转为正值 THEN SHALL 映射为 `close_short` 后（若超过阈值）再 `open_long`。
 6. WHEN 动作映射完成 THEN 所有输出 SHALL 为标准 `decision.Decision` 结构，包含 Symbol、Action、PositionSizeUSD、Leverage、StopLoss、TakeProfit、Confidence 和 Reasoning。
 7. WHEN Confidence 字段生成 THEN SHALL 基于 Agent 输出绝对值映射到 [0, 100] 区间。
+8. WHEN DRL 输出 `close_long`、`close_short`、`partial_close`、`update_stop_loss` 等风险降低动作 THEN SHALL 通过 `decision.ValidateRiskReducingStrategyDecisions()` 校验持仓方向、持仓存在性和动作安全性。
 
 ### 5. PPO 训练环境
 
@@ -154,6 +157,7 @@
 
 1. WHEN DRL 策略生成决策 THEN `FullDecision.StrategyDiagnostics` SHALL 包含：当前观测向量摘要、Agent 原始输出值、动作映射结果、模型版本。
 2. WHEN DRL 策略生成决策 THEN `FullDecision.CoTTrace` SHALL 包含人类可读的决策推理链（如"RSI=72 超买 + MACD 死叉 → Agent 输出 -0.65 → 开空 65% 仓位"）。
-3. WHEN API 请求 `/api/strategy/drl/status` THEN SHALL 返回模型版本、最后推理时间、累计推理次数、平均推理耗时。
-4. WHEN API 请求 `/api/strategy/drl/features` THEN SHALL 返回最近一次观测向量的完整特征值和标准化前后对比。
-5. WHEN DRL 策略触发交易动作 THEN 决策日志 SHALL 记录完整上下文，格式与现有 AI/programmatic 日志一致。
+3. WHEN API 请求 `GET /api/strategy/drl/status?trader_id={id}` THEN SHALL 返回该 trader 的模型版本、最后推理时间、累计推理次数、平均推理耗时。
+4. WHEN API 请求 `GET /api/strategy/drl/features?trader_id={id}` THEN SHALL 返回该 trader 最近一次观测向量的完整特征值和标准化前后对比。
+5. IF API 请求的 trader 不是 `decision_mode=drl` THEN SHALL 返回清晰中文错误（如 "trader不是DRL策略模式: {trader_id}"）。
+6. WHEN DRL 策略触发交易动作 THEN 决策日志 SHALL 记录完整上下文，格式与现有 AI/programmatic 日志一致。
