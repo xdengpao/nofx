@@ -12,11 +12,17 @@ services:
       - "${NOFX_BACKEND_PORT:-8080}:8080"
     volumes:
       - ./config.json:/app/config.json:ro
-      - ./data:/app/data
-      - ./decision_logs:/app/decision_logs
+      - ${NOFX_RUNTIME_HOST_PATH:-./runtime}:/app/runtime
       - /etc/localtime:/etc/localtime:ro  # Sync host time
     environment:
       - TZ=${NOFX_TIMEZONE:-Asia/Shanghai}  # Set timezone
+      - NOFX_STORAGE_ROOT=${NOFX_CONTAINER_STORAGE_ROOT:-/app/runtime}
+      - NOFX_CONTAINER_STORAGE_ROOT=${NOFX_CONTAINER_STORAGE_ROOT:-/app/runtime}
+      - NOFX_RUNTIME_HOST_PATH=${NOFX_RUNTIME_HOST_PATH:-./runtime}
+      - NOFX_DRL_TRAIN_API_ENABLED=${NOFX_DRL_TRAIN_API_ENABLED:-false}
+      - NOFX_DRL_TRAIN_PYTHON_BIN=${NOFX_DRL_TRAIN_PYTHON_BIN:-python3}
+      - NOFX_STORAGE_DISK_TOTAL_BYTES=${NOFX_STORAGE_DISK_TOTAL_BYTES:-}
+      - NOFX_STORAGE_DISK_FREE_BYTES=${NOFX_STORAGE_DISK_FREE_BYTES:-}
     networks:
       - nofx-network
     healthcheck:
@@ -35,6 +41,8 @@ services:
     restart: unless-stopped
     ports:
       - "${NOFX_FRONTEND_PORT:-3000}:80"
+    volumes:
+      - ${NOFX_FRONTEND_HTPASSWD_PATH:-./nginx/.htpasswd.example}:/etc/nginx/.htpasswd:ro
     networks:
       - nofx-network
     depends_on:

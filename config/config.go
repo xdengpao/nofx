@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -253,6 +254,22 @@ type StrategyRiskConfig struct {
 	SafeMode                 StrategySafeModeConfig    `json:"safe_mode,omitempty"`
 }
 
+// StorageConfig 控制 NOFX 运行时和训练产物的统一存储根目录。
+type StorageConfig struct {
+	Root               string `json:"root,omitempty"`
+	AllowExternalPaths bool   `json:"allow_external_paths,omitempty"`
+}
+
+// DRLPPOTrainConfig 控制 DRL-PPO 训练 API 和训练进程参数。
+type DRLPPOTrainConfig struct {
+	Enabled        bool   `json:"enabled,omitempty"`
+	MaxConcurrency int    `json:"max_concurrency,omitempty"`
+	PythonBin      string `json:"python_bin,omitempty"`
+	TrainScript    string `json:"train_script,omitempty"`
+	EvaluateScript string `json:"evaluate_script,omitempty"`
+	LogTailBytes   int64  `json:"log_tail_bytes,omitempty"`
+}
+
 // InstrumentProfileConfig 是品种级风控覆盖项。百分数字段可写 1.0 或 0.01，都会归一化为 ratio 0.01。
 type InstrumentProfileConfig struct {
 	Name                string   `json:"name"`
@@ -363,6 +380,8 @@ type Config struct {
 	MaxDrawdown          float64                    `json:"max_drawdown"`
 	StopTradingMinutes   int                        `json:"stop_trading_minutes"`
 	Leverage             LeverageConfig             `json:"leverage"` // 杠杆配置
+	Storage              StorageConfig              `json:"storage,omitempty"`
+	DRLPPOTrain          DRLPPOTrainConfig          `json:"drl_ppo_train,omitempty"`
 }
 
 // LoadConfig 从文件加载配置
@@ -410,6 +429,58 @@ func LoadConfig(filename string) (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+// EffectiveDRLPPOTrainConfig 返回合并环境变量后的 DRL-PPO 训练配置。
+func (c *Config) EffectiveDRLPPOTrainConfig() DRLPPOTrainConfig {
+	cfg := DRLPPOTrainConfig{}
+	if c != nil {
+		cfg = c.DRLPPOTrain
+	}
+	if value := strings.TrimSpace(os.Getenv("NOFX_DRL_TRAIN_API_ENABLED")); value != "" {
+		cfg.Enabled = parseEnvBool(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("NOFX_DRL_TRAIN_MAX_CONCURRENCY")); value != "" {
+		if parsed, err := parsePositiveEnvInt(value); err == nil {
+			cfg.MaxConcurrency = parsed
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv("NOFX_DRL_TRAIN_PYTHON_BIN")); value != "" {
+		cfg.PythonBin = value
+	}
+	if cfg.MaxConcurrency <= 0 {
+		cfg.MaxConcurrency = 1
+	}
+	if strings.TrimSpace(cfg.PythonBin) == "" {
+		cfg.PythonBin = "python3"
+	}
+	if strings.TrimSpace(cfg.TrainScript) == "" {
+		cfg.TrainScript = "training/drl/scripts/train.py"
+	}
+	if strings.TrimSpace(cfg.EvaluateScript) == "" {
+		cfg.EvaluateScript = "training/drl/scripts/evaluate.py"
+	}
+	if cfg.LogTailBytes <= 0 {
+		cfg.LogTailBytes = 256 * 1024
+	}
+	return cfg
+}
+
+func parseEnvBool(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "y", "on", "enabled":
+		return true
+	default:
+		return false
+	}
+}
+
+func parsePositiveEnvInt(value string) (int, error) {
+	out, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || out <= 0 {
+		return 0, fmt.Errorf("环境变量必须是正整数: %s", value)
+	}
+	return out, nil
 }
 
 // ApplyDefaults 设置动态候选池默认值。

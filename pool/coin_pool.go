@@ -78,6 +78,16 @@ func SetOITopAPI(apiURL string) {
 	oiTopConfig.APIURL = apiURL
 }
 
+// SetCacheDir 设置 AI500 和 OI Top 的本地缓存目录。
+func SetCacheDir(cacheDir string) {
+	cacheDir = strings.TrimSpace(cacheDir)
+	if cacheDir == "" {
+		return
+	}
+	coinPoolConfig.CacheDir = cacheDir
+	oiTopConfig.CacheDir = cacheDir
+}
+
 // SetUseDefaultCoins 设置是否使用默认主流币种
 func SetUseDefaultCoins(useDefault bool) {
 	coinPoolConfig.UseDefaultCoins = useDefault

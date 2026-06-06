@@ -12,19 +12,21 @@ import (
 
 	"nofx/backtest"
 	"nofx/historydb"
+	"nofx/storage"
 
 	"github.com/gin-gonic/gin"
 )
 
 type backtestJob struct {
-	RunID     string            `json:"run_id"`
-	Type      string            `json:"type"`
-	Status    string            `json:"status"`
-	Progress  backtest.Progress `json:"progress,omitempty"`
-	StartedAt time.Time         `json:"started_at"`
-	EndedAt   time.Time         `json:"ended_at,omitempty"`
-	Error     string            `json:"error,omitempty"`
-	cancel    context.CancelFunc
+	RunID        string                  `json:"run_id"`
+	Type         string                  `json:"type"`
+	Status       string                  `json:"status"`
+	Progress     backtest.Progress       `json:"progress,omitempty"`
+	FetchSummary *historydb.FetchSummary `json:"fetch_summary,omitempty"`
+	StartedAt    time.Time               `json:"started_at"`
+	EndedAt      time.Time               `json:"ended_at,omitempty"`
+	Error        string                  `json:"error,omitempty"`
+	cancel       context.CancelFunc
 }
 
 type backtestJobManager struct {
@@ -54,7 +56,12 @@ func (s *Server) registerBacktestRoutes(group *gin.RouterGroup) {
 }
 
 func (s *Server) handleBacktestHistoryKlines(c *gin.Context) {
-	store, err := historydb.Open(c.DefaultQuery("db", backtest.DefaultHistoryDBPath))
+	dbPath, err := s.resolveBacktestPath(c.Query("db"), backtest.DefaultHistoryDBPath, s.defaultBacktestHistoryDBPath())
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	store, err := historydb.Open(dbPath)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -103,7 +110,12 @@ func (s *Server) handleBacktestHealth(c *gin.Context) {
 }
 
 func (s *Server) handleBacktestHistoryInspect(c *gin.Context) {
-	store, err := historydb.Open(c.DefaultQuery("db", backtest.DefaultHistoryDBPath))
+	dbPath, err := s.resolveBacktestPath(c.Query("db"), backtest.DefaultHistoryDBPath, s.defaultBacktestHistoryDBPath())
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	store, err := historydb.Open(dbPath)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -153,7 +165,12 @@ func (s *Server) handleBacktestHistoryFetch(c *gin.Context) {
 	ctx, cancel := context.WithCancel(context.Background())
 	job := localBacktestJobs.start("history_fetch", cancel)
 	go func() {
-		store, err := historydb.Open(defaultString(req.DB, backtest.DefaultHistoryDBPath))
+		dbPath, pathErr := s.resolveBacktestPath(req.DB, backtest.DefaultHistoryDBPath, s.defaultBacktestHistoryDBPath())
+		if pathErr != nil {
+			localBacktestJobs.fail(job.RunID, pathErr)
+			return
+		}
+		store, err := historydb.Open(dbPath)
 		if err != nil {
 			localBacktestJobs.fail(job.RunID, err)
 			return
@@ -168,6 +185,7 @@ func (s *Server) handleBacktestHistoryFetch(c *gin.Context) {
 			DataTo:     to,
 			RateLimit:  req.RateLimit,
 		})
+		job.FetchSummary = &summary
 		job.Progress = backtest.Progress{RunID: summary.ID, Status: summary.Status, Executions: summary.InsertedCount, Rejections: len(summary.Failed)}
 		if err != nil {
 			localBacktestJobs.fail(job.RunID, err)
@@ -203,7 +221,12 @@ func (s *Server) handleBacktestHistoryGaps(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	store, err := historydb.Open(defaultString(req.DB, backtest.DefaultHistoryDBPath))
+	dbPath, err := s.resolveBacktestPath(req.DB, backtest.DefaultHistoryDBPath, s.defaultBacktestHistoryDBPath())
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	store, err := historydb.Open(dbPath)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -224,6 +247,10 @@ func (s *Server) handleBacktestRuns(c *gin.Context) {
 func (s *Server) handleBacktestRun(c *gin.Context) {
 	var cfg backtest.BacktestConfig
 	if err := c.ShouldBindJSON(&cfg); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := s.resolveBacktestConfigPaths(&cfg); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -288,7 +315,7 @@ func (s *Server) handleBacktestCancel(c *gin.Context) {
 }
 
 func (s *Server) handleBacktestReport(c *gin.Context) {
-	path := filepath.Join(backtest.DefaultOutputDir, filepath.Base(c.Param("run_id")), "report.json")
+	path := filepath.Join(s.defaultBacktestOutputDir(), filepath.Base(c.Param("run_id")), "report.json")
 	c.File(path)
 }
 
@@ -300,7 +327,7 @@ func (s *Server) handleBacktestReportFile(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "非法文件路径"})
 		return
 	}
-	path := filepath.Join(backtest.DefaultOutputDir, runID, clean)
+	path := filepath.Join(s.defaultBacktestOutputDir(), runID, clean)
 	if strings.HasSuffix(clean, ".json") {
 		var raw json.RawMessage
 		data, err := os.ReadFile(path)
@@ -375,4 +402,53 @@ func defaultString(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func (s *Server) defaultBacktestHistoryDBPath() string {
+	if s != nil && s.storageLayout != nil && strings.TrimSpace(s.storageLayout.HistoryDB) != "" {
+		return s.storageLayout.HistoryDB
+	}
+	return backtest.DefaultHistoryDBPath
+}
+
+func (s *Server) defaultBacktestOutputDir() string {
+	if s != nil && s.storageLayout != nil && strings.TrimSpace(s.storageLayout.BacktestRuns) != "" {
+		return s.storageLayout.BacktestRuns
+	}
+	return backtest.DefaultOutputDir
+}
+
+func (s *Server) resolveBacktestPath(value, legacyDefault, layoutDefault string) (string, error) {
+	value = strings.TrimSpace(value)
+	if s == nil || s.storageLayout == nil || strings.TrimSpace(s.storageLayout.Root) == "" {
+		return defaultString(value, legacyDefault), nil
+	}
+	if value == "" || filepath.Clean(value) == filepath.Clean(legacyDefault) {
+		return layoutDefault, nil
+	}
+	return storage.ResolveUnderRoot(*s.storageLayout, value)
+}
+
+func (s *Server) resolveBacktestConfigPaths(cfg *backtest.BacktestConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	historyDB, err := s.resolveBacktestPath(cfg.HistoryDB, backtest.DefaultHistoryDBPath, s.defaultBacktestHistoryDBPath())
+	if err != nil {
+		return err
+	}
+	outputDir, err := s.resolveBacktestPath(cfg.OutputDir, backtest.DefaultOutputDir, s.defaultBacktestOutputDir())
+	if err != nil {
+		return err
+	}
+	cfg.HistoryDB = historyDB
+	cfg.OutputDir = outputDir
+	if s != nil && s.storageLayout != nil && strings.TrimSpace(s.storageLayout.Root) != "" && strings.TrimSpace(cfg.Strategy.DRLStrategy.ModelPath) != "" {
+		modelPath, err := storage.ResolveUnderRoot(*s.storageLayout, cfg.Strategy.DRLStrategy.ModelPath)
+		if err != nil {
+			return err
+		}
+		cfg.Strategy.DRLStrategy.ModelPath = modelPath
+	}
+	return nil
 }

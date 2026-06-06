@@ -8,8 +8,10 @@ import (
 	"nofx/api"
 	"nofx/config"
 	"nofx/decision"
+	"nofx/drltrain"
 	"nofx/manager"
 	"nofx/pool"
+	"nofx/storage"
 	"nofx/trader"
 	"os"
 	"os/signal"
@@ -55,18 +57,23 @@ func main() {
 		log.Fatalf("❌ 配置加载失败: %v", err)
 	}
 
-	// 初始化数据目录
-	if err := ensureDataDir(DefaultDataDir); err != nil {
-		log.Fatalf("❌ 创建数据目录失败: %v", err)
+	runtimeCfg, err := storage.ResolveRuntimeConfig(cfg.Storage, storage.EnvMapFromOS(), "")
+	if err != nil {
+		log.Fatalf("❌ 解析存储配置失败: %v", err)
 	}
+	layout := storage.NewLayout(runtimeCfg)
+	if err := storage.EnsureLayout(layout); err != nil {
+		log.Fatalf("❌ 初始化存储目录失败: %v", err)
+	}
+	log.Printf("✓ 存储根目录已就绪: %s (source=%s)", layout.Root, runtimeCfg.RootSource)
 
 	// 初始化各模块
-	if err := initializeModules(cfg); err != nil {
+	if err := initializeModulesWithLayout(cfg, layout); err != nil {
 		log.Fatalf("❌ 模块初始化失败: %v", err)
 	}
 
 	// 创建并配置TraderManager
-	traderManager, err := setupTraderManager(cfg)
+	traderManager, err := setupTraderManagerWithLayout(cfg, layout)
 	if err != nil {
 		log.Fatalf("❌ TraderManager设置失败: %v", err)
 	}
@@ -79,8 +86,29 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	trainCfg := cfg.EffectiveDRLPPOTrainConfig()
+	var trainManager *drltrain.Manager
+	if trainCfg.Enabled {
+		trainManager, err = drltrain.NewManager(drltrain.Config{
+			Layout:         layout,
+			PythonBin:      trainCfg.PythonBin,
+			TrainScript:    trainCfg.TrainScript,
+			EvaluateScript: trainCfg.EvaluateScript,
+			MaxConcurrency: trainCfg.MaxConcurrency,
+			LogTailBytes:   trainCfg.LogTailBytes,
+		})
+		if err != nil {
+			log.Fatalf("❌ DRL-PPO训练模块初始化失败: %v", err)
+		}
+		log.Printf("✓ DRL-PPO训练API已启用，并发上限: %d", trainCfg.MaxConcurrency)
+	}
+
 	// 启动API服务器
-	apiServer := api.NewServer(traderManager, cfg.APIServerPort)
+	apiServer := api.NewServerWithOptions(traderManager, cfg.APIServerPort, api.ServerOptions{
+		StorageRuntime: &runtimeCfg,
+		StorageLayout:  &layout,
+		DRLTrain:       trainManager,
+	})
 	apiServerErr := make(chan error, 1)
 	go func() {
 		if err := apiServer.Start(); err != nil && err != http.ErrServerClosed {
@@ -183,6 +211,10 @@ func ensureDataDir(dataDir string) error {
 
 // initializeModules 初始化各个模块
 func initializeModules(cfg *config.Config) error {
+	return initializeModulesWithLayout(cfg, storage.Layout{Data: DefaultDataDir, CoinPoolCache: "coin_pool_cache", DecisionLogs: "decision_logs"})
+}
+
+func initializeModulesWithLayout(cfg *config.Config, layout storage.Layout) error {
 	frequencyProfile, err := cfg.NormalizeTradingFrequency()
 	if err != nil {
 		return err
@@ -205,10 +237,21 @@ func initializeModules(cfg *config.Config) error {
 		pool.SetOITopAPI(cfg.OITopAPIURL)
 		log.Printf("✓ 已配置OI Top API")
 	}
+	if strings.TrimSpace(layout.CoinPoolCache) != "" {
+		pool.SetCacheDir(layout.CoinPoolCache)
+	}
 
 	promptCandidateLimit := cfg.DynamicCandidatePool.PromptCandidateLimit
 	if !frequencyProfile.Legacy {
 		promptCandidateLimit = frequencyProfile.PromptCandidateLimit
+	}
+	snapshotPath := cfg.DynamicCandidatePool.SnapshotPath
+	if strings.TrimSpace(layout.Root) != "" && strings.TrimSpace(snapshotPath) != "" {
+		if resolved, err := storage.ResolveUnderRoot(layout, snapshotPath); err == nil {
+			snapshotPath = resolved
+		} else {
+			return fmt.Errorf("动态候选池快照路径无效: %w", err)
+		}
 	}
 	pool.SetDynamicCandidatePoolConfig(pool.DynamicCandidatePoolConfig{
 		Enabled:                 cfg.DynamicCandidatePool.IsEnabled(),
@@ -222,7 +265,7 @@ func initializeModules(cfg *config.Config) error {
 		MinQuoteVolume24hUSD:    cfg.DynamicCandidatePool.MinQuoteVolume24hUSD,
 		CooldownDaysAfterLosses: cfg.DynamicCandidatePool.CooldownDaysAfterLosses,
 		ExchangeVolumeTopLimit:  cfg.DynamicCandidatePool.ExchangeVolumeTopLimit,
-		SnapshotPath:            cfg.DynamicCandidatePool.SnapshotPath,
+		SnapshotPath:            snapshotPath,
 	})
 
 	// 2. 初始化决策模块
@@ -233,7 +276,7 @@ func initializeModules(cfg *config.Config) error {
 		AnalysisIntervalMin:   frequencyProfile.AnalysisIntervalMinutes,
 		BTCETHLeverage:        cfg.Leverage.BTCETHLeverage,
 		AltcoinLeverage:       cfg.Leverage.AltcoinLeverage,
-		DataDir:               DefaultDataDir,
+		DataDir:               firstNonEmpty(layout.Data, DefaultDataDir),
 		RiskFreeRate:          0.0,
 	}
 
@@ -247,7 +290,14 @@ func initializeModules(cfg *config.Config) error {
 
 // setupTraderManager 设置并配置TraderManager
 func setupTraderManager(cfg *config.Config) (*manager.TraderManager, error) {
+	return setupTraderManagerWithLayout(cfg, storage.Layout{})
+}
+
+func setupTraderManagerWithLayout(cfg *config.Config, layout storage.Layout) (*manager.TraderManager, error) {
 	traderManager := manager.NewTraderManager()
+	if strings.TrimSpace(layout.Root) != "" {
+		traderManager.SetStorageLayout(layout)
+	}
 	frequencyProfile, err := cfg.NormalizeTradingFrequency()
 	if err != nil {
 		return nil, err
@@ -302,6 +352,13 @@ func setupTraderManager(cfg *config.Config) (*manager.TraderManager, error) {
 	}
 
 	return traderManager, nil
+}
+
+func firstNonEmpty(value, fallback string) string {
+	if strings.TrimSpace(value) != "" {
+		return value
+	}
+	return fallback
 }
 
 // handleAutoClose 处理自动平仓事件

@@ -35,6 +35,7 @@ config.json.bak*
 # 环境变量
 .env
 config.json
+nginx/.htpasswd
 
 # 决策日志
 decision_logs/
@@ -42,6 +43,8 @@ coin_pool_cache/
 data/
 data/trade_plans.json
 data/dynamic_candidate_pool.json
+runtime/
+logs/
 nofx_test
 !training/drl/data/
 !training/drl/data/**
@@ -58,6 +61,10 @@ backtest_runs/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+models/drl/*.zip
+models/drl/*.onnx
+models/drl/**/*.zip
+models/drl/**/*.onnx
 
 # Node.js
 web/node_modules/

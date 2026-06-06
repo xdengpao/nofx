@@ -6,18 +6,21 @@
 # Versions extracted as ARGs for maintainability
 # ═══════════════════════════════════════════════════════════════
 
-ARG GO_VERSION=1.25-alpine
-ARG ALPINE_VERSION=latest
+ARG GO_VERSION=1.25-bookworm
+ARG DEBIAN_VERSION=bookworm
+ARG PYTHON_VERSION=3.11
+ARG TORCH_VERSION=2.7.1
 ARG TA_LIB_VERSION=0.4.0
 
 # ──────────────────────────────────────────────────────────────
 # TA-Lib Build Stage (shared across builds)
 # ──────────────────────────────────────────────────────────────
-FROM alpine:${ALPINE_VERSION} AS ta-lib-builder
+FROM debian:${DEBIAN_VERSION}-slim AS ta-lib-builder
 ARG TA_LIB_VERSION
 
-RUN apk update && apk add --no-cache \
-    wget tar make gcc g++ musl-dev autoconf automake
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates wget tar make gcc g++ autoconf automake \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-${TA_LIB_VERSION}-src.tar.gz && \
     tar -xzf ta-lib-${TA_LIB_VERSION}-src.tar.gz && \
@@ -36,9 +39,11 @@ RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-${TA_LIB_VERSION}-src.
 # ──────────────────────────────────────────────────────────────
 # Rust Chanlun V2 Build Stage
 # ──────────────────────────────────────────────────────────────
-FROM rust:1.83-alpine AS rust-builder
+FROM rust:1.83-bookworm AS rust-builder
 
-RUN apk add --no-cache musl-dev
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 COPY chanlun_v2/ .
@@ -50,29 +55,46 @@ RUN cargo build --release && \
 # ──────────────────────────────────────────────────────────────
 FROM golang:${GO_VERSION} AS backend-builder
 
-RUN apk update && apk add --no-cache git make gcc g++ musl-dev
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git make gcc g++ libc6-dev ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ta-lib-builder /usr/local /usr/local
 COPY --from=rust-builder /usr/local/lib/libchanlun_v2.a /usr/local/lib/
+
+ENV LD_LIBRARY_PATH=/usr/local/lib
 
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w" -o nofx .
+RUN ldconfig && CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w" -o nofx .
 
 # ──────────────────────────────────────────────────────────────
-# Runtime Stage (Minimal Executable Environment)
+# Runtime Stage (Backend + DRL-PPO training environment)
 # ──────────────────────────────────────────────────────────────
-FROM alpine:${ALPINE_VERSION}
+FROM python:${PYTHON_VERSION}-slim-bookworm
+ARG TORCH_VERSION
 
-RUN apk update && apk add --no-cache ca-certificates tzdata libgcc
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    LD_LIBRARY_PATH=/usr/local/lib
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates tzdata wget libgcc-s1 \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ta-lib-builder /usr/local /usr/local
 COPY --from=rust-builder /usr/local/lib/libchanlun_v2.a /usr/local/lib/
 WORKDIR /app
 COPY --from=backend-builder /app/nofx .
+COPY --from=backend-builder /app/training/drl/requirements.txt ./training/drl/requirements.txt
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==${TORCH_VERSION}+cpu" \
+    && python -m pip install -r training/drl/requirements.txt
+COPY --from=backend-builder /app/training/drl ./training/drl
 
 EXPOSE 8080
 

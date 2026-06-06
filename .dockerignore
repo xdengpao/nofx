@@ -20,6 +20,8 @@ nofx
 nofx_test
 .tools/
 .cache/
+target/
+chanlun_v2/target/
 *.exe
 *.dll
 *.so
@@ -36,9 +38,14 @@ docs/
 
 # Runtime data
 data/
+runtime/
 backups/
 decision_logs/
 coin_pool_cache/
+backtest_data/
+backtest_runs/
+logs/
+models/drl/
 *.log
 config.json.bak*
 *.bak
@@ -47,10 +54,14 @@ config.json.bak*
 config.json
 .env
 .env.*
+nginx/.htpasswd
 
 # Web build artifacts (but include source for multi-stage build)
 web/node_modules/
 web/dist/
+training/drl/.venv/
+training/drl/.pytest_cache/
+training/drl/**/__pycache__/
 
 # Temporary files
 tmp/

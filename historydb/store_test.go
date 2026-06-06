@@ -38,6 +38,122 @@ func TestStoreSchemaUpsertAndQuery(t *testing.T) {
 	}
 }
 
+func TestHasKlineCoverageUsesOpenTimeForRangeStart(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	klines := fixtureKlines(start, 2, 3*time.Minute)
+	if _, _, err := store.UpsertKlines(ctx, "binance-futures", "BNBUSDT", "3m", klines); err != nil {
+		t.Fatalf("写入失败: %v", err)
+	}
+	ok, detail, gaps, err := store.CheckKlineCoverage(ctx, "binance-futures", "BNBUSDT", "3m", start, start.Add(6*time.Minute))
+	if err != nil {
+		t.Fatalf("覆盖检查失败: %v", err)
+	}
+	if !ok || detail != "" || len(gaps) != 0 {
+		t.Fatalf("首根K线open_time等于from时应覆盖充足 ok=%v detail=%q gaps=%+v", ok, detail, gaps)
+	}
+}
+
+func TestCheckKlineCoverageReportsBoundaryMissingRanges(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	start := time.Date(2026, 1, 1, 0, 3, 0, 0, time.UTC)
+	klines := fixtureKlines(start, 1, 3*time.Minute)
+	if _, _, err := store.UpsertKlines(ctx, "binance-futures", "BNBUSDT", "3m", klines); err != nil {
+		t.Fatalf("写入失败: %v", err)
+	}
+	ok, detail, gaps, err := store.CheckKlineCoverage(ctx, "binance-futures", "BNBUSDT", "3m", start.Add(-3*time.Minute), start.Add(9*time.Minute))
+	if err != nil {
+		t.Fatalf("覆盖检查失败: %v", err)
+	}
+	if ok {
+		t.Fatal("边界缺失时不应通过覆盖检查")
+	}
+	if detail == "" || len(gaps) != 2 {
+		t.Fatalf("应返回起始和结束缺失区间 detail=%q gaps=%+v", detail, gaps)
+	}
+	if gaps[0].IssueType != "missing_start" || gaps[0].StartTimeMS != start.Add(-3*time.Minute).UnixMilli() || gaps[0].EndTimeMS != start.UnixMilli() {
+		t.Fatalf("起始缺失区间错误: %+v", gaps[0])
+	}
+	if gaps[1].IssueType != "missing_end" || gaps[1].StartTimeMS != klines[0].CloseTime+1 || gaps[1].EndTimeMS != start.Add(9*time.Minute).UnixMilli() {
+		t.Fatalf("结束缺失区间错误: %+v", gaps[1])
+	}
+}
+
+func TestStoreOpenConfiguresSQLiteBusyTimeout(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	var got int
+	if err := store.DB().QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&got); err != nil {
+		t.Fatalf("读取busy_timeout失败: %v", err)
+	}
+	if got != sqliteBusyTimeoutMS {
+		t.Fatalf("busy_timeout应为%d，got %d", sqliteBusyTimeoutMS, got)
+	}
+}
+
+func TestUpsertKlinesWaitsForConcurrentWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "history.sqlite")
+	first, err := Open(path)
+	if err != nil {
+		t.Fatalf("打开第一个历史库失败: %v", err)
+	}
+	defer first.Close()
+	second, err := Open(path)
+	if err != nil {
+		t.Fatalf("打开第二个历史库失败: %v", err)
+	}
+	defer second.Close()
+
+	ctx := context.Background()
+	tx, err := first.DB().BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("启动写事务失败: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO quality_issues(
+		id, source, symbol, timeframe, issue_type, start_time_ms, end_time_ms, detail, detected_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, "hold-lock", "binance-futures", "BTCUSDT", "3m", "test", int64(1), int64(2), "hold sqlite writer lock", time.Now().UTC().Format(time.RFC3339)); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("保持写锁失败: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		klines := fixtureKlines(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), 2, 3*time.Minute)
+		inserted, _, err := second.UpsertKlines(ctx, "binance-futures", "ASTERUSDT", "3m", klines)
+		if err != nil {
+			done <- err
+			return
+		}
+		if inserted != 2 {
+			done <- fmt.Errorf("写入数量错误: %d", inserted)
+			return
+		}
+		done <- nil
+	}()
+
+	select {
+	case err := <-done:
+		_ = tx.Rollback()
+		t.Fatalf("并发写入不应在锁释放前结束: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("释放写锁失败: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("锁释放后写入应成功: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("锁释放后写入仍未完成")
+	}
+}
+
 func TestLastClosedKlinesFiltersAsOf(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()

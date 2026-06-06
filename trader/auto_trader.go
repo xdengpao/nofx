@@ -14,6 +14,7 @@ import (
 	"nofx/strategy/chanlun"
 	"nofx/strategy/chanlunv2"
 	"nofx/strategy/drl"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -30,10 +31,11 @@ type ChanlunV2EngineInterface interface {
 // AutoTraderConfig 自动交易配置（简化版 - AI全权决策）
 type AutoTraderConfig struct {
 	// Trader标识
-	ID           string // Trader唯一标识（用于日志目录等）
-	Name         string // Trader显示名称
-	AIModel      string // AI模型: "qwen" 或 "deepseek"
-	DecisionMode string // ai、programmatic、chanlun_v2 或 drl
+	ID              string // Trader唯一标识（用于日志目录等）
+	Name            string // Trader显示名称
+	AIModel         string // AI模型: "qwen" 或 "deepseek"
+	DecisionMode    string // ai、programmatic、chanlun_v2 或 drl
+	DecisionLogRoot string // 决策日志根目录
 
 	// 交易平台选择
 	Exchange string // "binance", "hyperliquid" 或 "aster"
@@ -88,6 +90,9 @@ type AutoTraderConfig struct {
 	ProgrammaticStrategyPolicy decision.ProgrammaticStrategyPolicy
 	ChanlunV2StrategyConfig    config.ChanlunV2StrategyConfig
 	DRLStrategyConfig          config.DRLStrategyConfig
+	DRLHistoryDB               string
+	DRLModelOutputDir          string
+	DRLModelArchiveDir         string
 }
 
 const (
@@ -252,7 +257,10 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		chanlunV2Engine = v2Eng
 		log.Printf("🧮 [%s] 使用缠论V2策略 (Rust引擎)", config.Name)
 	} else if config.DecisionMode == "drl" {
-		engine, engineErr := drl.NewEngine(config.DRLStrategyConfig)
+		engine, engineErr := drl.NewEngine(
+			config.DRLStrategyConfig,
+			drl.WithLifecyclePaths(config.DRLHistoryDB, config.DRLModelOutputDir, config.DRLModelArchiveDir),
+		)
 		if engineErr != nil {
 			return nil, fmt.Errorf("初始化DRL策略引擎失败: %w", engineErr)
 		}
@@ -320,7 +328,11 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 	}
 
 	// 初始化决策日志记录器（使用trader ID创建独立目录）
-	logDir := fmt.Sprintf("decision_logs/%s", config.ID)
+	decisionLogRoot := strings.TrimSpace(config.DecisionLogRoot)
+	if decisionLogRoot == "" {
+		decisionLogRoot = "decision_logs"
+	}
+	logDir := filepath.Join(decisionLogRoot, config.ID)
 	decisionLogger := logger.NewDecisionLogger(logDir)
 
 	at := &AutoTrader{

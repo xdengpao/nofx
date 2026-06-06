@@ -338,6 +338,22 @@
     "exchange_volume_top_limit": 30,
     "snapshot_path": "data/dynamic_candidate_pool.json"
   },
+  "storage": {
+    // 原生运行默认使用 /Volumes/light2/nofx；可改成任意已存在、可写的目录。
+    // Docker Compose 会通过 NOFX_STORAGE_ROOT 覆盖为容器内 /app/runtime，
+    // 宿主机默认挂载项目本地 ./runtime，不会默认挂载外置盘。
+    "root": "/Volumes/light2/nofx",
+    "allow_external_paths": false
+  },
+  "drl_ppo_train": {
+    // 训练 API 默认关闭；原生训练时可设 true，Docker 后端镜像默认仍建议保持 false。
+    "enabled": false,
+    "max_concurrency": 1,
+    "python_bin": "python3",
+    "train_script": "training/drl/scripts/train.py",
+    "evaluate_script": "training/drl/scripts/evaluate.py",
+    "log_tail_bytes": 262144
+  },
   "trading_frequency": {
     // 推荐首次上线使用 balanced：AI新机会分析间隔12分钟，prompt候选10个，高ADX/RR/rolling放宽仅report-only。
     "mode": "balanced",

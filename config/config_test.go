@@ -144,6 +144,21 @@ func TestLoadConfig_NoAPIURL_EnablesDefaultCoins(t *testing.T) {
 	}
 }
 
+func TestEffectiveDRLPPOTrainConfigAppliesEnv(t *testing.T) {
+	cfg := &Config{DRLPPOTrain: DRLPPOTrainConfig{MaxConcurrency: 2, PythonBin: "python"}}
+	t.Setenv("NOFX_DRL_TRAIN_API_ENABLED", "true")
+	t.Setenv("NOFX_DRL_TRAIN_MAX_CONCURRENCY", "3")
+	t.Setenv("NOFX_DRL_TRAIN_PYTHON_BIN", "python3.12")
+
+	effective := cfg.EffectiveDRLPPOTrainConfig()
+	if !effective.Enabled || effective.MaxConcurrency != 3 || effective.PythonBin != "python3.12" {
+		t.Fatalf("环境变量覆盖异常: %+v", effective)
+	}
+	if effective.TrainScript == "" || effective.EvaluateScript == "" || effective.LogTailBytes <= 0 {
+		t.Fatalf("默认训练配置未补齐: %+v", effective)
+	}
+}
+
 func TestLoadConfig_WithAPIURL_KeepsUseDefaultCoinsAsFalse(t *testing.T) {
 	cfg := validConfig()
 	cfg.UseDefaultCoins = false

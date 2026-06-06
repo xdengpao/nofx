@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"nofx/market"
@@ -18,11 +19,15 @@ import (
 )
 
 const SchemaVersion = 1
+const sqliteBusyTimeoutMS = 30000
+
+var historyDBWriteLocks sync.Map
 
 type Store struct {
-	db     *sql.DB
-	path   string
-	source string
+	db      *sql.DB
+	path    string
+	source  string
+	writeMu *sync.Mutex
 }
 
 type KlineRecord struct {
@@ -65,11 +70,13 @@ func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return nil, fmt.Errorf("创建历史数据库目录失败: %w", err)
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", sqliteOpenDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("打开历史数据库失败: %w", err)
 	}
-	store := &Store{db: db, path: path, source: "binance-futures"}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	store := &Store{db: db, path: path, source: "binance-futures", writeMu: writeLockForPath(path)}
 	if err := store.InitSchema(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -78,7 +85,7 @@ func Open(path string) (*Store, error) {
 }
 
 func OpenWithDB(db *sql.DB) *Store {
-	return &Store{db: db, source: "binance-futures"}
+	return &Store{db: db, source: "binance-futures", writeMu: &sync.Mutex{}}
 }
 
 func (s *Store) Close() error {
@@ -152,18 +159,22 @@ func (s *Store) InitSchema(ctx context.Context) error {
 		)`,
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?);`,
 	}
-	for i, stmt := range statements {
-		if i == len(statements)-1 {
-			if _, err := s.db.ExecContext(ctx, stmt, time.Now().UTC().Format(time.RFC3339)); err != nil {
-				return fmt.Errorf("记录schema版本失败: %w", err)
+	return retrySQLiteBusy(ctx, func() error {
+		return s.withWriteLock(func() error {
+			for i, stmt := range statements {
+				if i == len(statements)-1 {
+					if _, err := s.db.ExecContext(ctx, stmt, time.Now().UTC().Format(time.RFC3339)); err != nil {
+						return fmt.Errorf("记录schema版本失败: %w", err)
+					}
+					continue
+				}
+				if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+					return fmt.Errorf("初始化历史库schema失败: %w", err)
+				}
 			}
-			continue
-		}
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("初始化历史库schema失败: %w", err)
-		}
-	}
-	return nil
+			return nil
+		})
+	})
 }
 
 func (s *Store) UpsertKlines(ctx context.Context, source, symbol, timeframe string, klines []market.Kline) (inserted int, duplicates int, err error) {
@@ -181,6 +192,16 @@ func (s *Store) UpsertKlines(ctx context.Context, source, symbol, timeframe stri
 			}
 		}
 	}
+	err = retrySQLiteBusy(ctx, func() error {
+		return s.withWriteLock(func() error {
+			inserted, duplicates, err = s.upsertKlinesOnce(ctx, source, symbol, timeframe, klines)
+			return err
+		})
+	})
+	return inserted, duplicates, err
+}
+
+func (s *Store) upsertKlinesOnce(ctx context.Context, source, symbol, timeframe string, klines []market.Kline) (inserted int, duplicates int, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, 0, err
@@ -308,32 +329,58 @@ func (s *Store) Inspect(ctx context.Context, source string) ([]Coverage, error) 
 		if err := rows.Scan(&c.Source, &c.Symbol, &c.Timeframe, &c.Count, &c.FromMS, &c.ToMS); err != nil {
 			return nil, err
 		}
-		hash, _ := s.DataHash(ctx, c.Source, c.Symbol, c.Timeframe, time.UnixMilli(c.FromMS), time.UnixMilli(c.ToMS+1))
-		c.DataHash = hash
 		result = append(result, c)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range result {
+		hash, _ := s.DataHash(ctx, result[i].Source, result[i].Symbol, result[i].Timeframe, time.UnixMilli(result[i].FromMS), time.UnixMilli(result[i].ToMS+1))
+		result[i].DataHash = hash
+	}
+	return result, nil
 }
 
 func (s *Store) HasKlineCoverage(ctx context.Context, source, symbol, timeframe string, from, to time.Time) (bool, string, error) {
+	ok, detail, _, err := s.CheckKlineCoverage(ctx, source, symbol, timeframe, from, to)
+	return ok, detail, err
+}
+
+func (s *Store) CheckKlineCoverage(ctx context.Context, source, symbol, timeframe string, from, to time.Time) (bool, string, []QualityIssue, error) {
+	source, symbol, timeframe, err := normalizeKey(source, symbol, timeframe)
+	if err != nil {
+		return false, "", nil, err
+	}
+	step := TimeframeDuration(timeframe)
+	if step <= 0 {
+		return false, "", nil, fmt.Errorf("不支持的K线周期: %s", timeframe)
+	}
 	klines, err := s.QueryKlines(ctx, source, symbol, timeframe, from, to)
 	if err != nil {
-		return false, "", err
+		return false, "", nil, err
 	}
 	if len(klines) == 0 {
-		return false, "没有历史K线", nil
+		issues := []QualityIssue{issue(source, symbol, timeframe, "missing_range", from.UnixMilli(), to.UnixMilli(), fmt.Sprintf("请求区间无K线: need_from=%s need_to=%s", from.Format(time.RFC3339), to.Format(time.RFC3339)))}
+		return false, issues[0].Detail, issues, nil
 	}
-	if klines[0].CloseTime > from.UnixMilli() {
-		return false, fmt.Sprintf("起始覆盖不足: first_close=%s need_from=%s", time.UnixMilli(klines[0].CloseTime).Format(time.RFC3339), from.Format(time.RFC3339)), nil
+	issues := make([]QualityIssue, 0)
+	first := klines[0]
+	if first.OpenTime > from.UnixMilli() {
+		issues = append(issues, issue(source, symbol, timeframe, "missing_start", from.UnixMilli(), first.OpenTime, fmt.Sprintf("起始覆盖不足: first_open=%s need_from=%s", time.UnixMilli(first.OpenTime).Format(time.RFC3339), from.Format(time.RFC3339))))
 	}
 	last := klines[len(klines)-1]
-	if last.CloseTime < to.Add(-TimeframeDuration(timeframe)).UnixMilli() {
-		return false, fmt.Sprintf("结束覆盖不足: last_close=%s need_to=%s", time.UnixMilli(last.CloseTime).Format(time.RFC3339), to.Format(time.RFC3339)), nil
+	expectedEnd := to.Add(-time.Millisecond)
+	if last.CloseTime < expectedEnd.UnixMilli() {
+		issues = append(issues, issue(source, symbol, timeframe, "missing_end", last.CloseTime+1, to.UnixMilli(), fmt.Sprintf("结束覆盖不足: last_close=%s need_to=%s", time.UnixMilli(last.CloseTime).Format(time.RFC3339), to.Format(time.RFC3339))))
 	}
-	if gaps := FindGaps(source, symbol, timeframe, klines); len(gaps) > 0 {
-		return false, gaps[0].Detail, nil
+	issues = append(issues, FindGaps(source, symbol, timeframe, klines)...)
+	if len(issues) > 0 {
+		return false, issues[0].Detail, issues, nil
 	}
-	return true, "", nil
+	return true, "", []QualityIssue{}, nil
 }
 
 func (s *Store) DataHash(ctx context.Context, source, symbol, timeframe string, from, to time.Time) (string, error) {
@@ -361,23 +408,92 @@ func (s *Store) RecordQualityIssues(ctx context.Context, issues []QualityIssue) 
 	if len(issues) == 0 {
 		return nil
 	}
-	stmt, err := s.db.PrepareContext(ctx, `INSERT OR REPLACE INTO quality_issues(
-		id, source, symbol, timeframe, issue_type, start_time_ms, end_time_ms, detail, detected_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		return err
+	return retrySQLiteBusy(ctx, func() error {
+		return s.withWriteLock(func() error {
+			stmt, err := s.db.PrepareContext(ctx, `INSERT OR REPLACE INTO quality_issues(
+				id, source, symbol, timeframe, issue_type, start_time_ms, end_time_ms, detail, detected_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			if err != nil {
+				return err
+			}
+			defer stmt.Close()
+			now := time.Now().UTC().Format(time.RFC3339)
+			for _, issue := range issues {
+				if issue.ID == "" {
+					issue.ID = qualityIssueID(issue)
+				}
+				if _, err := stmt.ExecContext(ctx, issue.ID, issue.Source, issue.Symbol, issue.Timeframe, issue.IssueType, issue.StartTimeMS, issue.EndTimeMS, issue.Detail, now); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	})
+}
+
+func (s *Store) withWriteLock(fn func() error) error {
+	if s.writeMu == nil {
+		return fn()
 	}
-	defer stmt.Close()
-	now := time.Now().UTC().Format(time.RFC3339)
-	for _, issue := range issues {
-		if issue.ID == "" {
-			issue.ID = qualityIssueID(issue)
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	return fn()
+}
+
+func sqliteOpenDSN(path string) string {
+	if path == ":memory:" {
+		return path
+	}
+	params := []string{
+		"_pragma=busy_timeout%3d" + fmt.Sprint(sqliteBusyTimeoutMS),
+		"_pragma=journal_mode%3dWAL",
+		"_pragma=synchronous%3dNORMAL",
+	}
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + strings.Join(params, "&")
+}
+
+func writeLockForPath(path string) *sync.Mutex {
+	key := path
+	if abs, err := filepath.Abs(path); err == nil {
+		key = abs
+	}
+	value, _ := historyDBWriteLocks.LoadOrStore(key, &sync.Mutex{})
+	return value.(*sync.Mutex)
+}
+
+func retrySQLiteBusy(ctx context.Context, fn func() error) error {
+	delays := []time.Duration{100 * time.Millisecond, 250 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second}
+	var lastErr error
+	for attempt := 0; attempt <= len(delays); attempt++ {
+		lastErr = fn()
+		if !isSQLiteBusy(lastErr) {
+			return lastErr
 		}
-		if _, err := stmt.ExecContext(ctx, issue.ID, issue.Source, issue.Symbol, issue.Timeframe, issue.IssueType, issue.StartTimeMS, issue.EndTimeMS, issue.Detail, now); err != nil {
-			return err
+		if attempt == len(delays) {
+			return fmt.Errorf("历史数据库忙，等待锁释放超时: %w", lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delays[attempt]):
 		}
 	}
-	return nil
+	return lastErr
+}
+
+func isSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "sqlite_busy") ||
+		strings.Contains(text, "database is locked") ||
+		strings.Contains(text, "database table is locked") ||
+		strings.Contains(text, "database is busy")
 }
 
 func scanKlines(rows *sql.Rows) ([]market.Kline, error) {

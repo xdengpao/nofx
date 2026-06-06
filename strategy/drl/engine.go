@@ -26,6 +26,9 @@ type Engine struct {
 	inferErrorMu           sync.Mutex
 	consecutiveInferErrors int
 	clock                  func() time.Time
+	lifecycleDataPath      string
+	lifecycleOutputDir     string
+	lifecycleArchiveDir    string
 }
 
 type EngineOption func(*Engine)
@@ -62,8 +65,16 @@ func WithValidationDataProvider(provider ValidationDataProvider) EngineOption {
 	}
 }
 
-func NewEngine(cfg config.DRLStrategyConfig) (*Engine, error) {
-	return NewEngineWithBackend(cfg, newDefaultBackend())
+func WithLifecyclePaths(dataPath, outputDir, archiveDir string) EngineOption {
+	return func(e *Engine) {
+		e.lifecycleDataPath = strings.TrimSpace(dataPath)
+		e.lifecycleOutputDir = strings.TrimSpace(outputDir)
+		e.lifecycleArchiveDir = strings.TrimSpace(archiveDir)
+	}
+}
+
+func NewEngine(cfg config.DRLStrategyConfig, opts ...EngineOption) (*Engine, error) {
+	return NewEngineWithBackend(cfg, newDefaultBackend(), opts...)
 }
 
 func NewEngineWithBackend(cfg config.DRLStrategyConfig, backend InferenceBackend, opts ...EngineOption) (*Engine, error) {
@@ -92,6 +103,15 @@ func NewEngineWithBackend(cfg config.DRLStrategyConfig, backend InferenceBackend
 	}
 	if e.Config.AutoRetrain {
 		e.Lifecycle = NewModelLifecycleManager(e, &e.Config)
+		if e.lifecycleDataPath != "" {
+			e.Lifecycle.scheduler.DataPath = e.lifecycleDataPath
+		}
+		if e.lifecycleOutputDir != "" {
+			e.Lifecycle.scheduler.OutputDir = e.lifecycleOutputDir
+		}
+		if e.lifecycleArchiveDir != "" {
+			e.Lifecycle.archiveDir = e.lifecycleArchiveDir
+		}
 		e.Lifecycle.StartScheduler()
 	}
 	return e, nil

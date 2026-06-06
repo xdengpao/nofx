@@ -7,8 +7,10 @@ import (
 	"nofx/config"
 	"nofx/decision"
 	"nofx/market"
+	"nofx/storage"
 	"nofx/strategy/chanlun"
 	"nofx/trader"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -24,6 +26,7 @@ type TraderManager struct {
 	trackerCancel     context.CancelFunc
 	trackerInterval   time.Duration
 	autoCloseCallback func(traderID string, order trader.AutoClosedOrder) // 自动平仓回调
+	storageLayout     *storage.Layout
 }
 
 // NewTraderManager 创建trader管理器
@@ -50,6 +53,13 @@ func (tm *TraderManager) SetTrackerInterval(interval time.Duration) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	tm.trackerInterval = interval
+}
+
+// SetStorageLayout 设置运行时存储布局，用于决策日志和DRL模型路径解析。
+func (tm *TraderManager) SetStorageLayout(layout storage.Layout) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tm.storageLayout = &layout
 }
 
 // AddTrader 添加一个trader
@@ -83,12 +93,30 @@ func (tm *TraderManager) AddTraderWithPolicies(cfg config.TraderConfig, coinPool
 	if _, exists := tm.traders[cfg.ID]; exists {
 		return fmt.Errorf("trader ID '%s' 已存在", cfg.ID)
 	}
+	decisionLogRoot := ""
+	drlHistoryDB := ""
+	drlModelOutputDir := ""
+	drlModelArchiveDir := ""
+	if tm.storageLayout != nil {
+		decisionLogRoot = tm.storageLayout.DecisionLogs
+		drlHistoryDB = tm.storageLayout.HistoryDB
+		drlModelOutputDir = tm.storageLayout.ModelsDRL
+		drlModelArchiveDir = filepath.Join(tm.storageLayout.ModelsDRL, "archive")
+		if cfg.DecisionMode == config.DecisionModeDRL && cfg.DRLStrategy.ModelPath != "" {
+			modelPath, err := storage.ResolveUnderRoot(*tm.storageLayout, cfg.DRLStrategy.ModelPath)
+			if err != nil {
+				return fmt.Errorf("解析DRL模型路径失败: %w", err)
+			}
+			cfg.DRLStrategy.ModelPath = modelPath
+		}
+	}
 
 	// 构建AutoTraderConfig
 	traderConfig := trader.AutoTraderConfig{
 		ID:                      cfg.ID,
 		Name:                    cfg.Name,
 		AIModel:                 cfg.AIModel,
+		DecisionLogRoot:         decisionLogRoot,
 		Exchange:                cfg.Exchange,
 		BinanceAPIKey:           cfg.BinanceAPIKey,
 		BinanceSecretKey:        cfg.BinanceSecretKey,
@@ -121,6 +149,9 @@ func (tm *TraderManager) AddTraderWithPolicies(cfg config.TraderConfig, coinPool
 		DecisionMode:            cfg.DecisionMode,
 		ChanlunV2StrategyConfig: cfg.ChanlunV2Strategy,
 		DRLStrategyConfig:       cfg.DRLStrategy,
+		DRLHistoryDB:            drlHistoryDB,
+		DRLModelOutputDir:       drlModelOutputDir,
+		DRLModelArchiveDir:      drlModelArchiveDir,
 	}
 	if len(programmaticProfiles) > 0 {
 		traderConfig.ProgrammaticStrategyPolicy = decisionProgrammaticStrategyPolicy(programmaticProfiles[0])

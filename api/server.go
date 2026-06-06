@@ -5,8 +5,10 @@ import (
 	"log"
 	"net/http"
 	"nofx/backtest"
+	"nofx/drltrain"
 	"nofx/logger"
 	"nofx/manager"
+	"nofx/storage"
 	"nofx/strategy/chanlun"
 	"strconv"
 	"strings"
@@ -21,13 +23,26 @@ const (
 
 // Server HTTP API服务器
 type Server struct {
-	router        *gin.Engine
-	traderManager *manager.TraderManager
-	port          int
+	router         *gin.Engine
+	traderManager  *manager.TraderManager
+	port           int
+	storageRuntime *storage.RuntimeConfig
+	storageLayout  *storage.Layout
+	drlTrain       *drltrain.Manager
+}
+
+type ServerOptions struct {
+	StorageRuntime *storage.RuntimeConfig
+	StorageLayout  *storage.Layout
+	DRLTrain       *drltrain.Manager
 }
 
 // NewServer 创建API服务器
 func NewServer(traderManager *manager.TraderManager, port int) *Server {
+	return NewServerWithOptions(traderManager, port, ServerOptions{})
+}
+
+func NewServerWithOptions(traderManager *manager.TraderManager, port int, opts ServerOptions) *Server {
 	// 设置为Release模式（减少日志输出）
 	gin.SetMode(gin.ReleaseMode)
 
@@ -37,9 +52,12 @@ func NewServer(traderManager *manager.TraderManager, port int) *Server {
 	router.Use(corsMiddleware())
 
 	s := &Server{
-		router:        router,
-		traderManager: traderManager,
-		port:          port,
+		router:         router,
+		traderManager:  traderManager,
+		port:           port,
+		storageRuntime: opts.StorageRuntime,
+		storageLayout:  opts.StorageLayout,
+		drlTrain:       opts.DRLTrain,
 	}
 
 	// 设置路由
@@ -77,6 +95,7 @@ func (s *Server) setupRoutes() {
 
 		// Trader列表
 		api.GET("/traders", s.handleTraderList)
+		s.registerStorageRoutes(api.Group("/storage"))
 
 		// 指定trader的数据（使用query参数 ?trader_id=xxx）
 		api.GET("/status", s.handleStatus)
@@ -96,6 +115,9 @@ func (s *Server) setupRoutes() {
 		api.GET("/market/klines", s.handleMarketKlines)
 		if backtestAPIEnabled() {
 			s.registerBacktestRoutes(api.Group("/backtest"))
+		}
+		if s.drlTrain != nil {
+			s.registerDRLPPOTrainRoutes(api.Group("/drl-ppo"))
 		}
 	}
 }

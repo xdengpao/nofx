@@ -6,8 +6,10 @@ import { CompetitionPage } from './components/CompetitionPage';
 import AILearning from './components/AILearning';
 import { StrategyCandlestickChart } from './components/StrategyCandlestickChart';
 import { BacktestPage } from './components/backtest/BacktestPage';
+import { DRLPPOTrainingPage } from './components/drlPpoTraining/DRLPPOTrainingPage';
 import { LanguageProvider, useLanguage } from './contexts/LanguageContext';
 import { backtestApi } from './lib/backtestApi';
+import { drlPpoTrainApi } from './lib/drlPpoTrainApi';
 import { t, type Language } from './i18n/translations';
 import { buildSignalDisplayModel } from './utils/strategyDisplay';
 import {
@@ -34,7 +36,7 @@ import type {
   SignalMarker,
 } from './types';
 
-type Page = 'competition' | 'trader' | 'backtest';
+type Page = 'competition' | 'trader' | 'backtest' | 'drlPpoTraining';
 
 function App() {
   const { language, setLanguage } = useLanguage();
@@ -42,6 +44,7 @@ function App() {
   // 从URL hash读取初始页面状态（支持刷新保持页面）
   const getInitialPage = (): Page => {
     const hash = window.location.hash.slice(1); // 去掉 #
+    if (hash === 'drl-ppo-training') return 'drlPpoTraining';
     if (hash === 'backtest') return 'backtest';
     return hash === 'trader' || hash === 'details' ? 'trader' : 'competition';
   };
@@ -56,6 +59,8 @@ function App() {
       const hash = window.location.hash.slice(1);
       if (hash === 'trader' || hash === 'details') {
         setCurrentPage('trader');
+      } else if (hash === 'drl-ppo-training') {
+        setCurrentPage('drlPpoTraining');
       } else if (hash === 'backtest') {
         setCurrentPage('backtest');
       } else if (hash === 'competition' || hash === '') {
@@ -70,7 +75,7 @@ function App() {
   // 切换页面时更新URL hash
   const navigateToPage = (page: Page) => {
     setCurrentPage(page);
-    window.location.hash = page === 'competition' ? '' : page;
+    window.location.hash = page === 'competition' ? '' : page === 'drlPpoTraining' ? 'drl-ppo-training' : page;
   };
 
   const { data: backtestHealth } = useSWR('backtest-health', backtestApi.health, {
@@ -79,11 +84,23 @@ function App() {
   });
   const backtestEnabled = Boolean(backtestHealth?.enabled && backtestHealth.dry_run && !backtestHealth.live_trading);
 
+  const { data: drlPpoHealth, error: drlPpoHealthError } = useSWR('drl-ppo-health', drlPpoTrainApi.health, {
+    shouldRetryOnError: false,
+    revalidateOnFocus: false,
+  });
+  const drlPpoEnabled = Boolean(drlPpoHealth?.enabled && !drlPpoHealthError);
+
   useEffect(() => {
     if (currentPage === 'backtest' && backtestHealth && !backtestEnabled) {
       navigateToPage('competition');
     }
   }, [currentPage, backtestEnabled, backtestHealth]);
+
+  useEffect(() => {
+    if (currentPage === 'drlPpoTraining' && (drlPpoHealthError || (drlPpoHealth && !drlPpoEnabled))) {
+      navigateToPage('competition');
+    }
+  }, [currentPage, drlPpoEnabled, drlPpoHealth, drlPpoHealthError]);
 
   // 获取trader列表
   const { data: traders } = useSWR<TraderInfo[]>('traders', api.getTraders, {
@@ -273,6 +290,18 @@ function App() {
                     Backtest
                   </button>
                 )}
+                {drlPpoEnabled && (
+                  <button
+                    onClick={() => navigateToPage('drlPpoTraining')}
+                    className="px-2 sm:px-4 py-1.5 sm:py-2 rounded text-xs sm:text-sm font-semibold transition-all"
+                    style={currentPage === 'drlPpoTraining'
+                      ? { background: '#F0B90B', color: '#000' }
+                      : { background: 'transparent', color: '#848E9C' }
+                    }
+                  >
+                    DRL-PPO
+                  </button>
+                )}
               </div>
 
               {/* Trader Selector (only show on trader page) */}
@@ -316,10 +345,12 @@ function App() {
 
       {/* Main Content */}
       <main className="max-w-[1920px] mx-auto px-6 py-6">
-        {currentPage === 'competition' || (currentPage === 'backtest' && !backtestEnabled) ? (
+        {currentPage === 'competition' || (currentPage === 'backtest' && !backtestEnabled) || (currentPage === 'drlPpoTraining' && !drlPpoEnabled) ? (
           <CompetitionPage />
         ) : currentPage === 'backtest' && backtestEnabled ? (
           <BacktestPage />
+        ) : currentPage === 'drlPpoTraining' && drlPpoEnabled ? (
+          <DRLPPOTrainingPage health={drlPpoHealth} />
         ) : (
           <TraderDetailsPage
             selectedTrader={selectedTrader}

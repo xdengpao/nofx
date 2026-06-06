@@ -10,9 +10,12 @@ import (
 	"net/http/httptest"
 	"nofx/config"
 	"nofx/decision"
+	"nofx/drltrain"
+	"nofx/historydb"
 	"nofx/logger"
 	"nofx/manager"
 	"nofx/market"
+	"nofx/storage"
 	"nofx/trader"
 	"os"
 	"testing"
@@ -1141,6 +1144,182 @@ func TestNotFound_UnknownEndpoint(t *testing.T) {
 	if w.Code != http.StatusNotFound {
 		t.Errorf("GET /api/nonexistent: 期望状态码 404, 实际=%d", w.Code)
 	}
+}
+
+func TestBacktestAPIRejectsExternalDBWhenStorageLayoutConfigured(t *testing.T) {
+	t.Setenv("NOFX_BACKTEST_API_ENABLED", "true")
+	root := t.TempDir()
+	layout := storage.NewLayout(storage.RuntimeConfig{Root: root})
+	if err := storage.EnsureLayout(layout); err != nil {
+		t.Fatalf("初始化测试Storage Layout失败: %v", err)
+	}
+	s := NewServerWithOptions(manager.NewTraderManager(), 8080, ServerOptions{StorageLayout: &layout})
+	outsideDB := t.TempDir() + "/outside.sqlite"
+
+	w := doJSONRequest(t, s, "POST", "/api/backtest/history/gaps", map[string]any{
+		"db":        outsideDB,
+		"source":    "binance-futures",
+		"symbol":    "BTCUSDT",
+		"timeframe": "4h",
+		"from":      "2025-01-01",
+		"to":        "2025-01-02",
+		"timezone":  "UTC",
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("Root外db应返回400，实际=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestStorageDiagnosticsAndDryRunMigration(t *testing.T) {
+	root := t.TempDir()
+	layout := storage.NewLayout(storage.RuntimeConfig{Root: root})
+	if err := storage.EnsureLayout(layout); err != nil {
+		t.Fatalf("初始化测试Storage Layout失败: %v", err)
+	}
+	runtime := storage.RuntimeConfig{Root: root, RootSource: storage.RootSourceConfig}
+	s := NewServerWithOptions(manager.NewTraderManager(), 8080, ServerOptions{StorageLayout: &layout, StorageRuntime: &runtime})
+
+	w := doRequest(s, "GET", "/api/storage/diagnostics")
+	if w.Code != http.StatusOK {
+		t.Fatalf("storage diagnostics应返回200，实际=%d body=%s", w.Code, w.Body.String())
+	}
+
+	w = doJSONRequest(t, s, "POST", "/api/storage/migrations", map[string]any{
+		"sources": []string{"coin_pool_cache"},
+		"dry_run": true,
+	})
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("dry-run migration应返回202，实际=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSON(t, w)
+	migrationID, _ := body["migration_id"].(string)
+	if migrationID == "" {
+		t.Fatalf("migration_id不能为空: %+v", body)
+	}
+	var status *httptest.ResponseRecorder
+	for i := 0; i < 20; i++ {
+		status = doRequest(s, "GET", "/api/storage/migrations/"+migrationID)
+		if status.Code != http.StatusOK {
+			t.Fatalf("查询migration失败: %d body=%s", status.Code, status.Body.String())
+		}
+		parsed := parseJSON(t, status)
+		if parsed["status"] != "running" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("migration dry-run未及时完成，最后响应=%s", status.Body.String())
+}
+
+func TestDRLPPOTrainAPIDisabledByDefault(t *testing.T) {
+	s := newTestServer()
+	w := doRequest(s, "GET", "/api/drl-ppo/health")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("训练API默认未启用时应404，实际=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestDRLPPOTrainAPIHealthAndCreateJob(t *testing.T) {
+	root := t.TempDir()
+	layout := storage.NewLayout(storage.RuntimeConfig{Root: root})
+	if err := storage.EnsureLayout(layout); err != nil {
+		t.Fatalf("初始化测试Storage Layout失败: %v", err)
+	}
+	trainManager, err := drltrain.NewManager(drltrain.Config{
+		Layout:         layout,
+		PythonBin:      "/bin/echo",
+		TrainScript:    fakeDRLTrainScript(t),
+		EvaluateScript: "fake-evaluate.py",
+		MaxConcurrency: 1,
+	})
+	if err != nil {
+		t.Fatalf("初始化训练manager失败: %v", err)
+	}
+	s := NewServerWithOptions(manager.NewTraderManager(), 8080, ServerOptions{StorageLayout: &layout, DRLTrain: trainManager})
+
+	w := doRequest(s, "GET", "/api/drl-ppo/health")
+	if w.Code != http.StatusOK {
+		t.Fatalf("训练health应返回200，实际=%d body=%s", w.Code, w.Body.String())
+	}
+
+	w = doJSONRequest(t, s, "POST", "/api/drl-ppo/jobs", map[string]any{
+		"symbol":                "BTCUSDT",
+		"timeframe":             "4h",
+		"start":                 "2025-01-01",
+		"end":                   "2025-02-01",
+		"total_timesteps":       1000,
+		"observation_window":    60,
+		"initial_balance":       10000,
+		"taker_fee":             0.0005,
+		"maker_fee":             0.0002,
+		"slippage":              0.0003,
+		"output_model_name":     "api_test_model",
+		"allow_incomplete_data": true,
+	})
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("创建训练job应返回202，实际=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestDRLPPOTrainAPIMarketsUsesCachedCatalog(t *testing.T) {
+	root := t.TempDir()
+	layout := storage.NewLayout(storage.RuntimeConfig{Root: root})
+	if err := storage.EnsureLayout(layout); err != nil {
+		t.Fatalf("初始化测试Storage Layout失败: %v", err)
+	}
+	trainManager, err := drltrain.NewManager(drltrain.Config{
+		Layout:         layout,
+		PythonBin:      "/bin/echo",
+		TrainScript:    fakeDRLTrainScript(t),
+		EvaluateScript: "fake-evaluate.py",
+		MaxConcurrency: 1,
+	})
+	if err != nil {
+		t.Fatalf("初始化训练manager失败: %v", err)
+	}
+	s := NewServerWithOptions(manager.NewTraderManager(), 8080, ServerOptions{StorageLayout: &layout, DRLTrain: trainManager})
+
+	drlPPOMarketCatalogCache.mu.Lock()
+	oldValue := drlPPOMarketCatalogCache.value
+	oldExpires := drlPPOMarketCatalogCache.expiresAt
+	drlPPOMarketCatalogCache.value = historydb.MarketCatalog{
+		SyncedAt: time.Now().UTC(),
+		Sources: []historydb.MarketSource{{
+			Source:      "binance-futures",
+			DisplayName: "Binance USD-M Futures",
+			Exchange:    "binance",
+			Timeframes:  []string{"1h", "4h"},
+			Symbols:     []historydb.MarketSymbol{{Symbol: "BTCUSDT", BaseAsset: "BTC", QuoteAsset: "USDT"}},
+			SyncedAt:    time.Now().UTC(),
+		}},
+	}
+	drlPPOMarketCatalogCache.expiresAt = time.Now().Add(time.Hour)
+	drlPPOMarketCatalogCache.mu.Unlock()
+	defer func() {
+		drlPPOMarketCatalogCache.mu.Lock()
+		drlPPOMarketCatalogCache.value = oldValue
+		drlPPOMarketCatalogCache.expiresAt = oldExpires
+		drlPPOMarketCatalogCache.mu.Unlock()
+	}()
+
+	w := doRequest(s, "GET", "/api/drl-ppo/markets")
+	if w.Code != http.StatusOK {
+		t.Fatalf("markets应返回200，实际=%d body=%s", w.Code, w.Body.String())
+	}
+	body := parseJSON(t, w)
+	sources, ok := body["sources"].([]interface{})
+	if !ok || len(sources) != 1 {
+		t.Fatalf("sources响应异常: %+v", body)
+	}
+}
+
+func fakeDRLTrainScript(t *testing.T) string {
+	t.Helper()
+	path := t.TempDir() + "/fake-train.py"
+	if err := os.WriteFile(path, []byte("# fake train script\n"), 0o644); err != nil {
+		t.Fatalf("写fake train script失败: %v", err)
+	}
+	return path
 }
 
 // ============================================================================
