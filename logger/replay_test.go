@@ -357,7 +357,7 @@ func TestBuildOpenRejectionDailyReport_FreshnessCompatibilityAudit(t *testing.T)
 	if report.VersionDiagnosticMissing {
 		t.Fatal("已有active_mode/effective_entry_timing时不应提示版本诊断缺失")
 	}
-	if len(report.TopNoOpenBuckets) == 0 || report.TopNoOpenBuckets[0].Bucket != "rr" {
+	if len(report.TopNoOpenBuckets) == 0 || report.TopNoOpenBuckets[0].Bucket != "freshness_rr" {
 		t.Fatalf("应输出按计数排序的top bucket: %+v", report.TopNoOpenBuckets)
 	}
 	audit := report.FreshnessCompatibility
@@ -372,6 +372,88 @@ func TestBuildOpenRejectionDailyReport_FreshnessCompatibilityAudit(t *testing.T)
 	}
 	if len(audit.Samples) != 1 || audit.Samples[0].SignalTypeThreshold != 1.1 || audit.Samples[0].OldThreshold != 2.5 {
 		t.Fatalf("兼容审计样本错误: %+v", audit.Samples)
+	}
+	if !audit.Samples[0].FreshnessWouldPassSignalTypeRR || audit.Samples[0].FinalRRPass || audit.Samples[0].FinalRRThreshold != 2.5 {
+		t.Fatalf("兼容审计应说明entry通过不代表final RR通过: %+v", audit.Samples[0])
+	}
+}
+
+func TestBuildOpenRejectionDailyReport_EnhancedNoOrderBucketsAndServiceLog(t *testing.T) {
+	now := time.Date(2026, 6, 2, 10, 0, 0, 0, time.UTC)
+	records := []*DecisionRecord{{
+		Timestamp:   now,
+		CycleNumber: 91,
+		Decisions: []DecisionAction{
+			{
+				Action:      "open_rejected",
+				FinalAction: "open_rejected",
+				TradeIntent: "open_long",
+				Symbol:      "ASTERUSDT",
+				Success:     false,
+				Error:       "ASTERUSDT open_long 被拒: ASTERUSDT 1h ADX 15.3低于profile阈值25.0，禁止趋势开仓（report-only）; BTC 1h/4h 明显转弱，禁止新开高 beta 山寨多单",
+				GateReasons: []string{"btc"},
+				GateDiagnostics: map[string]any{
+					"reason_code": "btc",
+					"btc": map[string]any{
+						"confirmed_bearish": true,
+					},
+				},
+				Timestamp: now,
+			},
+			{
+				Action:      "open_rejected",
+				FinalAction: "open_rejected",
+				TradeIntent: "open_short",
+				Symbol:      "DOGEUSDT",
+				Success:     false,
+				Error:       "DOGEUSDT open_short 被拒: 风险回报比过低(1.45:1 < 2.5:1)",
+				StrategyMetadata: map[string]any{
+					"parent_signal_type":   "sell2",
+					"remaining_net_rr":     1.45,
+					"min_remaining_net_rr": 1.1,
+				},
+				Timestamp: now.Add(time.Minute),
+			},
+		},
+		StrategyDiagnostics: map[string]any{
+			"active_mode":            "loosen",
+			"effective_entry_timing": map[string]any{"min_remaining_net_rr": 1.1},
+			"messages": []any{
+				"ASTERUSDT 1h ADX 15.3低于profile阈值25.0，禁止趋势开仓（report-only）",
+				"SOLUSDT sell2 终态信号已静默: entry_rr_invalid",
+				"ETHUSDT sell3 父结构终止: 剩余净RR 0.58低于阈值1.00",
+			},
+		},
+	}}
+
+	report := BuildOpenRejectionDailyReportWithOptions(records, 10, OpenRejectionDailyOptions{
+		EnabledTraders: 1,
+		SignalTypeMinRR: map[string]float64{
+			"sell2": 1.1,
+		},
+		ServiceLogSource: "nofx.log",
+		ServiceLogText: strings.Join([]string{
+			"创建订单追踪器: Aster Chanlun V2 Trader",
+			"无自动成交订单",
+		}, "\n"),
+	})
+
+	if report.EnabledTraderCount != 1 || report.RealExchangeOrderCount != 0 {
+		t.Fatalf("执行路径统计错误: %+v", report)
+	}
+	if !report.ServiceLogProvided || report.TrackerOnlyOrderMentions != 1 || report.ServiceLogExchangeOrderMentions != 0 {
+		t.Fatalf("service log订单文案审计错误: %+v", report)
+	}
+	if report.ByBucket["btc_hard_veto"] != 1 || report.ByBucket["adx_report_only"] != 1 ||
+		report.ByBucket["final_rr"] != 1 || report.ByBucket["terminal_suppressed"] != 2 || report.ByBucket["rr"] != 0 {
+		t.Fatalf("enhanced no-order bucket错误: %+v", report.ByBucket)
+	}
+	if !containsText(report.RemainingHardBlocks, "btc_hard_veto") || !containsText(report.RemainingHardBlocks, "final_rr_2.5") {
+		t.Fatalf("应输出loosen后仍保留的硬阻断: %+v", report.RemainingHardBlocks)
+	}
+	if report.FinalValidationRRRejectionCount != 1 || report.FreshnessPassButFinalRRFailCount != 1 ||
+		!report.FinalRRKept || report.FinalRRThreshold != 2.5 {
+		t.Fatalf("final RR诊断错误: %+v", report)
 	}
 }
 

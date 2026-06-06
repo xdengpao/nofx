@@ -202,18 +202,42 @@ func effectiveChanlunV2DecisionSignalType(d decision.Decision) string {
 
 func (e *Engine) effectiveEntryTimingDiagnostics(ctx *decision.Context) map[string]any {
 	timing := e.effectiveEntryTiming(ctx)
+	activeMode := e.activeRuntimeMode()
 	diagnostics := map[string]any{
-		"active_mode":            e.activeRuntimeMode(),
+		"active_mode":            activeMode,
 		"min_trigger_confidence": timing.MinTriggerConfidence,
 		"max_chase_ratio":        timing.EntryZone.MaxChaseRatio,
 		"min_remaining_net_rr":   timing.EntryZone.MinRemainingNetRR,
 		"signal_type_min_rr":     timing.EntryZone.SignalTypeMinRR,
 	}
+	if ctx != nil && ctx.FrequencyPolicy != nil {
+		policy := normalizeV2LoosenPolicy(ctx.FrequencyPolicy.LoosenMode)
+		diagnostics["loosen_max_duration_hours"] = policy.MaxDurationHours
+		diagnostics["loosen_duration_enforced"] = false
+		if activeMode == "loosen" {
+			delta, bump, drop, floor := e.activeLoosenAdjustments()
+			diagnostics["loosen_applied_rules"] = []map[string]any{
+				{"field": "min_remaining_net_rr", "delta": delta, "floor": 1.0},
+				{"field": "signal_type_min_rr", "delta": delta, "floor": 1.0},
+				{"field": "max_chase_ratio", "delta": bump, "ceiling": 1.0},
+				{"field": "min_trigger_confidence", "drop": drop, "floor": floor},
+			}
+			diagnostics["remaining_hard_blocks"] = []string{"btc_hard_veto", "final_rr_2.5", "execution_quality", "loss_mode"}
+		}
+	}
 	if ctx != nil && ctx.FrequencyState != nil {
 		diagnostics["inactivity_minutes"] = ctx.FrequencyState.InactivityMinutes
 		diagnostics["inactivity_source"] = ctx.FrequencyState.InactivitySource
 		if !ctx.FrequencyState.NoOpenSince.IsZero() {
-			diagnostics["no_open_since"] = ctx.FrequencyState.NoOpenSince.Format(time.RFC3339)
+			noOpenSince := ctx.FrequencyState.NoOpenSince
+			diagnostics["no_open_since"] = noOpenSince.Format(time.RFC3339)
+			if ctx.FrequencyPolicy != nil {
+				policy := normalizeV2LoosenPolicy(ctx.FrequencyPolicy.LoosenMode)
+				if policy.MaxDurationHours > 0 {
+					diagnostics["loosen_started_at"] = noOpenSince.Format(time.RFC3339)
+					diagnostics["loosen_expires_at"] = noOpenSince.Add(time.Duration(policy.MaxDurationHours) * time.Hour).Format(time.RFC3339)
+				}
+			}
 		}
 	}
 	return diagnostics

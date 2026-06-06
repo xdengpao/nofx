@@ -77,6 +77,18 @@ type OpenRejectionDailyReport struct {
 	RecordCount                          int                          `json:"record_count"`
 	RejectedOpenCount                    int                          `json:"rejected_open_count"`
 	DiagnosticCount                      int                          `json:"diagnostic_count"`
+	RealExchangeOrderCount               int                          `json:"real_exchange_order_count"`
+	EnabledTraderCount                   int                          `json:"enabled_trader_count,omitempty"`
+	FinalValidationRRRejectionCount      int                          `json:"final_validation_rr_rejection_count,omitempty"`
+	FreshnessPassButFinalRRFailCount     int                          `json:"freshness_pass_but_final_rr_fail_count,omitempty"`
+	FinalRRThreshold                     float64                      `json:"final_rr_threshold"`
+	FinalRRKept                          bool                         `json:"final_rr_kept"`
+	EntryRRThresholds                    map[string]float64           `json:"entry_rr_thresholds,omitempty"`
+	RemainingHardBlocks                  []string                     `json:"remaining_hard_blocks,omitempty"`
+	ServiceLogProvided                   bool                         `json:"service_log_provided,omitempty"`
+	ServiceLogSource                     string                       `json:"service_log_source,omitempty"`
+	TrackerOnlyOrderMentions             int                          `json:"tracker_only_order_mentions,omitempty"`
+	ServiceLogExchangeOrderMentions      int                          `json:"service_log_exchange_order_mentions,omitempty"`
 	NoSuccessfulOpenHours                float64                      `json:"no_successful_open_hours,omitempty"`
 	VersionDiagnosticMissing             bool                         `json:"version_diagnostic_missing,omitempty"`
 	VersionDiagnosticMissingCount        int                          `json:"version_diagnostic_missing_count,omitempty"`
@@ -96,8 +108,11 @@ type OpenRejectionDailyReport struct {
 
 // OpenRejectionDailyOptions 控制只读开仓拒绝日报的附加审计。
 type OpenRejectionDailyOptions struct {
-	SignalTypeMinRR map[string]float64
-	ConfigSource    string
+	SignalTypeMinRR  map[string]float64
+	ConfigSource     string
+	EnabledTraders   int
+	ServiceLogSource string
+	ServiceLogText   string
 }
 
 // OpenRejectionBucketSummary 是 no-open bucket 的排序摘要。
@@ -121,16 +136,19 @@ type FreshnessCompatibilityAudit struct {
 
 // FreshnessCompatibilitySample 是 freshness RR 兼容审计样本。
 type FreshnessCompatibilitySample struct {
-	Timestamp           time.Time `json:"timestamp"`
-	SourceFile          string    `json:"source_file,omitempty"`
-	CycleNumber         int       `json:"cycle_number,omitempty"`
-	Symbol              string    `json:"symbol,omitempty"`
-	Action              string    `json:"action,omitempty"`
-	SignalType          string    `json:"signal_type,omitempty"`
-	RemainingNetRR      float64   `json:"remaining_net_rr"`
-	OldThreshold        float64   `json:"old_threshold,omitempty"`
-	SignalTypeThreshold float64   `json:"signal_type_threshold"`
-	Reason              string    `json:"reason,omitempty"`
+	Timestamp                      time.Time `json:"timestamp"`
+	SourceFile                     string    `json:"source_file,omitempty"`
+	CycleNumber                    int       `json:"cycle_number,omitempty"`
+	Symbol                         string    `json:"symbol,omitempty"`
+	Action                         string    `json:"action,omitempty"`
+	SignalType                     string    `json:"signal_type,omitempty"`
+	RemainingNetRR                 float64   `json:"remaining_net_rr"`
+	OldThreshold                   float64   `json:"old_threshold,omitempty"`
+	SignalTypeThreshold            float64   `json:"signal_type_threshold"`
+	FreshnessWouldPassSignalTypeRR bool      `json:"freshness_would_pass_signal_type_rr"`
+	FinalRRThreshold               float64   `json:"final_rr_threshold"`
+	FinalRRPass                    bool      `json:"final_rr_pass"`
+	Reason                         string    `json:"reason,omitempty"`
 }
 
 // OpenRejectionEvent 是日报里的单条拒绝/阻塞样本。
@@ -179,6 +197,7 @@ type ChanlunV2NoOpenReport struct {
 	RRDirectSamples            []ChanlunV2RRDirectTerminalSample   `json:"rr_direct_samples,omitempty"`
 	BTCGateRejectionCount      int                                 `json:"btc_gate_rejection_count,omitempty"`
 	BTCGateDiagnostics         []ChanlunV2BTCGateDiagnosticSample  `json:"btc_gate_diagnostics,omitempty"`
+	BTCHardVetoPrecheckCount   int                                 `json:"btc_hard_veto_precheck_count,omitempty"`
 	ConfidenceOverrideCount    int                                 `json:"confidence_override_count,omitempty"`
 	ConfidenceOverrides        []ChanlunV2ConfidenceOverrideSample `json:"confidence_overrides,omitempty"`
 	Samples                    []ChanlunV2NoOpenSample             `json:"samples,omitempty"`
@@ -521,15 +540,23 @@ func BuildOpenRejectionDailyReportWithOptions(records []*DecisionRecord, maxNear
 	if maxNearMisses <= 0 {
 		maxNearMisses = 20
 	}
+	thresholds, _ := normalizeFreshnessSignalTypeMinRR(opts.SignalTypeMinRR)
 	report := OpenRejectionDailyReport{
-		GeneratedAt: time.Now(),
-		RecordCount: len(records),
-		ByReason:    make(map[string]int),
-		BySymbol:    make(map[string]int),
-		ByBucket:    make(map[string]int),
+		GeneratedAt:        time.Now(),
+		RecordCount:        len(records),
+		EnabledTraderCount: opts.EnabledTraders,
+		FinalRRThreshold:   2.5,
+		FinalRRKept:        true,
+		EntryRRThresholds:  thresholds,
+		ServiceLogProvided: strings.TrimSpace(opts.ServiceLogText) != "",
+		ServiceLogSource:   strings.TrimSpace(opts.ServiceLogSource),
+		ByReason:           make(map[string]int),
+		BySymbol:           make(map[string]int),
+		ByBucket:           make(map[string]int),
 	}
 	if len(records) == 0 {
 		report.Notes = append(report.Notes, "未发现决策日志，日报为空")
+		attachServiceLogAudit(&report, opts)
 		return report
 	}
 	report.ChanlunV2NoOpen = newChanlunV2NoOpenReport()
@@ -541,6 +568,9 @@ func BuildOpenRejectionDailyReportWithOptions(records []*DecisionRecord, maxNear
 		}
 		addChanlunV2ActionDistributions(report.ChanlunV2NoOpen, record)
 		for _, action := range record.Decisions {
+			if isSuccessfulOpenAction(action) {
+				report.RealExchangeOrderCount++
+			}
 			if action.Action != "open_rejected" && !(isOpenAction(action.Action) && isOpenRejection(action)) {
 				continue
 			}
@@ -555,9 +585,15 @@ func BuildOpenRejectionDailyReportWithOptions(records []*DecisionRecord, maxNear
 				CycleNumber: record.CycleNumber,
 				Symbol:      marketSymbolOrAction(action.Symbol, reason),
 				ReasonCode:  reasonCode,
-				Bucket:      classifyRejectionBucket(reason, action),
+				Bucket:      classifyNoOpenBucket(reasonCode+" "+reason, action),
 				Reason:      reason,
 				Source:      "decision_action",
+			}
+			if event.Bucket == "final_rr" {
+				report.FinalValidationRRRejectionCount++
+				if finalRRRejectPassedFreshness(action, thresholds) {
+					report.FreshnessPassButFinalRRFailCount++
+				}
 			}
 			addOpenRejectionEvent(&report, event)
 			addChanlunV2OpenGateRejection(report.ChanlunV2NoOpen, record, action, reasonCode, reason)
@@ -577,7 +613,7 @@ func BuildOpenRejectionDailyReportWithOptions(records []*DecisionRecord, maxNear
 				CycleNumber: record.CycleNumber,
 				Symbol:      marketSymbolOrAction("", message),
 				ReasonCode:  reasonCode,
-				Bucket:      classifyRejectionBucket(reasonCode+" "+message, DecisionAction{}),
+				Bucket:      classifyNoOpenBucket(reasonCode+" "+message, DecisionAction{}),
 				Reason:      message,
 				Source:      "strategy_diagnostic",
 			}
@@ -615,6 +651,7 @@ func finalizeOpenRejectionDailyReport(report *OpenRejectionDailyReport, records 
 		report.CurrentVersionWindowStart = versionStatus.CurrentWindowStart.Format(time.RFC3339)
 	}
 	report.TopNoOpenBuckets = topOpenRejectionBuckets(report.ByBucket, 5)
+	report.RemainingHardBlocks = deriveOpenRejectionHardBlocks(report)
 	audit := buildFreshnessCompatibilityAudit(records, opts)
 	if audit != nil {
 		report.FreshnessCompatibility = audit
@@ -627,6 +664,41 @@ func finalizeOpenRejectionDailyReport(report *OpenRejectionDailyReport, records 
 	} else if report.VersionDiagnosticMissing {
 		report.Notes = append(report.Notes, "version_diagnostic_missing=historical_only: 历史缠论V2日志含旧格式，当前重启窗口已具备active_mode/effective_entry_timing")
 	}
+	attachServiceLogAudit(report, opts)
+	if strings.TrimSpace(opts.ServiceLogText) == "" {
+		report.Notes = append(report.Notes, "未提供service_log输入: replay仅基于决策日志/config统计真实执行路径，Docker订单追踪器文案需人工交叉验证或使用--service-log")
+	}
+}
+
+func deriveOpenRejectionHardBlocks(report *OpenRejectionDailyReport) []string {
+	if report == nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var blocks []string
+	add := func(block string) {
+		if block == "" || seen[block] {
+			return
+		}
+		seen[block] = true
+		blocks = append(blocks, block)
+	}
+	if report.ByBucket["btc_hard_veto"] > 0 || report.ChanlunV2NoOpen != nil && report.ChanlunV2NoOpen.BTCGateRejectionCount > 0 {
+		add("btc_hard_veto")
+	}
+	if report.FinalValidationRRRejectionCount > 0 || report.ByBucket["final_rr"] > 0 {
+		add("final_rr_2.5")
+	}
+	if report.ByBucket["execution_error"] > 0 {
+		add("execution_quality")
+	}
+	if report.ByBucket["loss_mode"] > 0 {
+		add("loss_mode")
+	}
+	if len(blocks) == 0 {
+		return nil
+	}
+	return blocks
 }
 
 func noSuccessfulOpenHours(records []*DecisionRecord, periodStart, periodEnd time.Time) float64 {
@@ -816,17 +888,21 @@ func buildFreshnessCompatibilityAudit(records []*DecisionRecord, opts OpenReject
 			symbol := marketSymbolOrAction(action.Symbol, reason)
 			audit.BySymbol[firstNonEmpty(symbol, "UNKNOWN")]++
 			audit.BySignalType[signalType]++
+			finalRRPass := remaining >= 2.5
 			audit.Samples = appendLimitedFreshnessCompatibilitySamples(audit.Samples, FreshnessCompatibilitySample{
-				Timestamp:           replayActionTime(record, action),
-				SourceFile:          record.SourcePath,
-				CycleNumber:         record.CycleNumber,
-				Symbol:              symbol,
-				Action:              action.TradeIntent,
-				SignalType:          signalType,
-				RemainingNetRR:      remaining,
-				OldThreshold:        oldThreshold,
-				SignalTypeThreshold: threshold,
-				Reason:              reason,
+				Timestamp:                      replayActionTime(record, action),
+				SourceFile:                     record.SourcePath,
+				CycleNumber:                    record.CycleNumber,
+				Symbol:                         symbol,
+				Action:                         action.TradeIntent,
+				SignalType:                     signalType,
+				RemainingNetRR:                 remaining,
+				OldThreshold:                   oldThreshold,
+				SignalTypeThreshold:            threshold,
+				FreshnessWouldPassSignalTypeRR: true,
+				FinalRRThreshold:               2.5,
+				FinalRRPass:                    finalRRPass,
+				Reason:                         reason,
 			}, 20)
 		}
 	}
@@ -1032,6 +1108,9 @@ func addChanlunV2DiagnosticMessage(noOpen *ChanlunV2NoOpenReport, record *Decisi
 		noOpen.TriggerReadyCount++
 		noOpen.TriggerReadyBySymbol[firstNonEmpty(symbol, "UNKNOWN")]++
 		appendChanlunV2NoOpenSample(noOpen, record, symbol, "trigger_ready", reasonCode, message)
+	case strings.Contains(message, "btc_hard_veto_precheck"):
+		noOpen.BTCHardVetoPrecheckCount++
+		appendChanlunV2NoOpenSample(noOpen, record, symbol, "btc_hard_veto_precheck", firstNonEmpty(reasonCode, "btc_hard_veto_precheck"), message)
 	case strings.Contains(message, "等待") && strings.Contains(message, "fresh entry trigger"):
 		noOpen.WaitingForTriggerCount++
 		appendChanlunV2NoOpenSample(noOpen, record, symbol, "waiting_for_fresh_entry_trigger", firstNonEmpty(reasonCode, "waiting_for_fresh_entry_trigger"), message)
@@ -1230,6 +1309,12 @@ func strategyDiagnosticMessages(record *DecisionRecord) []string {
 
 func diagnosticRejectionReasonCode(message string) string {
 	switch {
+	case strings.Contains(message, "btc_hard_veto_precheck"):
+		return "btc_hard_veto_precheck"
+	case strings.Contains(message, "report-only") && (strings.Contains(message, "ADX") || strings.Contains(message, "趋势开仓")):
+		return "adx_report_only"
+	case strings.Contains(message, "终态信号已静默") || strings.Contains(message, "重复过期信号已静默"):
+		return "terminal_suppressed"
 	case strings.Contains(message, "入场追价比例"):
 		return "entry_chase_ratio_too_high"
 	case strings.Contains(message, "剩余净RR"):
@@ -1929,6 +2014,11 @@ func stringFromAny(value any) string {
 	}
 }
 
+func metadataStringValue(values map[string]any, key string) string {
+	value, _ := metadataString(values, key)
+	return value
+}
+
 func buildRMultipleStats(values []float64) RMultipleStats {
 	stats := RMultipleStats{Count: len(values)}
 	if len(values) == 0 {
@@ -2131,6 +2221,142 @@ func classifyRejectionBucket(reason string, action DecisionAction) string {
 	default:
 		return "other"
 	}
+}
+
+func classifyNoOpenBucket(reason string, action DecisionAction) string {
+	text := strings.ToLower(reason + " " + action.Error + " " + action.HighRiskReason + " " + strings.Join(action.GateReasons, " "))
+	reasonCode := strings.ToLower(firstNonEmpty(
+		metadataStringValue(action.GateDiagnostics, "reason_code"),
+		metadataStringValue(action.StrategyMetadata, "reason_code"),
+	))
+	switch {
+	case hasBTCHardVetoText(text) || actionHasBTCDiagnostics(action):
+		return "btc_hard_veto"
+	case strings.Contains(reasonCode, "freshness_gate.rr_invalid") || strings.Contains(text, "freshness_gate.rr_invalid") ||
+		(strings.Contains(text, "信号新鲜度") && strings.Contains(text, "rr")):
+		return "freshness_rr"
+	case isFinalRRRejectionText(text):
+		return "final_rr"
+	case strings.Contains(text, "report-only") && (strings.Contains(text, "adx") || strings.Contains(text, "趋势开仓")):
+		return "adx_report_only"
+	case strings.Contains(reasonCode, "confidence") || strings.Contains(text, "置信") || strings.Contains(text, "confidence"):
+		return "confidence_gate"
+	case strings.Contains(text, "等待") && strings.Contains(text, "fresh entry trigger"):
+		return "waiting_for_trigger"
+	case strings.Contains(text, "已静默") || strings.Contains(text, "父结构终止") ||
+		strings.Contains(text, "terminal_suppressed") || strings.Contains(text, "suppressed_terminal"):
+		return "terminal_suppressed"
+	default:
+		return classifyRejectionBucket(reason, action)
+	}
+}
+
+func hasBTCHardVetoText(text string) bool {
+	return strings.Contains(text, "btc_hard_veto") ||
+		strings.Contains(text, "btc 1h/4h 明显转弱") ||
+		strings.Contains(text, "禁止新开高 beta 山寨多单") ||
+		strings.Contains(text, "禁止新开高beta山寨多单")
+}
+
+func actionHasBTCDiagnostics(action DecisionAction) bool {
+	for _, gateReason := range action.GateReasons {
+		if strings.EqualFold(strings.TrimSpace(gateReason), "btc") {
+			return true
+		}
+	}
+	if len(action.GateDiagnostics) == 0 {
+		return false
+	}
+	if _, ok := action.GateDiagnostics["btc"]; ok {
+		return true
+	}
+	code := strings.ToLower(metadataStringValue(action.GateDiagnostics, "reason_code"))
+	return code == "btc" || code == "btc_hard_veto" || code == "btc_hard_veto_precheck"
+}
+
+func isFinalRRRejectionText(text string) bool {
+	return strings.Contains(text, "风险回报比过低") ||
+		strings.Contains(text, "final_rr") ||
+		strings.Contains(text, "< 2.5:1")
+}
+
+func isSuccessfulOpenAction(action DecisionAction) bool {
+	if !action.Success {
+		return false
+	}
+	finalAction := strings.TrimSpace(action.FinalAction)
+	if finalAction == "" {
+		finalAction = action.Action
+	}
+	return isOpenAction(finalAction)
+}
+
+func finalRRRejectPassedFreshness(action DecisionAction, thresholds map[string]float64) bool {
+	if !isFinalRRRejectionText(strings.ToLower(actionFailureReason(action) + " " + action.Error)) {
+		return false
+	}
+	if strings.Contains(strings.ToLower(metadataStringValue(action.GateDiagnostics, "reason_code")), "freshness_gate") {
+		return false
+	}
+	signalType := replayActionSignalType(action)
+	if signalType == "" {
+		return true
+	}
+	threshold := thresholds[strings.ToLower(signalType)]
+	if threshold <= 0 {
+		return true
+	}
+	remaining, ok := replayActionFloat(action, "remaining_net_rr")
+	if !ok {
+		return true
+	}
+	return remaining+1e-9 >= threshold
+}
+
+func attachServiceLogAudit(report *OpenRejectionDailyReport, opts OpenRejectionDailyOptions) {
+	if report == nil {
+		return
+	}
+	text := strings.TrimSpace(opts.ServiceLogText)
+	if text == "" {
+		return
+	}
+	report.ServiceLogProvided = true
+	report.ServiceLogSource = strings.TrimSpace(opts.ServiceLogSource)
+	trackerOnly, exchangeOrders := countServiceLogOrderMentions(text)
+	report.TrackerOnlyOrderMentions = trackerOnly
+	report.ServiceLogExchangeOrderMentions = exchangeOrders
+	if trackerOnly > 0 && exchangeOrders == 0 {
+		report.Notes = append(report.Notes, "service_log_order_audit: 仅发现订单追踪器相关文案，未发现真实交易所下单成功/成交成功文案")
+	}
+}
+
+func countServiceLogOrderMentions(text string) (trackerOnly int, exchangeOrders int) {
+	for _, line := range strings.Split(text, "\n") {
+		lower := strings.ToLower(line)
+		if strings.Contains(line, "订单追踪器") || strings.Contains(lower, "order tracker") {
+			trackerOnly++
+			continue
+		}
+		if serviceLogLineLooksLikeExchangeOrder(line, lower) {
+			exchangeOrders++
+		}
+	}
+	return trackerOnly, exchangeOrders
+}
+
+func serviceLogLineLooksLikeExchangeOrder(line, lower string) bool {
+	if strings.Contains(line, "下单成功") ||
+		strings.Contains(line, "订单已创建") ||
+		strings.Contains(line, "创建订单") ||
+		strings.Contains(line, "开仓成功") ||
+		strings.Contains(line, "成交成功") ||
+		strings.Contains(lower, "place order success") ||
+		strings.Contains(lower, "order success") ||
+		strings.Contains(lower, "createorder success") {
+		return true
+	}
+	return false
 }
 
 func sortedReplayRecords(records []*DecisionRecord) []*DecisionRecord {

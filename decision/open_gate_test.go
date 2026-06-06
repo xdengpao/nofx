@@ -654,6 +654,38 @@ func TestBuildOpenRejection_IncludesBTCDiagnostics(t *testing.T) {
 	}
 }
 
+func TestEvaluateBTCHighBetaLongVetoSharedHelper(t *testing.T) {
+	btc := &market.Data{
+		Symbol:         "BTCUSDT",
+		CurrentPrice:   95000,
+		CurrentDIPlus:  12,
+		CurrentDIMinus: 28,
+		LongerTermContext: &market.LongerTermData{
+			EMA20:    97000,
+			EMA50:    98000,
+			MACDHist: []float64{-10},
+		},
+		MidTermSeries1h: &market.MidTermData1h{
+			EMA20Values: []float64{96000},
+			EMA50Values: []float64{98000},
+			MACDHist:    []float64{-10},
+		},
+	}
+	result := EvaluateBTCHighBetaLongVeto("SOLUSDT", "open_long", btc)
+	if !result.Applies || !result.Veto || result.ReasonCode != "btc_hard_veto" {
+		t.Fatalf("BTC confirmed bearish应对high beta long输出hard veto: %+v", result)
+	}
+	if result.Diagnostics["confirmed_bearish"] != true {
+		t.Fatalf("helper应返回BTC诊断: %+v", result.Diagnostics)
+	}
+	if short := EvaluateBTCHighBetaLongVeto("SOLUSDT", "open_short", btc); short.Applies || short.Veto {
+		t.Fatalf("short不应触发high beta long veto: %+v", short)
+	}
+	if core := EvaluateBTCHighBetaLongVeto("BTCUSDT", "open_long", btc); core.Applies || core.Veto {
+		t.Fatalf("BTC自身不应按high beta alt处理: %+v", core)
+	}
+}
+
 func TestEvaluateOpenGate_SameSideExposureBlocksThirdHighBetaLong(t *testing.T) {
 	ctx := newTestContext()
 	ctx.Positions = []PositionInfo{

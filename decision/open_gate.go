@@ -64,6 +64,15 @@ type minConfidenceGate struct {
 	ReasonCode string
 }
 
+// BTCHighBetaLongVetoResult 是 BTC 多周期 hard veto 的只读评估结果。
+type BTCHighBetaLongVetoResult struct {
+	Applies     bool           `json:"applies"`
+	Veto        bool           `json:"veto"`
+	Reason      string         `json:"reason,omitempty"`
+	ReasonCode  string         `json:"reason_code,omitempty"`
+	Diagnostics map[string]any `json:"diagnostics,omitempty"`
+}
+
 // EvaluateOpenGate 汇总当前行情、相关性、执行质量和 AI backoff gate。
 func EvaluateOpenGate(input OpenGateInput) OpenGateResult {
 	result := OpenGateResult{
@@ -364,9 +373,10 @@ func applyBTCMultiTimeframeGate(result *OpenGateResult, d *Decision, ctx *Contex
 	if btcData == nil {
 		return
 	}
-	diagnostics := buildBTCGateDiagnostics(btcData)
-	if isConfirmedBTCBearishStructure(btcData) {
-		result.blockWithDiagnostics("BTC 1h/4h 明显转弱，禁止新开高 beta 山寨多单", "btc", diagnostics)
+	veto := EvaluateBTCHighBetaLongVeto(d.Symbol, d.Action, btcData)
+	diagnostics := veto.Diagnostics
+	if veto.Veto {
+		result.blockWithDiagnostics(veto.Reason, "btc", diagnostics)
 		return
 	}
 	if isBearishStructure(btcData) {
@@ -380,6 +390,23 @@ func applyBTCMultiTimeframeGate(result *OpenGateResult, d *Decision, ctx *Contex
 		result.requireMinConfidence(btcConflictMinConfidence, "BTC多周期冲突时高 beta 多单置信度要求", minConfidenceGate{Rule: "btc_conflict", ReasonCode: "gate.btc_conflict_confidence"})
 		result.EffectiveRisk *= 0.5
 	}
+}
+
+// EvaluateBTCHighBetaLongVeto 判断 BTC confirmed bearish 时是否硬阻断 high beta 山寨多单。
+// 该 helper 只读、不修改 open gate 结果，供 open gate 和策略层 precheck 共用。
+func EvaluateBTCHighBetaLongVeto(symbol, action string, btcData *market.Data) BTCHighBetaLongVetoResult {
+	result := BTCHighBetaLongVetoResult{}
+	if DecisionDirection(action) != "long" || !isHighBetaAltcoin(symbol) || btcData == nil {
+		return result
+	}
+	result.Applies = true
+	result.Diagnostics = buildBTCGateDiagnostics(btcData)
+	if isConfirmedBTCBearishStructure(btcData) {
+		result.Veto = true
+		result.Reason = "BTC 1h/4h 明显转弱，禁止新开高 beta 山寨多单"
+		result.ReasonCode = "btc_hard_veto"
+	}
+	return result
 }
 
 func applySameSideExposureGate(result *OpenGateResult, d *Decision, ctx *Context, profile InstrumentProfile) {

@@ -22,6 +22,7 @@ func main() {
 	includeBackups := flag.Bool("include-backups", false, "include .bak/backup decision log directories")
 	traderID := flag.String("trader", "", "optional trader id filter")
 	configPath := flag.String("config", "", "optional NOFX config path for signal-type threshold audit")
+	serviceLogPath := flag.String("service-log", "", "optional service log file for order wording cross-check")
 	fromText := flag.String("from", "", "optional inclusive start time (RFC3339 or YYYY-MM-DD)")
 	toText := flag.String("to", "", "optional inclusive end time (RFC3339 or YYYY-MM-DD)")
 	exchangeCloseJSON := flag.String("exchange-close-json", "", "optional read-only JSON export of exchange close snapshots")
@@ -49,7 +50,7 @@ func main() {
 		To:             to,
 	})
 	if *openRejectionDaily {
-		opts, err := openRejectionDailyOptions(*configPath, *traderID)
+		opts, err := openRejectionDailyOptions(*configPath, *traderID, *serviceLogPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "读取replay配置失败: %v\n", err)
 			os.Exit(1)
@@ -78,10 +79,20 @@ func main() {
 	writeJSONOutput(report, *output)
 }
 
-func openRejectionDailyOptions(configPath, traderID string) (logger.OpenRejectionDailyOptions, error) {
+func openRejectionDailyOptions(configPath, traderID, serviceLogPath string) (logger.OpenRejectionDailyOptions, error) {
+	opts := logger.OpenRejectionDailyOptions{}
+	serviceLogPath = strings.TrimSpace(serviceLogPath)
+	if serviceLogPath != "" {
+		data, err := os.ReadFile(serviceLogPath)
+		if err != nil {
+			return logger.OpenRejectionDailyOptions{}, fmt.Errorf("读取service log失败: %w", err)
+		}
+		opts.ServiceLogSource = serviceLogPath
+		opts.ServiceLogText = string(data)
+	}
 	configPath = strings.TrimSpace(configPath)
 	if configPath == "" {
-		return logger.OpenRejectionDailyOptions{}, nil
+		return opts, nil
 	}
 	cfg, err := config.LoadConfig(configPath)
 	if err != nil {
@@ -99,10 +110,10 @@ func openRejectionDailyOptions(configPath, traderID string) (logger.OpenRejectio
 			copied[key] = value
 		}
 	}
-	return logger.OpenRejectionDailyOptions{
-		SignalTypeMinRR: copied,
-		ConfigSource:    configPath,
-	}, nil
+	opts.SignalTypeMinRR = copied
+	opts.ConfigSource = configPath
+	opts.EnabledTraders = enabledTraderCount(cfg.Traders)
+	return opts, nil
 }
 
 func selectReplayTraderConfig(traders []config.TraderConfig, traderID string) *config.TraderConfig {
@@ -126,6 +137,16 @@ func selectReplayTraderConfig(traders []config.TraderConfig, traderID string) *c
 		}
 	}
 	return nil
+}
+
+func enabledTraderCount(traders []config.TraderConfig) int {
+	count := 0
+	for _, trader := range traders {
+		if trader.Enabled {
+			count++
+		}
+	}
+	return count
 }
 
 func writeJSONOutput(value any, output string) {

@@ -22,6 +22,7 @@ type Engine struct {
 	lifecycleLoaded       map[string]bool
 	signalExecutionStates map[string]SignalExecutionState
 	executionLoaded       map[string]bool
+	btcVetoCooldowns      map[string]chanlunV2BTCCooldown
 	positionStates        map[string]PositionManagementState
 	configHash            string
 	activeMode            string
@@ -60,6 +61,17 @@ type chanlunV2FreshnessEvaluation struct {
 	MinRemainingNetRR   float64
 }
 
+type chanlunV2BTCCooldown struct {
+	TraderID        string
+	Symbol          string
+	SignalID        string
+	ReasonCode      string
+	Reason          string
+	CooldownUntil   time.Time
+	SuppressedCount int
+	LastDiagnostics map[string]any
+}
+
 // NewEngine 创建缠论V2引擎
 func NewEngine(cfg config.ChanlunV2StrategyConfig) (*Engine, error) {
 	cfg = config.NormalizeChanlunV2StrategyConfig(cfg)
@@ -72,6 +84,7 @@ func NewEngine(cfg config.ChanlunV2StrategyConfig) (*Engine, error) {
 		lifecycleLoaded:       map[string]bool{},
 		signalExecutionStates: map[string]SignalExecutionState{},
 		executionLoaded:       map[string]bool{},
+		btcVetoCooldowns:      map[string]chanlunV2BTCCooldown{},
 		positionStates:        map[string]PositionManagementState{},
 		configHash:            hashChanlunV2Config(cfg),
 	}, nil
@@ -103,6 +116,7 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 	var allDecisions []decision.Decision
 	var diagnostics []string
 	var downgradedStaleSignals []string
+	var btcHardVetoPrechecks []map[string]any
 	rawSignalCount := 0
 	activeSignalCount := 0
 	parentStructureCount := 0
@@ -177,6 +191,15 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 				continue
 			}
 			d = e.applyV2StopTakeProfitFallback(ctx, d, sig, multiResult, timeframes["trade"])
+			if suppressed, diagnostic, sample := e.applyBTCHardVetoPrecheck(ctx, d); suppressed {
+				if diagnostic != "" {
+					diagnostics = append(diagnostics, diagnostic)
+				}
+				if len(sample) > 0 {
+					btcHardVetoPrechecks = append(btcHardVetoPrechecks, sample)
+				}
+				continue
+			}
 			if downgraded, diagnostic := e.downgradeExpiredChanlunV2Signal(ctx, d, timeframes["trade"]); downgraded {
 				if diagnostic != "" {
 					diagnostics = append(diagnostics, diagnostic)
@@ -261,10 +284,12 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 			"open_rejections":             chanlunV2OpenRejectionReasons(openRejections),
 			"freshness_rejections":        chanlunV2OpenRejectionReasons(freshnessRejections),
 			"freshness_suppressed":        append([]string(nil), freshnessSuppressed...),
+			"btc_hard_veto_prechecks":     btcHardVetoPrechecks,
 			"terminal_suppressed_count":   terminalSuppressedCount,
 			"terminal_suppressed_reasons": terminalSuppressedReasons,
 			"terminal_suppressed_samples": append([]string(nil), terminalSuppressedSamples...),
 			"validation_rejections":       chanlunV2OpenRejectionReasons(validationRejections),
+			"remaining_hard_blocks":       chanlunV2RemainingHardBlocks(openRejections),
 			"action_reasons":              append([]string(nil), actionReasons...),
 		},
 	}, nil
@@ -601,6 +626,87 @@ func (e *Engine) signalToDecision(ctx *decision.Context, symbol string, sig Sign
 			"reason_code":           "chanlun_v2_signal",
 		},
 	}
+}
+
+func (e *Engine) applyBTCHardVetoPrecheck(ctx *decision.Context, d decision.Decision) (bool, string, map[string]any) {
+	if e == nil || ctx == nil || !decision.IsOpenLikeAction(d.Action) || ctx.MarketDataMap == nil {
+		return false, "", nil
+	}
+	btcData := ctx.MarketDataMap["BTCUSDT"]
+	veto := decision.EvaluateBTCHighBetaLongVeto(d.Symbol, d.Action, btcData)
+	key := chanlunV2BTCCooldownKey(ctx.TraderID, d.Symbol, d.SignalID)
+	if !veto.Applies || !veto.Veto {
+		e.clearBTCHardVetoCooldown(key)
+		return false, "", nil
+	}
+	if d.StrategyMetadata == nil {
+		d.StrategyMetadata = map[string]any{}
+	}
+	reasonCode := "btc_hard_veto_precheck"
+	d.StrategyMetadata["reason_code"] = reasonCode
+	d.StrategyMetadata["guard_reason_code"] = reasonCode
+	d.StrategyMetadata["action_timestamp"] = time.Now().UnixMilli()
+	d.StrategyMetadata["btc_hard_veto_reason"] = veto.Reason
+	cooldownUntil, suppressedCount := e.recordBTCHardVetoCooldown(ctx.TraderID, d, reasonCode, veto)
+	sample := map[string]any{
+		"symbol":           market.Normalize(d.Symbol),
+		"action":           d.Action,
+		"signal_id":        d.SignalID,
+		"signal_type":      d.SignalType,
+		"reason_code":      reasonCode,
+		"reason":           veto.Reason,
+		"cooldown_until":   cooldownUntil.Format(time.RFC3339),
+		"suppressed_count": suppressedCount,
+		"btc":              veto.Diagnostics,
+	}
+	label := firstNonEmptyString(d.SignalType, d.Action, "signal")
+	diagnostic := fmt.Sprintf("%s %s btc_hard_veto_precheck: %s cooldown_until=%s suppressed_count=%d",
+		market.Normalize(d.Symbol), label, veto.Reason, cooldownUntil.Format(time.RFC3339), suppressedCount)
+	return true, diagnostic, sample
+}
+
+func chanlunV2BTCCooldownKey(traderID, symbol, signalID string) string {
+	return strings.Join([]string{
+		strings.TrimSpace(traderID),
+		market.Normalize(symbol),
+		strings.TrimSpace(signalID),
+	}, "|")
+}
+
+func (e *Engine) clearBTCHardVetoCooldown(key string) {
+	if e == nil || strings.TrimSpace(key) == "" {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.btcVetoCooldowns != nil {
+		delete(e.btcVetoCooldowns, key)
+	}
+}
+
+func (e *Engine) recordBTCHardVetoCooldown(traderID string, d decision.Decision, reasonCode string, veto decision.BTCHighBetaLongVetoResult) (time.Time, int) {
+	now := time.Now()
+	cooldownUntil := now.Add(15 * time.Minute)
+	key := chanlunV2BTCCooldownKey(traderID, d.Symbol, d.SignalID)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.btcVetoCooldowns == nil {
+		e.btcVetoCooldowns = map[string]chanlunV2BTCCooldown{}
+	}
+	record := e.btcVetoCooldowns[key]
+	if record.CooldownUntil.After(now) {
+		cooldownUntil = record.CooldownUntil
+	}
+	record.TraderID = strings.TrimSpace(traderID)
+	record.Symbol = market.Normalize(d.Symbol)
+	record.SignalID = strings.TrimSpace(d.SignalID)
+	record.ReasonCode = reasonCode
+	record.Reason = veto.Reason
+	record.CooldownUntil = cooldownUntil
+	record.SuppressedCount++
+	record.LastDiagnostics = veto.Diagnostics
+	e.btcVetoCooldowns[key] = record
+	return cooldownUntil, record.SuppressedCount
 }
 
 func (e *Engine) downgradeExpiredChanlunV2Signal(ctx *decision.Context, d decision.Decision, tradeTF string) (bool, string) {
@@ -1261,6 +1367,44 @@ func chanlunV2OpenRejectionReasons(rejections []decision.OpenRejection) []string
 		}
 	}
 	return reasons
+}
+
+func chanlunV2RemainingHardBlocks(rejections []decision.OpenRejection) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			return
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	for _, rejection := range rejections {
+		text := strings.ToLower(rejection.Reason + " " + strings.Join(rejection.GateReasons, " "))
+		reasonCode := strings.ToLower(firstNonEmptyString(
+			metadataString(rejection.GateDiagnostics, "reason_code"),
+			metadataString(rejection.StrategyMetadata, "reason_code"),
+		))
+		switch {
+		case strings.Contains(text, "btc 1h/4h 明显转弱") || strings.Contains(text, "高 beta 山寨多单") || reasonCode == "btc":
+			add("btc_hard_veto")
+		case strings.Contains(text, "风险回报比过低") || strings.Contains(text, "< 2.5:1"):
+			add("final_rr_2.5")
+		case strings.Contains(reasonCode, "confidence") || strings.Contains(text, "置信"):
+			add("confidence_gate")
+		case strings.Contains(reasonCode, "position_sizing"):
+			add("position_sizing")
+		case strings.Contains(text, "执行") || strings.Contains(text, "保护单"):
+			add("execution_quality")
+		case strings.Contains(text, "亏损模式") || strings.Contains(reasonCode, "loss_mode"):
+			add("loss_mode")
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func summarizeChanlunV2Diagnostics(label string, values []string) string {

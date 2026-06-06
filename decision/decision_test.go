@@ -359,6 +359,42 @@ func TestBuildSystemPrompt_UsesExactNetRRFormula(t *testing.T) {
 	}
 }
 
+func TestValidateOpenDecisionKeepsFinalRR25ForChanlunV2LoosenMetadata(t *testing.T) {
+	ctx := newTestContext()
+	ctx.DecisionMode = "chanlun_v2"
+	ctx.MarketDataMap["DOGEUSDT"] = newTestMarketData(100)
+	ctx.MarketDataMap["BTCUSDT"] = supportiveBTCMarketData(100000)
+	ctx.FrequencyPolicy = &FrequencyPolicy{
+		Mode:          "balanced",
+		EffectiveMode: "loosen",
+		LoosenMode: LoosenModePolicy{
+			Enabled:                 true,
+			InactivityWindowMinutes: 12 * 60,
+			MinNetRRDelta:           -0.4,
+		},
+	}
+	d := &Decision{
+		Symbol:          "DOGEUSDT",
+		Action:          "open_short",
+		Leverage:        5,
+		PositionSizeUSD: 100,
+		StopLoss:        110,
+		TakeProfit:      84,
+		Confidence:      95,
+		StrategyMode:    "chanlun_v2",
+		SignalType:      "sell2",
+		StrategyMetadata: map[string]any{
+			"parent_signal_type":   "sell2",
+			"min_remaining_net_rr": 1.1,
+			"remaining_net_rr":     1.4,
+			"active_mode":          "loosen",
+		},
+	}
+	if err := validateOpenDecision(d, ctx); err == nil || !strings.Contains(err.Error(), "风险回报比过低") {
+		t.Fatalf("chanlun_v2 loosen元数据不应降低最终RR 2.5硬阈值: %v", err)
+	}
+}
+
 func TestValidateOpenDecision_IgnoresRollingGateConfidenceForFreshStrategy(t *testing.T) {
 	ctx := newTestContext()
 	ctx.MarketDataMap["BCHUSDT"] = newTestMarketData(100)

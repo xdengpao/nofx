@@ -12,6 +12,7 @@
 ## RR 与追价
 
 - `entry_zone.min_remaining_net_rr` 默认 2.0；`signal_type_min_rr` 可按 `buy2@1h`、`sell*@1h`、`*@15m` 等粒度覆盖。
+- `entry_timing.entry_zone.signal_type_min_rr` 只控制结构/entry trigger 是否进入候选，不降低最终开仓验证；真实下单前仍必须满足全局净 RR >= 2.5。
 - `theoretical_rr_unreachable_skip=true` 会在入场前预过滤理论 RR 不可达的结构，并终结生命周期。
 - 追价使用双轨判断：`max_chase_ratio` 或 `max_chase_atr_multiplier` 任一通过即可继续。
 - `fresh_age_chase_relax` 只对刚产生的结构放宽追价比例。

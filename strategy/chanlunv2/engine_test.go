@@ -918,6 +918,82 @@ func TestChanlunV2LoosenDoesNotBypassBTCHardVeto(t *testing.T) {
 	}
 }
 
+func TestChanlunV2BTCHardVetoPrecheckSuppressesAndClearsOnRegimeChange(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	ctx.MarketDataMap["BNBUSDT"] = chanlunV2ValidationMarketData("BNBUSDT", 100)
+	ctx.MarketDataMap["BTCUSDT"] = chanlunV2BearishBTCMarketData()
+	d := engine.signalToDecision(ctx, "BNBUSDT", Signal{
+		SignalType: "buy2",
+		Direction:  "long",
+		StopLoss:   95,
+		TakeProfit: 120,
+		Confidence: 95,
+		Timestamp:  1710000000000,
+	}, "1h")
+
+	suppressed, diagnostic, sample := engine.applyBTCHardVetoPrecheck(ctx, d)
+	if !suppressed || !strings.Contains(diagnostic, "btc_hard_veto_precheck") {
+		t.Fatalf("BTC bearish下应前置抑制high beta long: suppressed=%v diagnostic=%q sample=%+v", suppressed, diagnostic, sample)
+	}
+	if sample["reason_code"] != "btc_hard_veto_precheck" || sample["cooldown_until"] == "" {
+		t.Fatalf("应输出结构化precheck样本: %+v", sample)
+	}
+
+	suppressed, diagnostic, sample = engine.applyBTCHardVetoPrecheck(ctx, d)
+	if !suppressed || !strings.Contains(diagnostic, "suppressed_count=2") || sample["suppressed_count"] != 2 {
+		t.Fatalf("重复同signal应进入短期冷却: diagnostic=%q sample=%+v", diagnostic, sample)
+	}
+
+	ctx.MarketDataMap["BTCUSDT"] = chanlunV2ValidationMarketData("BTCUSDT", 100000)
+	suppressed, diagnostic, sample = engine.applyBTCHardVetoPrecheck(ctx, d)
+	if suppressed || diagnostic != "" || sample != nil {
+		t.Fatalf("BTC regime解除后应重新允许评估: suppressed=%v diagnostic=%q sample=%+v", suppressed, diagnostic, sample)
+	}
+}
+
+func TestChanlunV2LoosenDiagnosticsExplainRulesAndDuration(t *testing.T) {
+	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
+	if err != nil {
+		t.Fatalf("创建缠论V2引擎失败: %v", err)
+	}
+	ctx := chanlunV2ValidationContext(1000)
+	noOpenSince := time.Now().Add(-13 * time.Hour)
+	ctx.FrequencyState = &decision.FrequencyState{
+		InactivityMinutes: 13 * 60,
+		InactivitySource:  "log_window_start",
+		NoOpenSince:       noOpenSince,
+	}
+	ctx.FrequencyPolicy = &decision.FrequencyPolicy{
+		Mode:          "balanced",
+		EffectiveMode: "balanced",
+		LoosenMode: decision.LoosenModePolicy{
+			Enabled:                 true,
+			InactivityWindowMinutes: 12 * 60,
+			MaxDurationHours:        24,
+		},
+	}
+	engine.loosenModeController(ctx)
+	diagnostics := engine.effectiveEntryTimingDiagnostics(ctx)
+	if diagnostics["active_mode"] != "loosen" || diagnostics["loosen_duration_enforced"] != false ||
+		diagnostics["loosen_max_duration_hours"] != 24 {
+		t.Fatalf("loosen诊断应说明当前模式和duration语义: %+v", diagnostics)
+	}
+	if diagnostics["loosen_started_at"] == "" || diagnostics["loosen_expires_at"] == "" {
+		t.Fatalf("loosen诊断应输出started/expires: %+v", diagnostics)
+	}
+	rules, ok := diagnostics["loosen_applied_rules"].([]map[string]any)
+	if !ok || len(rules) == 0 {
+		t.Fatalf("loosen诊断应输出放宽规则: %+v", diagnostics)
+	}
+	if blocks, ok := diagnostics["remaining_hard_blocks"].([]string); !ok || len(blocks) == 0 {
+		t.Fatalf("loosen诊断应说明剩余硬阻断: %+v", diagnostics)
+	}
+}
+
 func TestChanlunV2LoosenExitsAfterOpen(t *testing.T) {
 	engine, err := NewEngine(config.ChanlunV2StrategyConfig{})
 	if err != nil {
