@@ -1705,6 +1705,38 @@ func TestBuildTradingContext_InjectsAIStateRiskAndExecutionQuality(t *testing.T)
 	}
 }
 
+func TestFillCandidateSnapshotsCopiesSideDiagnostics(t *testing.T) {
+	ctx := &decision.Context{
+		CandidateCoins: []decision.CandidateCoin{{
+			Symbol:           "ETHUSDT",
+			Sources:          []string{"dynamic"},
+			Tier:             "satellite",
+			PoolScore:        72,
+			PoolReasons:      []string{"趋势 80"},
+			SideBias:         "short",
+			ShortSideScore:   76,
+			LongSideScore:    42,
+			SideReasons:      []string{"DI-强于DI+"},
+			IncludedInPrompt: true,
+		}},
+	}
+	record := &logger.DecisionRecord{}
+
+	(&AutoTrader{}).fillCandidateSnapshots(record, ctx)
+
+	if len(record.CandidateDetails) != 1 {
+		t.Fatalf("应写入候选快照: %+v", record.CandidateDetails)
+	}
+	got := record.CandidateDetails[0]
+	if got.SideBias != "short" || got.ShortSideScore != 76 || got.LongSideScore != 42 || len(got.SideReasons) != 1 {
+		t.Fatalf("side diagnostics 未复制到日志快照: %+v", got)
+	}
+	ctx.CandidateCoins[0].SideReasons[0] = "mutated"
+	if record.CandidateDetails[0].SideReasons[0] == "mutated" {
+		t.Fatalf("side reasons 应深拷贝，实际: %+v", record.CandidateDetails[0].SideReasons)
+	}
+}
+
 func TestGetAccountInfoTreatsCurrentEquityAsCostBasisWhenNoTrades(t *testing.T) {
 	at := &AutoTrader{
 		trader: &mockTrader{balance: map[string]interface{}{

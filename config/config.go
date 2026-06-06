@@ -168,18 +168,34 @@ type ChanlunV2PositionManagementConfig struct {
 
 // DynamicCandidatePoolConfig 动态候选池配置。
 type DynamicCandidatePoolConfig struct {
-	Enabled                 *bool    `json:"enabled,omitempty"`
-	RefreshHour             int      `json:"refresh_hour"`
-	TTLHours                int      `json:"ttl_hours"`
-	MinPoolSize             int      `json:"min_pool_size"`
-	MaxPoolSize             int      `json:"max_pool_size"`
-	PromptCandidateLimit    int      `json:"prompt_candidate_limit"`
-	CoreSymbols             []string `json:"core_symbols"`
-	MinOIValueUSD           float64  `json:"min_oi_value_usd"`
-	MinQuoteVolume24hUSD    float64  `json:"min_quote_volume_24h_usd"`
-	CooldownDaysAfterLosses int      `json:"cooldown_days_after_losses"`
-	ExchangeVolumeTopLimit  int      `json:"exchange_volume_top_limit"`
-	SnapshotPath            string   `json:"snapshot_path"`
+	Enabled                 *bool                                   `json:"enabled,omitempty"`
+	RefreshHour             int                                     `json:"refresh_hour"`
+	TTLHours                int                                     `json:"ttl_hours"`
+	MinPoolSize             int                                     `json:"min_pool_size"`
+	MaxPoolSize             int                                     `json:"max_pool_size"`
+	PromptCandidateLimit    int                                     `json:"prompt_candidate_limit"`
+	CoreSymbols             []string                                `json:"core_symbols"`
+	MinOIValueUSD           float64                                 `json:"min_oi_value_usd"`
+	MinQuoteVolume24hUSD    float64                                 `json:"min_quote_volume_24h_usd"`
+	CooldownDaysAfterLosses int                                     `json:"cooldown_days_after_losses"`
+	ExchangeVolumeTopLimit  int                                     `json:"exchange_volume_top_limit"`
+	SnapshotPath            string                                  `json:"snapshot_path"`
+	ShortSideCoverage       DynamicCandidateShortSideCoverageConfig `json:"short_side_coverage,omitempty"`
+}
+
+// DynamicCandidateShortSideCoverageConfig 控制 BTC 弱势时 short-side 候选覆盖灰度。
+type DynamicCandidateShortSideCoverageConfig struct {
+	Enabled               *bool   `json:"enabled,omitempty"`
+	ReportOnly            *bool   `json:"report_only,omitempty"`
+	MinPromptCount        int     `json:"min_prompt_count,omitempty"`
+	MaxPromptRatio        float64 `json:"max_prompt_ratio,omitempty"`
+	RiskOffScoreBoost     float64 `json:"risk_off_score_boost,omitempty"`
+	MinADX                float64 `json:"min_adx,omitempty"`
+	MinRelativeWeakness1h float64 `json:"min_relative_weakness_1h,omitempty"`
+	MinRelativeWeakness4h float64 `json:"min_relative_weakness_4h,omitempty"`
+	RequireBearishDI      bool    `json:"require_bearish_di,omitempty"`
+	RequireBearishEMA     bool    `json:"require_bearish_ema,omitempty"`
+	MaxAbsFundingRate     float64 `json:"max_abs_funding_rate,omitempty"`
 }
 
 // TradingFrequencyReportOnlyConfig 控制只观测、不实盘生效的频率优化诊断。
@@ -456,11 +472,54 @@ func (c *DynamicCandidatePoolConfig) ApplyDefaults() {
 	if c.SnapshotPath == "" {
 		c.SnapshotPath = "data/dynamic_candidate_pool.json"
 	}
+	c.ShortSideCoverage = NormalizeDynamicCandidateShortSideCoverageConfig(c.ShortSideCoverage)
 }
 
 // IsEnabled 返回动态候选池是否启用。
 func (c DynamicCandidatePoolConfig) IsEnabled() bool {
 	return c.Enabled == nil || *c.Enabled
+}
+
+// NormalizeDynamicCandidateShortSideCoverageConfig 归一化 short-side 候选覆盖灰度配置。
+func NormalizeDynamicCandidateShortSideCoverageConfig(cfg DynamicCandidateShortSideCoverageConfig) DynamicCandidateShortSideCoverageConfig {
+	if cfg.Enabled == nil {
+		cfg.Enabled = boolPtr(false)
+	}
+	if cfg.ReportOnly == nil {
+		cfg.ReportOnly = boolPtr(true)
+	}
+	if cfg.MinPromptCount <= 0 || cfg.MinPromptCount > 20 {
+		cfg.MinPromptCount = 3
+	}
+	if cfg.MaxPromptRatio <= 0 || cfg.MaxPromptRatio > 1 {
+		cfg.MaxPromptRatio = 0.4
+	}
+	if cfg.RiskOffScoreBoost <= 0 || cfg.RiskOffScoreBoost > 50 {
+		cfg.RiskOffScoreBoost = 8
+	}
+	if cfg.MinADX <= 0 || cfg.MinADX > 100 {
+		cfg.MinADX = 18
+	}
+	if cfg.MinRelativeWeakness1h < 0 || cfg.MinRelativeWeakness1h > 50 {
+		cfg.MinRelativeWeakness1h = 0.5
+	}
+	if cfg.MinRelativeWeakness4h < 0 || cfg.MinRelativeWeakness4h > 100 {
+		cfg.MinRelativeWeakness4h = 1.0
+	}
+	if cfg.MaxAbsFundingRate <= 0 || cfg.MaxAbsFundingRate > 0.01 {
+		cfg.MaxAbsFundingRate = 0.001
+	}
+	return cfg
+}
+
+// IsEnabled 返回 short-side 覆盖是否显式启用。
+func (c DynamicCandidateShortSideCoverageConfig) IsEnabled() bool {
+	return c.Enabled != nil && *c.Enabled
+}
+
+// IsReportOnly 返回 short-side 覆盖是否只输出诊断。
+func (c DynamicCandidateShortSideCoverageConfig) IsReportOnly() bool {
+	return c.ReportOnly == nil || *c.ReportOnly
 }
 
 // NormalizeChanlunV2StrategyConfig 填充缠论 V2 运行时默认配置。

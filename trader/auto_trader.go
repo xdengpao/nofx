@@ -1283,6 +1283,10 @@ func (at *AutoTrader) fillCandidateSnapshots(record *logger.DecisionRecord, ctx 
 			PoolScore:        coin.PoolScore,
 			PoolReasons:      append([]string(nil), coin.PoolReasons...),
 			MarketState:      coin.MarketState,
+			SideBias:         coin.SideBias,
+			ShortSideScore:   coin.ShortSideScore,
+			LongSideScore:    coin.LongSideScore,
+			SideReasons:      append([]string(nil), coin.SideReasons...),
 			StateConfidence:  coin.StateConfidence,
 			DataQuality:      coin.DataQuality,
 			FilterReason:     coin.FilterReason,
@@ -1522,6 +1526,10 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 			coin.Tier = detail.Tier
 			coin.PoolScore = detail.Score
 			coin.PoolReasons = append([]string(nil), detail.Reasons...)
+			coin.SideBias = detail.SideProfile.Bias
+			coin.ShortSideScore = detail.SideProfile.ShortScore
+			coin.LongSideScore = detail.SideProfile.LongScore
+			coin.SideReasons = append([]string(nil), detail.SideProfile.Reasons...)
 		}
 		candidateCoins = append(candidateCoins, coin)
 	}
@@ -1529,6 +1537,13 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	if pool.IsDynamicCandidatePoolEnabled() {
 		log.Printf("📋 候选币种池: 动态候选池(regime=%s) = 总计%d个候选币种",
 			mergedPool.MarketRegime, len(candidateCoins))
+		if mergedPool.ShortSideSummary.Enabled {
+			log.Printf("📋 动态候选池short-side覆盖: btc_weak=%v, report_only=%v, short_side_candidate_count=%d, short_side_prompt_count=%d",
+				mergedPool.ShortSideSummary.BTCWeak,
+				mergedPool.ShortSideSummary.ReportOnly,
+				mergedPool.ShortSideSummary.CandidateCount,
+				mergedPool.ShortSideSummary.PromptCount)
+		}
 	} else {
 		log.Printf("📋 合并币种池: AI500前%d + OI_Top20 = 总计%d个候选币种",
 			ai500Limit, len(candidateCoins))

@@ -61,6 +61,35 @@ func TestLatestSignalsWithOptionsReturnsV2ReportMarkers(t *testing.T) {
 	}
 }
 
+func TestEntryTriggerFunnelDiagnosticsAggregatesCounts(t *testing.T) {
+	funnel := newEntryTriggerFunnelDiagnostics()
+
+	funnel.addRawSignals("ethusdt", 2)
+	funnel.addParentSeen("ETHUSDT")
+	funnel.addWaitingForTrigger("ETHUSDT")
+	funnel.addParentSeen("SOLUSDT")
+	funnel.addParentTerminal("SOLUSDT", "entry_rr_invalid")
+	funnel.addParentSeen("BNBUSDT")
+	funnel.addTriggerRejected("BNBUSDT", "entry_trigger_low_confidence")
+	funnel.addParentSeen("XRPUSDT")
+	funnel.addTriggerReady("XRPUSDT", "pullback_retest_resume")
+	funnel.withTerminalSuppressions(3)
+
+	got := funnel.compact()
+	if got.RawSignalCount != 2 || got.ParentStructureCount != 4 || got.WaitingForTriggerCount != 1 || got.TriggerReadyCount != 1 {
+		t.Fatalf("漏斗聚合计数不符合预期: %+v", got)
+	}
+	if got.ParentTerminalByReason["entry_rr_invalid"] != 1 || got.TriggerRejectedByReason["entry_trigger_low_confidence"] != 1 {
+		t.Fatalf("漏斗原因聚合不符合预期: %+v", got)
+	}
+	if got.TriggerReadyByType["pullback_retest_resume"] != 1 || got.TerminalSuppressedCount != 3 {
+		t.Fatalf("trigger ready或terminal suppression聚合不符合预期: %+v", got)
+	}
+	if got.PerSymbol["ETHUSDT"].RawSignalCount != 2 || got.PerSymbol["SOLUSDT"].ParentTerminalByReason["entry_rr_invalid"] != 1 {
+		t.Fatalf("per_symbol聚合不符合预期: %+v", got.PerSymbol)
+	}
+}
+
 func TestChanlunV2DecisionReasonSummariesExposeOpenAndCloseReasons(t *testing.T) {
 	reasons := chanlunV2DecisionReasonSummaries([]decision.Decision{
 		{

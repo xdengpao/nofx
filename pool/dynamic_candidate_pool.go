@@ -32,26 +32,106 @@ type DynamicCandidatePoolConfig struct {
 	CooldownDaysAfterLosses int
 	ExchangeVolumeTopLimit  int
 	SnapshotPath            string
+	ShortSideCoverage       DynamicCandidateShortSideCoverageConfig
+}
+
+// DynamicCandidateShortSideCoverageConfig 控制 BTC 弱势时的 short-side 候选覆盖评估。
+type DynamicCandidateShortSideCoverageConfig struct {
+	Enabled               bool
+	ReportOnly            bool
+	MinPromptCount        int
+	MaxPromptRatio        float64
+	RiskOffScoreBoost     float64
+	MinADX                float64
+	MinRelativeWeakness1h float64
+	MinRelativeWeakness4h float64
+	RequireBearishDI      bool
+	RequireBearishEMA     bool
+	MaxAbsFundingRate     float64
+}
+
+// CoinPoolSourceConfig 描述评估命令使用的候选池数据源，避免 dry-run 污染包级配置。
+type CoinPoolSourceConfig struct {
+	CoinPoolAPIURL  string
+	OITopAPIURL     string
+	UseDefaultCoins bool
+	DefaultCoins    []string
+	CacheDir        string
+	Timeout         time.Duration
+	useGlobalConfig bool
+}
+
+// DynamicPoolPreviewOptions 控制动态候选池只读预览。
+type DynamicPoolPreviewOptions struct {
+	AI500Limit      int
+	PositionSymbols []string
+	Performance     *logger.PerformanceAnalysis
+	PoolConfig      DynamicCandidatePoolConfig
+	SourceConfig    CoinPoolSourceConfig
+	SnapshotPath    string
+	WriteSnapshot   bool
+	ForceRefresh    bool
+}
+
+// MarketRegimeDiagnostics 记录 BTC regime 的结构化依据。
+type MarketRegimeDiagnostics struct {
+	Regime            string   `json:"regime"`
+	BTCPriceChange1h  float64  `json:"btc_price_change_1h,omitempty"`
+	BTCPriceChange4h  float64  `json:"btc_price_change_4h,omitempty"`
+	BTCADX            float64  `json:"btc_adx,omitempty"`
+	BTCDIPlus         float64  `json:"btc_di_plus,omitempty"`
+	BTCDIMinus        float64  `json:"btc_di_minus,omitempty"`
+	BTCEMA20          float64  `json:"btc_ema20,omitempty"`
+	BTCEMA50          float64  `json:"btc_ema50,omitempty"`
+	BTCBollingerWidth float64  `json:"btc_bollinger_width,omitempty"`
+	Reasons           []string `json:"reasons,omitempty"`
+}
+
+// CandidateSideProfile 记录候选标的的方向倾向，只影响候选覆盖，不是交易信号。
+type CandidateSideProfile struct {
+	Bias               string   `json:"bias,omitempty"`
+	ShortScore         float64  `json:"short_score,omitempty"`
+	LongScore          float64  `json:"long_score,omitempty"`
+	RelativeWeakness1h float64  `json:"relative_weakness_1h,omitempty"`
+	RelativeWeakness4h float64  `json:"relative_weakness_4h,omitempty"`
+	Reasons            []string `json:"reasons,omitempty"`
+	ReportOnly         bool     `json:"report_only,omitempty"`
+}
+
+// ShortSideSummary 汇总 BTC 弱势下 short-side 候选覆盖。
+type ShortSideSummary struct {
+	Enabled        bool     `json:"enabled"`
+	ReportOnly     bool     `json:"report_only"`
+	BTCWeak        bool     `json:"btc_weak"`
+	CandidateCount int      `json:"candidate_count,omitempty"`
+	PromptCount    int      `json:"prompt_count,omitempty"`
+	MinPromptCount int      `json:"min_prompt_count,omitempty"`
+	MaxPromptRatio float64  `json:"max_prompt_ratio,omitempty"`
+	Symbols        []string `json:"symbols,omitempty"`
+	Reasons        []string `json:"reasons,omitempty"`
 }
 
 // DynamicCandidatePool 是每日动态候选池快照。
 type DynamicCandidatePool struct {
-	GeneratedAt  time.Time          `json:"generated_at"`
-	ExpiresAt    time.Time          `json:"expires_at"`
-	MarketRegime string             `json:"market_regime"`
-	Symbols      []DynamicCandidate `json:"symbols"`
-	Removed      []CandidateReject  `json:"removed,omitempty"`
-	SourceStatus map[string]string  `json:"source_status,omitempty"`
+	GeneratedAt       time.Time               `json:"generated_at"`
+	ExpiresAt         time.Time               `json:"expires_at"`
+	MarketRegime      string                  `json:"market_regime"`
+	RegimeDiagnostics MarketRegimeDiagnostics `json:"regime_diagnostics,omitempty"`
+	ShortSideSummary  ShortSideSummary        `json:"short_side_summary,omitempty"`
+	Symbols           []DynamicCandidate      `json:"symbols"`
+	Removed           []CandidateReject       `json:"removed,omitempty"`
+	SourceStatus      map[string]string       `json:"source_status,omitempty"`
 }
 
 // DynamicCandidate 记录候选币的池内分层、评分和入池原因。
 type DynamicCandidate struct {
-	Symbol  string           `json:"symbol"`
-	Tier    string           `json:"tier"`
-	Score   float64          `json:"score"`
-	Sources []string         `json:"sources"`
-	Reasons []string         `json:"reasons,omitempty"`
-	Metrics CandidateMetrics `json:"metrics"`
+	Symbol      string               `json:"symbol"`
+	Tier        string               `json:"tier"`
+	Score       float64              `json:"score"`
+	Sources     []string             `json:"sources"`
+	Reasons     []string             `json:"reasons,omitempty"`
+	Metrics     CandidateMetrics     `json:"metrics"`
+	SideProfile CandidateSideProfile `json:"side_profile,omitempty"`
 }
 
 // CandidateMetrics 记录动态评分使用的核心指标。
@@ -115,6 +195,21 @@ func defaultDynamicCandidatePoolConfig() DynamicCandidatePoolConfig {
 		CooldownDaysAfterLosses: 2,
 		ExchangeVolumeTopLimit:  30,
 		SnapshotPath:            "data/dynamic_candidate_pool.json",
+		ShortSideCoverage:       defaultDynamicCandidateShortSideCoverageConfig(),
+	}
+}
+
+func defaultDynamicCandidateShortSideCoverageConfig() DynamicCandidateShortSideCoverageConfig {
+	return DynamicCandidateShortSideCoverageConfig{
+		Enabled:               false,
+		ReportOnly:            true,
+		MinPromptCount:        3,
+		MaxPromptRatio:        0.4,
+		RiskOffScoreBoost:     8,
+		MinADX:                18,
+		MinRelativeWeakness1h: 0.5,
+		MinRelativeWeakness4h: 1.0,
+		MaxAbsFundingRate:     0.001,
 	}
 }
 
@@ -179,7 +274,38 @@ func normalizeDynamicCandidatePoolConfig(cfg DynamicCandidatePoolConfig) Dynamic
 	if cfg.SnapshotPath == "" {
 		cfg.SnapshotPath = defaults.SnapshotPath
 	}
+	cfg.ShortSideCoverage = normalizeDynamicCandidateShortSideCoverageConfig(cfg.ShortSideCoverage)
 	cfg.CoreSymbols = normalizeSymbolList(cfg.CoreSymbols)
+	return cfg
+}
+
+func normalizeDynamicCandidateShortSideCoverageConfig(cfg DynamicCandidateShortSideCoverageConfig) DynamicCandidateShortSideCoverageConfig {
+	defaults := defaultDynamicCandidateShortSideCoverageConfig()
+	enabled := cfg.Enabled
+	reportOnly := cfg.ReportOnly
+	if cfg.MinPromptCount <= 0 {
+		cfg.MinPromptCount = defaults.MinPromptCount
+	}
+	if cfg.MaxPromptRatio <= 0 || cfg.MaxPromptRatio > 1 {
+		cfg.MaxPromptRatio = defaults.MaxPromptRatio
+	}
+	if cfg.RiskOffScoreBoost <= 0 || cfg.RiskOffScoreBoost > 50 {
+		cfg.RiskOffScoreBoost = defaults.RiskOffScoreBoost
+	}
+	if cfg.MinADX <= 0 || cfg.MinADX > 100 {
+		cfg.MinADX = defaults.MinADX
+	}
+	if cfg.MinRelativeWeakness1h < 0 || cfg.MinRelativeWeakness1h > 50 {
+		cfg.MinRelativeWeakness1h = defaults.MinRelativeWeakness1h
+	}
+	if cfg.MinRelativeWeakness4h < 0 || cfg.MinRelativeWeakness4h > 100 {
+		cfg.MinRelativeWeakness4h = defaults.MinRelativeWeakness4h
+	}
+	if cfg.MaxAbsFundingRate <= 0 || cfg.MaxAbsFundingRate > 0.01 {
+		cfg.MaxAbsFundingRate = defaults.MaxAbsFundingRate
+	}
+	cfg.Enabled = enabled
+	cfg.ReportOnly = reportOnly
 	return cfg
 }
 
@@ -202,48 +328,17 @@ func GetDynamicMergedCoinPool(ai500Limit int, positionSymbols []string, performa
 		return GetMergedCoinPool(ai500Limit)
 	}
 
-	detailMap := make(map[string]DynamicCandidate, len(snapshot.Symbols))
-	for _, candidate := range snapshot.Symbols {
-		detailMap[candidate.Symbol] = candidate
-	}
-
-	sources := make(map[string][]string, len(selected))
-	dynamicDetails := make(map[string]DynamicCandidate, len(selected))
-	coreSet := makeStringSet(cfg.CoreSymbols)
-	for _, symbol := range selected {
-		if detail, ok := detailMap[symbol]; ok {
-			sources[symbol] = append([]string(nil), detail.Sources...)
-			dynamicDetails[symbol] = detail
-			continue
-		}
-		if coreSet[symbol] {
-			sources[symbol] = []string{"core"}
-			dynamicDetails[symbol] = DynamicCandidate{
-				Symbol:  symbol,
-				Tier:    "core",
-				Sources: []string{"core"},
-				Reasons: []string{"核心币强制纳入上下文"},
-			}
-			continue
-		}
-		sources[symbol] = []string{"position"}
-		dynamicDetails[symbol] = DynamicCandidate{
-			Symbol:  symbol,
-			Tier:    "position",
-			Sources: []string{"position"},
-			Reasons: []string{"当前持仓强制纳入上下文"},
-		}
-	}
-
 	log.Printf("📋 动态候选池: regime=%s, 快照候选=%d, 本轮候选=%d",
 		snapshot.MarketRegime, len(snapshot.Symbols), len(selected))
+	if snapshot.ShortSideSummary.Enabled {
+		log.Printf("📋 short-side候选覆盖: btc_weak=%v, report_only=%v, candidates=%d, prompt=%d",
+			snapshot.ShortSideSummary.BTCWeak,
+			snapshot.ShortSideSummary.ReportOnly,
+			snapshot.ShortSideSummary.CandidateCount,
+			snapshot.ShortSideSummary.PromptCount)
+	}
 
-	return &MergedCoinPool{
-		AllSymbols:        selected,
-		SymbolSources:     sources,
-		DynamicCandidates: dynamicDetails,
-		MarketRegime:      snapshot.MarketRegime,
-	}, nil
+	return mergedPoolFromDynamicSnapshot(snapshot, selected, cfg, positionSymbols), nil
 }
 
 func loadOrRefreshDynamicCandidatePool(ai500Limit int, positionSymbols []string, performance *logger.PerformanceAnalysis, cfg DynamicCandidatePoolConfig) (*DynamicCandidatePool, error) {
@@ -272,6 +367,12 @@ func loadOrRefreshDynamicCandidatePool(ai500Limit int, positionSymbols []string,
 }
 
 func refreshDynamicCandidatePool(ai500Limit int, positionSymbols []string, performance *logger.PerformanceAnalysis, cfg DynamicCandidatePoolConfig) (*DynamicCandidatePool, error) {
+	return refreshDynamicCandidatePoolWithSources(ai500Limit, positionSymbols, performance, cfg, dynamicSourceConfigFromGlobals())
+}
+
+func refreshDynamicCandidatePoolWithSources(ai500Limit int, positionSymbols []string, performance *logger.PerformanceAnalysis, cfg DynamicCandidatePoolConfig, sourceCfg CoinPoolSourceConfig) (*DynamicCandidatePool, error) {
+	cfg = normalizeDynamicCandidatePoolConfig(cfg)
+	sourceCfg = normalizeCoinPoolSourceConfig(sourceCfg)
 	sourceStatus := make(map[string]string)
 	sources := make(map[string]map[string]bool)
 
@@ -289,10 +390,11 @@ func refreshDynamicCandidatePool(ai500Limit int, positionSymbols []string, perfo
 	for _, symbol := range cfg.CoreSymbols {
 		addSource(symbol, "core")
 	}
-	for _, symbol := range defaultMainstreamCoins {
+	defaultCoins := defaultCoinsFromSource(sourceCfg)
+	for _, symbol := range defaultCoins {
 		addSource(symbol, "default")
 	}
-	sourceStatus["default"] = fmt.Sprintf("ok:%d", len(defaultMainstreamCoins))
+	sourceStatus["default"] = fmt.Sprintf("ok:%d", len(defaultCoins))
 
 	for _, symbol := range positionSymbols {
 		addSource(symbol, "position")
@@ -301,8 +403,8 @@ func refreshDynamicCandidatePool(ai500Limit int, positionSymbols []string, perfo
 		sourceStatus["position"] = fmt.Sprintf("ok:%d", len(positionSymbols))
 	}
 
-	if !coinPoolConfig.UseDefaultCoins && strings.TrimSpace(coinPoolConfig.APIURL) != "" {
-		ai500Symbols, err := GetTopRatedCoins(ai500Limit)
+	if !sourceCfg.UseDefaultCoins && strings.TrimSpace(sourceCfg.CoinPoolAPIURL) != "" {
+		ai500Symbols, err := getTopRatedCoinsFromSource(ai500Limit, sourceCfg)
 		if err != nil {
 			sourceStatus["ai500"] = "error:" + err.Error()
 		} else {
@@ -311,13 +413,13 @@ func refreshDynamicCandidatePool(ai500Limit int, positionSymbols []string, perfo
 				addSource(symbol, "ai500")
 			}
 		}
-	} else if coinPoolConfig.UseDefaultCoins {
+	} else if sourceCfg.UseDefaultCoins {
 		sourceStatus["ai500"] = "skipped:use_default_coins"
 	} else {
 		sourceStatus["ai500"] = "skipped:no_api_url"
 	}
 
-	oiSymbols, err := GetOITopSymbols()
+	oiSymbols, err := getOITopSymbolsFromSource(sourceCfg)
 	if err != nil {
 		sourceStatus["oi_top"] = "error:" + err.Error()
 	} else {
@@ -345,7 +447,7 @@ func refreshDynamicCandidatePool(ai500Limit int, positionSymbols []string, perfo
 
 	now := time.Now()
 	btcData, _ := getMarketDataForDynamicPool("BTCUSDT")
-	regime := detectDynamicMarketRegime(btcData)
+	regime, regimeDiagnostics := detectDynamicMarketRegimeWithDiagnostics(btcData)
 
 	coreSet := makeStringSet(cfg.CoreSymbols)
 	positionSet := makeStringSet(positionSymbols)
@@ -368,14 +470,20 @@ func refreshDynamicCandidatePool(ai500Limit int, positionSymbols []string, perfo
 		}
 
 		score, reasons := scoreDynamicCandidate(symbol, data, metrics, performance, forced, regime)
+		sideProfile := scoreDirectionalProfile(symbol, data, btcData, metrics, cfg.ShortSideCoverage)
+		if cfg.ShortSideCoverage.Enabled && !cfg.ShortSideCoverage.ReportOnly && isBTCWeakRegime(regime, regimeDiagnostics) && sideProfile.Bias == "short" {
+			score += cfg.ShortSideCoverage.RiskOffScoreBoost
+			reasons = append(reasons, fmt.Sprintf("BTC弱势short-side候选加分 %.1f", cfg.ShortSideCoverage.RiskOffScoreBoost))
+		}
 		tier := classifyDynamicTier(symbol, data, metrics, coreSet, positionSet)
 		candidates = append(candidates, DynamicCandidate{
-			Symbol:  symbol,
-			Tier:    tier,
-			Score:   score,
-			Sources: sourceList,
-			Reasons: reasons,
-			Metrics: metrics,
+			Symbol:      symbol,
+			Tier:        tier,
+			Score:       clamp(score, 0, 100),
+			Sources:     sourceList,
+			Reasons:     reasons,
+			Metrics:     metrics,
+			SideProfile: sideProfile,
 		})
 	}
 
@@ -390,14 +498,17 @@ func refreshDynamicCandidatePool(ai500Limit int, positionSymbols []string, perfo
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("动态候选池刷新后为空")
 	}
+	shortSideSummary := buildShortSideSummary(candidates, positionSymbols, cfg, regime, regimeDiagnostics)
 
 	return &DynamicCandidatePool{
-		GeneratedAt:  now,
-		ExpiresAt:    nextDynamicRefreshTime(now, cfg),
-		MarketRegime: regime,
-		Symbols:      candidates,
-		Removed:      rejects,
-		SourceStatus: sourceStatus,
+		GeneratedAt:       now,
+		ExpiresAt:         nextDynamicRefreshTime(now, cfg),
+		MarketRegime:      regime,
+		RegimeDiagnostics: regimeDiagnostics,
+		ShortSideSummary:  shortSideSummary,
+		Symbols:           candidates,
+		Removed:           rejects,
+		SourceStatus:      sourceStatus,
 	}, nil
 }
 
@@ -411,6 +522,184 @@ func loadDynamicCandidatePoolSnapshot(path string) (*DynamicCandidatePool, error
 		return nil, err
 	}
 	return &snapshot, nil
+}
+
+func dynamicSourceConfigFromGlobals() CoinPoolSourceConfig {
+	return CoinPoolSourceConfig{
+		CoinPoolAPIURL:  coinPoolConfig.APIURL,
+		OITopAPIURL:     oiTopConfig.APIURL,
+		UseDefaultCoins: coinPoolConfig.UseDefaultCoins,
+		DefaultCoins:    append([]string(nil), defaultMainstreamCoins...),
+		CacheDir:        coinPoolConfig.CacheDir,
+		Timeout:         coinPoolConfig.Timeout,
+		useGlobalConfig: true,
+	}
+}
+
+func normalizeCoinPoolSourceConfig(cfg CoinPoolSourceConfig) CoinPoolSourceConfig {
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 30 * time.Second
+	}
+	if cfg.CacheDir == "" {
+		cfg.CacheDir = "coin_pool_cache"
+	}
+	cfg.DefaultCoins = normalizeSymbolList(cfg.DefaultCoins)
+	if len(cfg.DefaultCoins) == 0 {
+		cfg.DefaultCoins = normalizeSymbolList(defaultMainstreamCoins)
+	}
+	return cfg
+}
+
+func defaultCoinsFromSource(cfg CoinPoolSourceConfig) []string {
+	cfg = normalizeCoinPoolSourceConfig(cfg)
+	return append([]string(nil), cfg.DefaultCoins...)
+}
+
+func getTopRatedCoinsFromSource(limit int, cfg CoinPoolSourceConfig) ([]string, error) {
+	if cfg.useGlobalConfig {
+		return GetTopRatedCoins(limit)
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	coins, err := fetchCoinPoolFromSource(cfg)
+	if err != nil {
+		return nil, err
+	}
+	available := make([]CoinInfo, 0, len(coins))
+	for _, coin := range coins {
+		if coin.IsAvailable {
+			available = append(available, coin)
+		}
+	}
+	if len(available) == 0 {
+		return nil, fmt.Errorf("没有可用的币种")
+	}
+	sort.SliceStable(available, func(i, j int) bool {
+		if available[i].Score == available[j].Score {
+			return normalizeSymbol(available[i].Pair) < normalizeSymbol(available[j].Pair)
+		}
+		return available[i].Score > available[j].Score
+	})
+	if limit > len(available) {
+		limit = len(available)
+	}
+	symbols := make([]string, 0, limit)
+	for i := 0; i < limit; i++ {
+		symbols = append(symbols, normalizeSymbol(available[i].Pair))
+	}
+	return symbols, nil
+}
+
+func fetchCoinPoolFromSource(cfg CoinPoolSourceConfig) ([]CoinInfo, error) {
+	cfg = normalizeCoinPoolSourceConfig(cfg)
+	if cfg.UseDefaultCoins {
+		return convertSymbolsToCoins(cfg.DefaultCoins), nil
+	}
+	if strings.TrimSpace(cfg.CoinPoolAPIURL) == "" {
+		return nil, fmt.Errorf("未配置币种池API URL")
+	}
+	client := &http.Client{Timeout: cfg.Timeout}
+	resp, err := client.Get(cfg.CoinPoolAPIURL)
+	if err != nil {
+		return nil, fmt.Errorf("请求币种池API失败: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取币种池响应失败: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("币种池API返回错误 (status %d): %s", resp.StatusCode, string(body))
+	}
+	var response CoinPoolAPIResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("币种池JSON解析失败: %w", err)
+	}
+	if !response.Success {
+		return nil, fmt.Errorf("币种池API返回失败状态")
+	}
+	if len(response.Data.Coins) == 0 {
+		return nil, fmt.Errorf("币种列表为空")
+	}
+	coins := response.Data.Coins
+	for i := range coins {
+		coins[i].IsAvailable = true
+	}
+	return coins, nil
+}
+
+func getOITopSymbolsFromSource(cfg CoinPoolSourceConfig) ([]string, error) {
+	if cfg.useGlobalConfig {
+		return GetOITopSymbols()
+	}
+	positions, err := fetchOITopPositionsFromSource(cfg)
+	if err != nil {
+		return nil, err
+	}
+	symbols := make([]string, 0, len(positions))
+	for _, pos := range positions {
+		if pos.OIDeltaValue < oiMinValueUSD {
+			continue
+		}
+		symbols = append(symbols, normalizeSymbol(pos.Symbol))
+	}
+	return symbols, nil
+}
+
+func fetchOITopPositionsFromSource(cfg CoinPoolSourceConfig) ([]OIPosition, error) {
+	cfg = normalizeCoinPoolSourceConfig(cfg)
+	if strings.TrimSpace(cfg.OITopAPIURL) == "" {
+		return []OIPosition{}, nil
+	}
+	client := &http.Client{Timeout: cfg.Timeout}
+	resp, err := client.Get(cfg.OITopAPIURL)
+	if err != nil {
+		return nil, fmt.Errorf("请求OI Top API失败: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("读取OI Top响应失败: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("OI Top API返回错误 (status %d): %s", resp.StatusCode, string(body))
+	}
+	var response OITopAPIResponse
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("OI Top JSON解析失败: %w", err)
+	}
+	if !response.Success {
+		return nil, fmt.Errorf("OI Top API返回失败状态")
+	}
+	return response.Data.Positions, nil
+}
+
+// PreviewDynamicCandidatePool 返回动态候选池 dry-run 预览，不修改运行时全局配置。
+func PreviewDynamicCandidatePool(opts DynamicPoolPreviewOptions) (*DynamicCandidatePool, *MergedCoinPool, error) {
+	cfg := normalizeDynamicCandidatePoolConfig(opts.PoolConfig)
+	cfg.Enabled = true
+	if opts.SnapshotPath != "" {
+		cfg.SnapshotPath = opts.SnapshotPath
+	} else if opts.WriteSnapshot {
+		cfg.SnapshotPath = filepath.Join(os.TempDir(), "nofx_dynamic_candidate_pool_preview.json")
+	}
+	ai500Limit := opts.AI500Limit
+	if ai500Limit <= 0 {
+		ai500Limit = 20
+	}
+	snapshot, err := refreshDynamicCandidatePoolWithSources(ai500Limit, opts.PositionSymbols, opts.Performance, cfg, opts.SourceConfig)
+	if err != nil {
+		return nil, nil, err
+	}
+	if opts.WriteSnapshot {
+		if err := saveDynamicCandidatePoolSnapshot(cfg.SnapshotPath, snapshot); err != nil {
+			return nil, nil, err
+		}
+	}
+	selected := selectPromptCandidates(snapshot, opts.PositionSymbols, cfg)
+	merged := mergedPoolFromDynamicSnapshot(snapshot, selected, cfg, opts.PositionSymbols)
+	return snapshot, merged, nil
 }
 
 func saveDynamicCandidatePoolSnapshot(path string, snapshot *DynamicCandidatePool) error {
@@ -708,25 +997,139 @@ func classifyDynamicTier(symbol string, data *market.Data, metrics CandidateMetr
 }
 
 func detectDynamicMarketRegime(btc *market.Data) string {
+	regime, _ := detectDynamicMarketRegimeWithDiagnostics(btc)
+	return regime
+}
+
+func detectDynamicMarketRegimeWithDiagnostics(btc *market.Data) (string, MarketRegimeDiagnostics) {
+	diag := MarketRegimeDiagnostics{Regime: "unknown"}
 	if btc == nil {
-		return "unknown"
+		diag.Reasons = []string{"BTC市场数据缺失"}
+		return "unknown", diag
+	}
+	diag.BTCPriceChange1h = btc.PriceChange1h
+	diag.BTCPriceChange4h = btc.PriceChange4h
+	diag.BTCADX = btc.CurrentADX
+	diag.BTCDIPlus = btc.CurrentDIPlus
+	diag.BTCDIMinus = btc.CurrentDIMinus
+	diag.BTCEMA20 = btc.CurrentEMA20
+	diag.BTCEMA50 = btc.CurrentEMA50
+	diag.BTCBollingerWidth = btc.BollingerWidth
+	set := func(regime string, reasons ...string) (string, MarketRegimeDiagnostics) {
+		diag.Regime = regime
+		diag.Reasons = append(diag.Reasons, reasons...)
+		return regime, diag
 	}
 	if btc.PriceChange1h <= -5 || btc.PriceChange4h <= -7 {
-		return "risk_off"
+		return set("risk_off", "BTC短线跌幅达到risk_off阈值")
 	}
 	if btc.BollingerWidth >= dynamicBollingerWidthRegimePct {
-		return "high_volatility"
+		return set("high_volatility", "BTC布林带宽度达到高波动阈值")
 	}
-	if btc.PriceChange1h <= -3 || (btc.CurrentDIPlus < btc.CurrentDIMinus && btc.CurrentADX >= 20) {
-		return "risk_off"
+	if btc.PriceChange1h <= -3 {
+		return set("risk_off", "BTC 1h跌幅达到risk_off阈值")
+	}
+	if btc.CurrentDIPlus < btc.CurrentDIMinus && btc.CurrentADX >= 20 {
+		return set("risk_off", "BTC DI-强于DI+且ADX确认趋势")
 	}
 	if btc.CurrentADX >= 25 && btc.CurrentDIPlus > btc.CurrentDIMinus && btc.CurrentEMA20 >= btc.CurrentEMA50 {
-		return "trend_up"
+		return set("trend_up", "BTC ADX/DI/EMA确认上行趋势")
 	}
 	if btc.CurrentADX > 0 && btc.CurrentADX < 20 {
-		return "range"
+		return set("range", "BTC ADX低于震荡阈值")
 	}
-	return "neutral"
+	return set("neutral", "BTC未触发明确趋势或风险状态")
+}
+
+func scoreDirectionalProfile(symbol string, data, btc *market.Data, metrics CandidateMetrics, cfg DynamicCandidateShortSideCoverageConfig) CandidateSideProfile {
+	cfg = normalizeDynamicCandidateShortSideCoverageConfig(cfg)
+	if !cfg.Enabled || data == nil {
+		return CandidateSideProfile{}
+	}
+	profile := CandidateSideProfile{Bias: "neutral", ReportOnly: cfg.ReportOnly}
+	if btc != nil {
+		profile.RelativeWeakness1h = btc.PriceChange1h - data.PriceChange1h
+		profile.RelativeWeakness4h = btc.PriceChange4h - data.PriceChange4h
+	}
+	adxScore := normalizeRange(data.CurrentADX, cfg.MinADX, 45)
+	shortScore := adxScore
+	longScore := adxScore
+	reasons := []string{}
+	if data.CurrentDIMinus > data.CurrentDIPlus {
+		shortScore += 18
+		reasons = append(reasons, "DI-强于DI+")
+	} else if data.CurrentDIPlus > data.CurrentDIMinus {
+		longScore += 18
+	}
+	if data.CurrentEMA20 > 0 && data.CurrentEMA50 > 0 {
+		if data.CurrentEMA20 < data.CurrentEMA50 {
+			shortScore += 14
+			reasons = append(reasons, "EMA20低于EMA50")
+		} else if data.CurrentEMA20 > data.CurrentEMA50 {
+			longScore += 14
+		}
+	}
+	if btc != nil {
+		if profile.RelativeWeakness1h >= cfg.MinRelativeWeakness1h {
+			shortScore += 10
+			reasons = append(reasons, fmt.Sprintf("1h相对BTC更弱%.2f%%", profile.RelativeWeakness1h))
+		}
+		if profile.RelativeWeakness4h >= cfg.MinRelativeWeakness4h {
+			shortScore += 12
+			reasons = append(reasons, fmt.Sprintf("4h相对BTC更弱%.2f%%", profile.RelativeWeakness4h))
+		}
+	}
+	if data.PriceChange1h < 0 && data.PriceChange4h < 0 {
+		shortScore += 8
+		reasons = append(reasons, "1h/4h同步走弱")
+	} else if data.PriceChange1h > 0 && data.PriceChange4h > 0 {
+		longScore += 8
+	}
+	if data.CurrentADX >= cfg.MinADX {
+		reasons = append(reasons, fmt.Sprintf("ADX %.1f达到方向候选阈值%.1f", data.CurrentADX, cfg.MinADX))
+	} else {
+		shortScore -= 12
+	}
+	if math.Abs(metrics.FundingRate) > cfg.MaxAbsFundingRate {
+		shortScore -= 18
+		reasons = append(reasons, fmt.Sprintf("资金费率拥挤 %.4f%%", metrics.FundingRate*100))
+	}
+	if metrics.BollingerWidth > dynamicBollingerWidthHighPct {
+		shortScore -= 20
+		reasons = append(reasons, "波动异常，降低方向候选权重")
+	}
+	if cfg.RequireBearishDI && data.CurrentDIMinus <= data.CurrentDIPlus {
+		shortScore = math.Min(shortScore, 45)
+		reasons = append(reasons, "未满足DI空头要求")
+	}
+	if cfg.RequireBearishEMA && !(data.CurrentEMA20 > 0 && data.CurrentEMA50 > 0 && data.CurrentEMA20 < data.CurrentEMA50) {
+		shortScore = math.Min(shortScore, 45)
+		reasons = append(reasons, "未满足EMA空头要求")
+	}
+	profile.ShortScore = clamp(shortScore, 0, 100)
+	profile.LongScore = clamp(longScore, 0, 100)
+	if profile.ShortScore >= 60 && profile.ShortScore >= profile.LongScore+8 {
+		profile.Bias = "short"
+	}
+	if profile.LongScore >= 60 && profile.LongScore >= profile.ShortScore+8 {
+		profile.Bias = "long"
+	}
+	if profile.Bias == "short" {
+		reasons = append([]string{market.Normalize(symbol) + " short-side候选"}, reasons...)
+	}
+	profile.Reasons = reasons
+	return profile
+}
+
+func isBTCWeakRegime(regime string, diag MarketRegimeDiagnostics) bool {
+	switch strings.ToLower(strings.TrimSpace(regime)) {
+	case "risk_off", "high_volatility":
+		return true
+	}
+	if diag.BTCPriceChange1h <= -3 || diag.BTCPriceChange4h <= -5 {
+		return true
+	}
+	return diag.BTCDIMinus > diag.BTCDIPlus && diag.BTCADX >= 20
 }
 
 func enforceDynamicPoolBounds(candidates []DynamicCandidate, cfg DynamicCandidatePoolConfig, coreSet, positionSet map[string]bool) []DynamicCandidate {
@@ -780,6 +1183,9 @@ func selectPromptCandidates(snapshot *DynamicCandidatePool, positionSymbols []st
 	if snapshot == nil {
 		return nil
 	}
+	if cfg.ShortSideCoverage.Enabled && !cfg.ShortSideCoverage.ReportOnly && isBTCWeakRegime(snapshot.MarketRegime, snapshot.RegimeDiagnostics) {
+		return selectPromptCandidatesWithCoverage(snapshot, positionSymbols, cfg)
+	}
 	limit := cfg.PromptCandidateLimit
 	if limit <= 0 {
 		limit = len(snapshot.Symbols)
@@ -809,6 +1215,138 @@ func selectPromptCandidates(snapshot *DynamicCandidatePool, positionSymbols []st
 		add(candidate.Symbol)
 	}
 	return selected
+}
+
+func selectPromptCandidatesWithCoverage(snapshot *DynamicCandidatePool, positionSymbols []string, cfg DynamicCandidatePoolConfig) []string {
+	if snapshot == nil {
+		return nil
+	}
+	limit := cfg.PromptCandidateLimit
+	if limit <= 0 {
+		limit = len(snapshot.Symbols)
+	}
+	selected := make([]string, 0, limit+len(positionSymbols))
+	used := make(map[string]bool)
+	add := func(symbol string) {
+		symbol = normalizeDynamicSymbol(symbol)
+		if symbol == "" || used[symbol] {
+			return
+		}
+		selected = append(selected, symbol)
+		used[symbol] = true
+	}
+	for _, core := range cfg.CoreSymbols {
+		add(core)
+	}
+	for _, symbol := range positionSymbols {
+		add(symbol)
+	}
+	maxShort := int(math.Ceil(float64(limit) * cfg.ShortSideCoverage.MaxPromptRatio))
+	if maxShort <= 0 {
+		maxShort = 1
+	}
+	minShort := cfg.ShortSideCoverage.MinPromptCount
+	if minShort > maxShort {
+		minShort = maxShort
+	}
+	shortAdded := 0
+	for _, candidate := range snapshot.Symbols {
+		if len(selected) >= limit+len(positionSymbols) || shortAdded >= minShort {
+			break
+		}
+		if used[candidate.Symbol] || candidate.SideProfile.Bias != "short" {
+			continue
+		}
+		add(candidate.Symbol)
+		shortAdded++
+	}
+	for _, candidate := range snapshot.Symbols {
+		if len(selected) >= limit+len(positionSymbols) {
+			break
+		}
+		add(candidate.Symbol)
+	}
+	return selected
+}
+
+func buildShortSideSummary(candidates []DynamicCandidate, positionSymbols []string, cfg DynamicCandidatePoolConfig, regime string, diag MarketRegimeDiagnostics) ShortSideSummary {
+	summary := ShortSideSummary{
+		Enabled:        cfg.ShortSideCoverage.Enabled,
+		ReportOnly:     cfg.ShortSideCoverage.ReportOnly,
+		BTCWeak:        isBTCWeakRegime(regime, diag),
+		MinPromptCount: cfg.ShortSideCoverage.MinPromptCount,
+		MaxPromptRatio: cfg.ShortSideCoverage.MaxPromptRatio,
+	}
+	if !cfg.ShortSideCoverage.Enabled {
+		return summary
+	}
+	for _, candidate := range candidates {
+		if candidate.SideProfile.Bias != "short" {
+			continue
+		}
+		summary.CandidateCount++
+		summary.Symbols = append(summary.Symbols, candidate.Symbol)
+		if len(candidate.SideProfile.Reasons) > 0 && len(summary.Reasons) < 8 {
+			summary.Reasons = append(summary.Reasons, fmt.Sprintf("%s: %s", candidate.Symbol, strings.Join(candidate.SideProfile.Reasons, ", ")))
+		}
+	}
+	selected := selectPromptCandidates(&DynamicCandidatePool{
+		MarketRegime:      regime,
+		RegimeDiagnostics: diag,
+		Symbols:           candidates,
+	}, positionSymbols, cfg)
+	selectedSet := makeStringSet(selected)
+	for _, candidate := range candidates {
+		if candidate.SideProfile.Bias == "short" && selectedSet[candidate.Symbol] {
+			summary.PromptCount++
+		}
+	}
+	return summary
+}
+
+func mergedPoolFromDynamicSnapshot(snapshot *DynamicCandidatePool, selected []string, cfg DynamicCandidatePoolConfig, positionSymbols []string) *MergedCoinPool {
+	detailMap := make(map[string]DynamicCandidate, len(snapshot.Symbols))
+	for _, candidate := range snapshot.Symbols {
+		detailMap[candidate.Symbol] = candidate
+	}
+	sources := make(map[string][]string, len(selected))
+	dynamicDetails := make(map[string]DynamicCandidate, len(selected))
+	coreSet := makeStringSet(cfg.CoreSymbols)
+	positionSet := makeStringSet(positionSymbols)
+	for _, symbol := range selected {
+		if detail, ok := detailMap[symbol]; ok {
+			sources[symbol] = append([]string(nil), detail.Sources...)
+			dynamicDetails[symbol] = detail
+			continue
+		}
+		if coreSet[symbol] {
+			sources[symbol] = []string{"core"}
+			dynamicDetails[symbol] = DynamicCandidate{
+				Symbol:  symbol,
+				Tier:    "core",
+				Sources: []string{"core"},
+				Reasons: []string{"核心币强制纳入上下文"},
+			}
+			continue
+		}
+		if positionSet[symbol] {
+			sources[symbol] = []string{"position"}
+			dynamicDetails[symbol] = DynamicCandidate{
+				Symbol:  symbol,
+				Tier:    "position",
+				Sources: []string{"position"},
+				Reasons: []string{"当前持仓强制纳入上下文"},
+			}
+		}
+	}
+	return &MergedCoinPool{
+		AllSymbols:        selected,
+		SymbolSources:     sources,
+		DynamicCandidates: dynamicDetails,
+		MarketRegime:      snapshot.MarketRegime,
+		RegimeDiagnostics: snapshot.RegimeDiagnostics,
+		ShortSideSummary:  snapshot.ShortSideSummary,
+	}
 }
 
 func logDynamicPoolDiff(previous, current *DynamicCandidatePool) {

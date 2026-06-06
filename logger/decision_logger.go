@@ -180,6 +180,10 @@ type CandidateSnapshot struct {
 	PoolScore        float64  `json:"pool_score,omitempty"`
 	PoolReasons      []string `json:"pool_reasons,omitempty"`
 	MarketState      string   `json:"market_state,omitempty"`
+	SideBias         string   `json:"side_bias,omitempty"`
+	ShortSideScore   float64  `json:"short_side_score,omitempty"`
+	LongSideScore    float64  `json:"long_side_score,omitempty"`
+	SideReasons      []string `json:"side_reasons,omitempty"`
 	StateConfidence  int      `json:"state_confidence,omitempty"`
 	DataQuality      string   `json:"data_quality,omitempty"`
 	FilterReason     string   `json:"filter_reason,omitempty"`

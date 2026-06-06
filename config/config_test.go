@@ -193,6 +193,57 @@ func TestLoadConfig_DynamicCandidatePoolCanBeDisabled(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_DynamicCandidatePoolShortSideCoverageDefaultsSafe(t *testing.T) {
+	cfg := validConfig()
+	path := writeConfigFile(t, cfg)
+
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	shortSide := loaded.DynamicCandidatePool.ShortSideCoverage
+	if shortSide.IsEnabled() {
+		t.Fatalf("short_side_coverage 缺省不应启用: %+v", shortSide)
+	}
+	if !shortSide.IsReportOnly() {
+		t.Fatalf("short_side_coverage 缺省应为 report_only=true: %+v", shortSide)
+	}
+	if shortSide.MinPromptCount != 3 || shortSide.MaxPromptRatio != 0.4 || shortSide.RiskOffScoreBoost != 8 {
+		t.Fatalf("short_side_coverage 默认值不符合预期: %+v", shortSide)
+	}
+}
+
+func TestLoadConfig_DynamicCandidatePoolShortSideCoverageExplicitNonReportOnly(t *testing.T) {
+	cfg := validConfig()
+	cfg.DynamicCandidatePool.ShortSideCoverage = DynamicCandidateShortSideCoverageConfig{
+		Enabled:               boolPtr(true),
+		ReportOnly:            boolPtr(false),
+		MinPromptCount:        4,
+		MaxPromptRatio:        0.5,
+		RiskOffScoreBoost:     12,
+		MinADX:                22,
+		MinRelativeWeakness1h: 0.8,
+		MinRelativeWeakness4h: 1.5,
+		RequireBearishDI:      true,
+		RequireBearishEMA:     true,
+		MaxAbsFundingRate:     0.0008,
+	}
+	path := writeConfigFile(t, cfg)
+
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("加载失败: %v", err)
+	}
+	shortSide := loaded.DynamicCandidatePool.ShortSideCoverage
+	if !shortSide.IsEnabled() || shortSide.IsReportOnly() {
+		t.Fatalf("显式启用非report-only未生效: %+v", shortSide)
+	}
+	if shortSide.MinPromptCount != 4 || shortSide.MaxPromptRatio != 0.5 || shortSide.RiskOffScoreBoost != 12 ||
+		!shortSide.RequireBearishDI || !shortSide.RequireBearishEMA || shortSide.MaxAbsFundingRate != 0.0008 {
+		t.Fatalf("显式short_side_coverage参数未保留: %+v", shortSide)
+	}
+}
+
 func TestNormalizeTradingFrequency_LegacyPreservesExistingDefaults(t *testing.T) {
 	cfg := validConfig()
 	cfg.DynamicCandidatePool.ApplyDefaults()

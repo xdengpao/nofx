@@ -596,6 +596,8 @@ type MergedCoinPool struct {
 	SymbolSources     map[string][]string         // 每个币种的来源（"ai500"/"oi_top"/"default"/"dynamic"）
 	DynamicCandidates map[string]DynamicCandidate // 动态候选池详情
 	MarketRegime      string                      // 动态候选池生成时的市场状态
+	RegimeDiagnostics MarketRegimeDiagnostics     // 动态候选池 BTC regime 诊断
+	ShortSideSummary  ShortSideSummary            // short-side 候选覆盖摘要
 }
 
 // GetMergedCoinPool 获取合并后的币种池（AI500 + OI Top，去重）

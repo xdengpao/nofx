@@ -223,6 +223,19 @@ func initializeModules(cfg *config.Config) error {
 		CooldownDaysAfterLosses: cfg.DynamicCandidatePool.CooldownDaysAfterLosses,
 		ExchangeVolumeTopLimit:  cfg.DynamicCandidatePool.ExchangeVolumeTopLimit,
 		SnapshotPath:            cfg.DynamicCandidatePool.SnapshotPath,
+		ShortSideCoverage: pool.DynamicCandidateShortSideCoverageConfig{
+			Enabled:               cfg.DynamicCandidatePool.ShortSideCoverage.IsEnabled(),
+			ReportOnly:            cfg.DynamicCandidatePool.ShortSideCoverage.IsReportOnly(),
+			MinPromptCount:        cfg.DynamicCandidatePool.ShortSideCoverage.MinPromptCount,
+			MaxPromptRatio:        cfg.DynamicCandidatePool.ShortSideCoverage.MaxPromptRatio,
+			RiskOffScoreBoost:     cfg.DynamicCandidatePool.ShortSideCoverage.RiskOffScoreBoost,
+			MinADX:                cfg.DynamicCandidatePool.ShortSideCoverage.MinADX,
+			MinRelativeWeakness1h: cfg.DynamicCandidatePool.ShortSideCoverage.MinRelativeWeakness1h,
+			MinRelativeWeakness4h: cfg.DynamicCandidatePool.ShortSideCoverage.MinRelativeWeakness4h,
+			RequireBearishDI:      cfg.DynamicCandidatePool.ShortSideCoverage.RequireBearishDI,
+			RequireBearishEMA:     cfg.DynamicCandidatePool.ShortSideCoverage.RequireBearishEMA,
+			MaxAbsFundingRate:     cfg.DynamicCandidatePool.ShortSideCoverage.MaxAbsFundingRate,
+		},
 	})
 
 	// 2. 初始化决策模块

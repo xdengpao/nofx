@@ -2,6 +2,7 @@ package pool
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -199,4 +200,176 @@ func TestParseBinanceFuturesVolumeTickers_SkipsNonUSDTPairs(t *testing.T) {
 			t.Fatalf("不应把 USDC 合约误拼成 USDT 合约: %+v", tickers)
 		}
 	}
+}
+
+func TestPreviewDynamicCandidatePool_DryRunUsesSourceConfigWithoutGlobalPollution(t *testing.T) {
+	resetConfig(t)
+	withDynamicPoolStubs(t, dynamicTestMarketData, func(limit int) ([]volumeTicker, error) {
+		return []volumeTicker{{Symbol: "BNBUSDT", QuoteVolume24hUSD: 120_000_000}}, nil
+	})
+	defaultMainstreamCoins = []string{"DOGEUSDT"}
+	coinPoolConfig.APIURL = "http://global.example.invalid/coins"
+	coinPoolConfig.UseDefaultCoins = false
+	oiTopConfig.APIURL = "http://global.example.invalid/oi"
+
+	cfg := dynamicTestConfig(t)
+	cfg.ShortSideCoverage = DynamicCandidateShortSideCoverageConfig{Enabled: true, ReportOnly: true}
+	snapshotPath := t.TempDir() + "/dynamic_preview.json"
+
+	snapshot, merged, err := PreviewDynamicCandidatePool(DynamicPoolPreviewOptions{
+		AI500Limit:    10,
+		PoolConfig:    cfg,
+		SourceConfig:  CoinPoolSourceConfig{UseDefaultCoins: true, DefaultCoins: []string{"BTCUSDT", "ETHUSDT", "SOLUSDT"}, CacheDir: t.TempDir()},
+		SnapshotPath:  snapshotPath,
+		WriteSnapshot: false,
+	})
+	if err != nil {
+		t.Fatalf("PreviewDynamicCandidatePool 失败: %v", err)
+	}
+	if snapshot == nil || merged == nil || len(merged.AllSymbols) == 0 {
+		t.Fatalf("preview应返回snapshot和merged pool: snapshot=%+v merged=%+v", snapshot, merged)
+	}
+	if _, err := os.Stat(snapshotPath); !os.IsNotExist(err) {
+		t.Fatalf("write_snapshot=false 时不应写snapshot文件: err=%v", err)
+	}
+	if coinPoolConfig.APIURL != "http://global.example.invalid/coins" || coinPoolConfig.UseDefaultCoins {
+		t.Fatalf("preview不应污染全局coin pool配置: %+v", coinPoolConfig)
+	}
+	if oiTopConfig.APIURL != "http://global.example.invalid/oi" {
+		t.Fatalf("preview不应污染全局OI配置: %+v", oiTopConfig)
+	}
+	if _, ok := merged.DynamicCandidates["SOLUSDT"]; !ok {
+		t.Fatalf("preview应使用传入source config中的默认币: %+v", merged.DynamicCandidates)
+	}
+}
+
+func TestPreviewDynamicCandidatePool_ShortSideReportOnlyDoesNotBoostScores(t *testing.T) {
+	resetConfig(t)
+	withDynamicPoolStubs(t, weakShortSideMarketData, func(limit int) ([]volumeTicker, error) {
+		return []volumeTicker{
+			{Symbol: "SOLUSDT", QuoteVolume24hUSD: 180_000_000},
+			{Symbol: "BNBUSDT", QuoteVolume24hUSD: 160_000_000},
+		}, nil
+	})
+
+	cfg := dynamicTestConfig(t)
+	cfg.CoreSymbols = []string{"BTCUSDT"}
+	cfg.ShortSideCoverage = DynamicCandidateShortSideCoverageConfig{
+		Enabled:        true,
+		ReportOnly:     true,
+		MinPromptCount: 2,
+		MaxPromptRatio: 0.5,
+	}
+	snapshot, _, err := PreviewDynamicCandidatePool(DynamicPoolPreviewOptions{
+		AI500Limit:    10,
+		PoolConfig:    cfg,
+		SourceConfig:  CoinPoolSourceConfig{UseDefaultCoins: true, DefaultCoins: []string{"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"}, CacheDir: t.TempDir()},
+		WriteSnapshot: false,
+	})
+	if err != nil {
+		t.Fatalf("PreviewDynamicCandidatePool 失败: %v", err)
+	}
+	if !snapshot.ShortSideSummary.Enabled || !snapshot.ShortSideSummary.ReportOnly || !snapshot.ShortSideSummary.BTCWeak {
+		t.Fatalf("short-side report-only summary缺失: %+v", snapshot.ShortSideSummary)
+	}
+	if snapshot.ShortSideSummary.CandidateCount == 0 {
+		t.Fatalf("BTC弱势时应识别short-side候选: %+v", snapshot.Symbols)
+	}
+	for _, candidate := range snapshot.Symbols {
+		if candidate.SideProfile.Bias != "short" {
+			continue
+		}
+		if !candidate.SideProfile.ReportOnly {
+			t.Fatalf("Phase 1 short-side候选应保持report_only=true: %+v", candidate.SideProfile)
+		}
+		if strings.Contains(strings.Join(candidate.Reasons, ","), "short-side候选加分") {
+			t.Fatalf("report_only=true时不应做short-side排序加分: %+v", candidate.Reasons)
+		}
+	}
+}
+
+func TestPreviewDynamicCandidatePool_ShortSideNonReportOnlyAddsPromptCoverage(t *testing.T) {
+	resetConfig(t)
+	withDynamicPoolStubs(t, weakShortSideMarketData, func(limit int) ([]volumeTicker, error) {
+		return []volumeTicker{
+			{Symbol: "SOLUSDT", QuoteVolume24hUSD: 180_000_000},
+			{Symbol: "BNBUSDT", QuoteVolume24hUSD: 160_000_000},
+		}, nil
+	})
+
+	cfg := dynamicTestConfig(t)
+	cfg.CoreSymbols = []string{"BTCUSDT"}
+	cfg.PromptCandidateLimit = 4
+	cfg.ShortSideCoverage = DynamicCandidateShortSideCoverageConfig{
+		Enabled:           true,
+		ReportOnly:        false,
+		MinPromptCount:    2,
+		MaxPromptRatio:    0.5,
+		RiskOffScoreBoost: 8,
+	}
+	snapshot, merged, err := PreviewDynamicCandidatePool(DynamicPoolPreviewOptions{
+		AI500Limit:    10,
+		PoolConfig:    cfg,
+		SourceConfig:  CoinPoolSourceConfig{UseDefaultCoins: true, DefaultCoins: []string{"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"}, CacheDir: t.TempDir()},
+		WriteSnapshot: false,
+	})
+	if err != nil {
+		t.Fatalf("PreviewDynamicCandidatePool 失败: %v", err)
+	}
+	if snapshot.ShortSideSummary.ReportOnly || !snapshot.ShortSideSummary.BTCWeak {
+		t.Fatalf("应处于BTC弱势非report-only short-side模式: %+v", snapshot.ShortSideSummary)
+	}
+	if snapshot.ShortSideSummary.PromptCount < 2 {
+		t.Fatalf("非report-only时应满足short-side prompt保底: %+v selected=%v", snapshot.ShortSideSummary, merged.AllSymbols)
+	}
+	foundBoosted := false
+	for _, candidate := range snapshot.Symbols {
+		if candidate.SideProfile.Bias == "short" && strings.Contains(strings.Join(candidate.Reasons, ","), "short-side候选加分") {
+			foundBoosted = true
+			break
+		}
+	}
+	if !foundBoosted {
+		t.Fatalf("非report-only时BTC弱势short-side候选应获得排序加分: %+v", snapshot.Symbols)
+	}
+}
+
+func weakShortSideMarketData(symbol string) (*market.Data, error) {
+	values := map[string]struct {
+		oi        float64
+		adx       float64
+		change1h  float64
+		change4h  float64
+		diPlus    float64
+		diMinus   float64
+		ema20     float64
+		ema50     float64
+		bollWidth float64
+	}{
+		"BTCUSDT": {oi: 600_000_000, adx: 28, change1h: -4.2, change4h: -6.3, diPlus: 12, diMinus: 30, ema20: 98, ema50: 102, bollWidth: 4.0},
+		"ETHUSDT": {oi: 300_000_000, adx: 31, change1h: -7.0, change4h: -9.0, diPlus: 10, diMinus: 32, ema20: 92, ema50: 100, bollWidth: 4.5},
+		"SOLUSDT": {oi: 140_000_000, adx: 29, change1h: -8.0, change4h: -10.0, diPlus: 11, diMinus: 34, ema20: 88, ema50: 98, bollWidth: 4.8},
+		"BNBUSDT": {oi: 90_000_000, adx: 26, change1h: -6.5, change4h: -8.2, diPlus: 12, diMinus: 29, ema20: 91, ema50: 99, bollWidth: 4.2},
+	}
+	v, ok := values[symbol]
+	if !ok {
+		return nil, fmt.Errorf("unexpected symbol %s", symbol)
+	}
+	return &market.Data{
+		Symbol:         symbol,
+		CurrentPrice:   100,
+		CurrentEMA20:   v.ema20,
+		CurrentEMA50:   v.ema50,
+		CurrentADX:     v.adx,
+		CurrentDIPlus:  v.diPlus,
+		CurrentDIMinus: v.diMinus,
+		BollingerWidth: v.bollWidth,
+		OIValueUSD:     v.oi,
+		FundingRate:    0.0001,
+		PriceChange1h:  v.change1h,
+		PriceChange4h:  v.change4h,
+		LongerTermContext: &market.LongerTermData{
+			VolumeRatio: 1.4,
+		},
+	}, nil
 }

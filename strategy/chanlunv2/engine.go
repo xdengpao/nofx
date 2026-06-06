@@ -122,6 +122,7 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 	parentStructureCount := 0
 	entryTriggerCount := 0
 	triggerRejectionReasons := map[string]int{}
+	entryTriggerFunnel := newEntryTriggerFunnelDiagnostics()
 	if activeMode != "" && activeMode != "normal" {
 		diagnostics = append(diagnostics, fmt.Sprintf("active_mode=%s", activeMode))
 	}
@@ -165,6 +166,7 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 			diagnostics = append(diagnostics, countertrendDiagnostics...)
 		}
 		rawSignalCount += len(signals)
+		entryTriggerFunnel.addRawSignals(symbol, len(signals))
 		e.setLatestReport(ctx.TraderID, symbol, multiResult, signals, symbolDiagnostics)
 
 		// 父结构先入生命周期；可执行开仓只来自direct结构窗口或fresh entry trigger。
@@ -173,12 +175,20 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 			evaluation := e.evaluateParentStructureEntry(ctx, symbol, sig, multiResult, timeframes, decisionCloseTime)
 			if evaluation.ParentSeen {
 				parentStructureCount++
+				entryTriggerFunnel.addParentSeen(symbol)
 			}
 			if len(evaluation.Diagnostics) > 0 {
 				diagnostics = append(diagnostics, evaluation.Diagnostics...)
 			}
+			if evaluation.Terminal {
+				entryTriggerFunnel.addParentTerminal(symbol, evaluation.ReasonCode)
+			}
 			if evaluation.TriggerRejected && evaluation.ReasonCode != "" {
 				triggerRejectionReasons[evaluation.ReasonCode]++
+				entryTriggerFunnel.addTriggerRejected(symbol, evaluation.ReasonCode)
+			}
+			if evaluation.ParentSeen && !evaluation.TriggerReady && !evaluation.TriggerRejected && !evaluation.Terminal && evaluation.ReasonCode == "waiting_for_fresh_entry_trigger" {
+				entryTriggerFunnel.addWaitingForTrigger(symbol)
 			}
 			d := evaluation.Decision
 			if d.Action == "" {
@@ -211,6 +221,7 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 			activeSignalCount++
 			if evaluation.TriggerReady && metadataString(d.StrategyMetadata, "layer") == v2LayerEntryTrigger {
 				entryTriggerCount++
+				entryTriggerFunnel.addTriggerReady(symbol, metadataString(d.StrategyMetadata, "entry_trigger_type"))
 			}
 			diagnostics = append(diagnostics, fmt.Sprintf("%s %s 置信度%d", symbol, sig.SignalType, sig.Confidence))
 		}
@@ -259,6 +270,7 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 		summary += "; 交易动作原因: " + strings.Join(actionReasons, "; ")
 	}
 	terminalSuppressedCount, terminalSuppressedReasons, terminalSuppressedSamples := e.terminalSuppressionSnapshot(ctx.TraderID, 3)
+	entryTriggerFunnel.withTerminalSuppressions(terminalSuppressedCount)
 
 	return &decision.FullDecision{
 		CoTTrace:        summary,
@@ -280,6 +292,7 @@ func (e *Engine) GetFullDecision(ctx *decision.Context) (*decision.FullDecision,
 			"parent_structure_count":      parentStructureCount,
 			"entry_trigger_count":         entryTriggerCount,
 			"trigger_rejection_reasons":   triggerRejectionReasons,
+			"entry_trigger_funnel":        entryTriggerFunnel.compact(),
 			"downgraded_stale_signals":    append([]string(nil), downgradedStaleSignals...),
 			"open_rejections":             chanlunV2OpenRejectionReasons(openRejections),
 			"freshness_rejections":        chanlunV2OpenRejectionReasons(freshnessRejections),

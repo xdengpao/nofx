@@ -264,6 +264,10 @@ export interface DecisionRecord {
     pool_score?: number;
     pool_reasons?: string[];
     market_state?: string;
+    side_bias?: string;
+    short_side_score?: number;
+    long_side_score?: number;
+    side_reasons?: string[];
     state_confidence?: number;
     data_quality?: string;
     filter_reason?: string;
