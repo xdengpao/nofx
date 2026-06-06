@@ -1,0 +1,253 @@
+{
+  "generated_at": "2026-05-07T17:36:57.770313593+08:00",
+  "record_count": 34572,
+  "open_attempts": 164,
+  "rejected_open_count": 0,
+  "rejection_reasons": {},
+  "total_risk_usd": 0,
+  "max_cycle_risk_usd": 0,
+  "theoretical_pn_l": -9.213849085359735,
+  "execution_failure_rate": 0.608796053322137,
+  "unmatched_count": 1,
+  "trade_count": 161,
+  "rolling": {
+    "global_gate": {
+      "key": "ALL",
+      "scope": "global",
+      "state": "block",
+      "trade_count": 20,
+      "total_pn_l": -3.733806241507346,
+      "win_rate": 20,
+      "profit_factor": 0.44899460009422404,
+      "min_confidence": 95,
+      "risk_multiplier": 0,
+      "cooldown_until": "2026-05-08T13:23:50.346252849+08:00",
+      "reason": "最近20笔PF低于0.8且胜率低于35%，全局暂停新开仓24小时"
+    },
+    "symbol_gates": {
+      "ASTERUSDT": {
+        "key": "ASTERUSDT",
+        "scope": "symbol",
+        "state": "penalize",
+        "trade_count": 8,
+        "total_pn_l": -3.3084450725657124,
+        "win_rate": 12.5,
+        "profit_factor": 0.13865456771116533,
+        "min_confidence": 90,
+        "risk_multiplier": 0.5,
+        "cooldown_until": "0001-01-01T00:00:00Z",
+        "reason": "最近8笔PF低于0.5，禁交易冷却已过但仍需降权"
+      },
+      "BCHUSDT": {
+        "key": "BCHUSDT",
+        "scope": "symbol",
+        "state": "penalize",
+        "trade_count": 8,
+        "total_pn_l": -1.4735946695612914,
+        "win_rate": 12.5,
+        "profit_factor": 0.21391825530648345,
+        "min_confidence": 90,
+        "risk_multiplier": 0.5,
+        "cooldown_until": "0001-01-01T00:00:00Z",
+        "reason": "最近8笔PF低于0.5，禁交易冷却已过但仍需降权"
+      },
+      "BNBUSDT": {
+        "key": "BNBUSDT",
+        "scope": "symbol",
+        "state": "penalize",
+        "trade_count": 8,
+        "total_pn_l": -1.470312653546245,
+        "win_rate": 50,
+        "profit_factor": 0.3723712374668234,
+        "min_confidence": 90,
+        "risk_multiplier": 0.5,
+        "cooldown_until": "0001-01-01T00:00:00Z",
+        "reason": "最近8笔PF低于0.5，禁交易冷却已过但仍需降权"
+      },
+      "DOGEUSDT": {
+        "key": "DOGEUSDT",
+        "scope": "symbol",
+        "state": "allow",
+        "trade_count": 8,
+        "total_pn_l": 1.477522552084041,
+        "win_rate": 37.5,
+        "profit_factor": 2.3304441368100326,
+        "min_confidence": 0,
+        "risk_multiplier": 1,
+        "cooldown_until": "0001-01-01T00:00:00Z"
+      },
+      "ETHUSDT": {
+        "key": "ETHUSDT",
+        "scope": "symbol",
+        "state": "penalize",
+        "trade_count": 8,
+        "total_pn_l": 1.5062733484595827,
+        "win_rate": 37.5,
+        "profit_factor": 1.9562967974325316,
+        "min_confidence": 85,
+        "risk_multiplier": 0.5,
+        "cooldown_until": "0001-01-01T00:00:00Z",
+        "reason": "最近5笔PF低于0.8且总PnL为负"
+      },
+      "HYPEUSDT": {
+        "key": "HYPEUSDT",
+        "scope": "symbol",
+        "state": "block",
+        "trade_count": 8,
+        "total_pn_l": -0.8766925662454913,
+        "win_rate": 25,
+        "profit_factor": 0.4829111844508729,
+        "min_confidence": 95,
+        "risk_multiplier": 0,
+        "cooldown_until": "2026-05-08T01:08:38.512326715+08:00",
+        "reason": "最近8笔PF低于0.5，进入24小时禁交易冷却"
+      },
+      "LTCUSDT": {
+        "key": "LTCUSDT",
+        "scope": "symbol",
+        "state": "penalize",
+        "trade_count": 8,
+        "total_pn_l": -1.9950504916743876,
+        "win_rate": 12.5,
+        "profit_factor": 0.01419070121145972,
+        "min_confidence": 90,
+        "risk_multiplier": 0.5,
+        "cooldown_until": "0001-01-01T00:00:00Z",
+        "reason": "最近8笔PF低于0.5，禁交易冷却已过但仍需降权"
+      },
+      "SOLUSDT": {
+        "key": "SOLUSDT",
+        "scope": "symbol",
+        "state": "penalize",
+        "trade_count": 8,
+        "total_pn_l": -0.4073859720689824,
+        "win_rate": 50,
+        "profit_factor": 0.7170286521370428,
+        "min_confidence": 85,
+        "risk_multiplier": 0.5,
+        "cooldown_until": "0001-01-01T00:00:00Z",
+        "reason": "最近5笔PF低于0.8且总PnL为负"
+      },
+      "XRPUSDT": {
+        "key": "XRPUSDT",
+        "scope": "symbol",
+        "state": "penalize",
+        "trade_count": 8,
+        "total_pn_l": -0.4194766613669435,
+        "win_rate": 25,
+        "profit_factor": 0.846220461236392,
+        "min_confidence": 85,
+        "risk_multiplier": 0.5,
+        "cooldown_until": "0001-01-01T00:00:00Z",
+        "reason": "历史滚动表现偏弱，开仓需降权"
+      },
+      "ZECUSDT": {
+        "key": "ZECUSDT",
+        "scope": "symbol",
+        "state": "penalize",
+        "trade_count": 8,
+        "total_pn_l": 3.7718370892953237,
+        "win_rate": 62.5,
+        "profit_factor": 4.182619877225264,
+        "min_confidence": 85,
+        "risk_multiplier": 0.5,
+        "cooldown_until": "0001-01-01T00:00:00Z",
+        "reason": "最近5笔PF低于0.8且总PnL为负"
+      }
+    },
+    "side_gates": {
+      "long": {
+        "key": "long",
+        "scope": "side",
+        "state": "penalize",
+        "trade_count": 20,
+        "total_pn_l": -3.6880370111579284,
+        "win_rate": 25,
+        "profit_factor": 0.4729273408298784,
+        "min_confidence": 90,
+        "risk_multiplier": 0.5,
+        "cooldown_until": "0001-01-01T00:00:00Z",
+        "reason": "最近20笔同方向PF低于0.8"
+      },
+      "short": {
+        "key": "short",
+        "scope": "side",
+        "state": "penalize",
+        "trade_count": 20,
+        "total_pn_l": -5.15811228822199,
+        "win_rate": 15,
+        "profit_factor": 0.18746140385187404,
+        "min_confidence": 90,
+        "risk_multiplier": 0.5,
+        "cooldown_until": "0001-01-01T00:00:00Z",
+        "reason": "最近20笔同方向PF低于0.8"
+      }
+    },
+    "recent_3": {
+      "trade_count": 3,
+      "total_pn_l": -1.070417583670674,
+      "win_rate": 0,
+      "profit_factor": 0
+    },
+    "recent_10": {
+      "trade_count": 10,
+      "total_pn_l": -1.2578061787262291,
+      "win_rate": 20,
+      "profit_factor": 0.37015580939426135
+    },
+    "recent_20": {
+      "trade_count": 20,
+      "total_pn_l": -3.733806241507346,
+      "win_rate": 20,
+      "profit_factor": 0.44899460009422404
+    },
+    "recent_loss_streak": 4,
+    "recent_3_losses": 3,
+    "effective_max_risk_per_trade": 0.005,
+    "reasons": [
+      "最近20笔PF低于0.8且胜率低于35%，全局暂停新开仓24小时",
+      "最近20笔PF低于0.8，单笔风险降至0.5%",
+      "最近3笔中至少2笔亏损且总PnL为负，提高下一笔开仓门槛"
+    ]
+  },
+  "execution_quality": {
+    "total_actions": 47635,
+    "open_attempts": 164,
+    "open_failures": 3,
+    "open_rejected_count": 0,
+    "partial_close_attempts": 287,
+    "partial_close_failures": 284,
+    "partial_close_failure_rate": 98.95470383275261,
+    "protection_order_failures": 3,
+    "high_risk_execution_failures": 0,
+    "ai_failure_count": 4,
+    "unmatched_action_count": 1,
+    "recent_high_risk_errors": [
+      {
+        "timestamp": "2026-04-08T15:39:20+08:00",
+        "symbol": "ETHUSDT",
+        "action": "update_stop_loss",
+        "risk_type": "protection_order_failure",
+        "reason": "修改止损失败: HTTP 400: {\"timestamp\":1775633967453,\"path\":\"/fapi/v3/order\",\"msg\":\"The request has timed out.\"}"
+      },
+      {
+        "timestamp": "2026-04-08T17:09:20+08:00",
+        "symbol": "ETHUSDT",
+        "action": "update_stop_loss",
+        "risk_type": "protection_order_failure",
+        "reason": "修改止损失败: HTTP 400: {\"timestamp\":1775639366626,\"path\":\"/fapi/v3/order\",\"msg\":\"The request has timed out.\"}"
+      },
+      {
+        "timestamp": "2026-04-08T18:33:20+08:00",
+        "symbol": "ETHUSDT",
+        "action": "update_stop_loss",
+        "risk_type": "protection_order_failure",
+        "reason": "修改止损失败: HTTP 400: {\"timestamp\":1775644406911,\"path\":\"/fapi/v3/order\",\"msg\":\"The request has timed out.\"}"
+      }
+    ],
+    "protection_order_failure_rate": 1.8292682926829267,
+    "high_risk_execution_failure_rate": 0
+  },
+  "report_only": true,
+  "dry_run": true
+}

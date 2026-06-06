@@ -1,0 +1,58 @@
+{
+  "source": "sanitized_161_chanlun_v2_log_analysis",
+  "trader_id": "aster_chanlun_v2",
+  "trade_timeframe": "1h",
+  "cases": [
+    {
+      "symbol": "BNBUSDT",
+      "signal_type": "buy2",
+      "direction": "long",
+      "parent_signal_close_time": 1779472740000,
+      "first_evaluation_close_time": 1779483540000,
+      "age_trade_candles": 3,
+      "expected": "background_or_terminal"
+    },
+    {
+      "symbol": "CLUSDT",
+      "signal_type": "buy2",
+      "direction": "long",
+      "parent_signal_close_time": 1779436740000,
+      "first_evaluation_close_time": 1779465540000,
+      "age_trade_candles": 8,
+      "expected": "background_or_terminal"
+    },
+    {
+      "symbol": "BNBUSDT",
+      "signal_type": "buy2",
+      "direction": "long",
+      "parent_signal_close_time": 1779399540000,
+      "first_evaluation_close_time": 1779467940000,
+      "age_trade_candles": 19,
+      "expected": "terminal_expired"
+    },
+    {
+      "symbol": "HYPEUSDT",
+      "signal_type": "buy2",
+      "direction": "long",
+      "parent_signal_close_time": 1779410340000,
+      "first_evaluation_close_time": 1779507540000,
+      "age_trade_candles": 27,
+      "expected": "terminal_expired"
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "signal_type": "buy3",
+      "direction": "long",
+      "parent_signal_close_time": 1779227940000,
+      "first_evaluation_close_time": 1779436740000,
+      "age_trade_candles": 58,
+      "expected": "terminal_expired"
+    }
+  ],
+  "zero_quantity_open_attempt": {
+    "symbol": "BNBUSDT",
+    "action": "open_long",
+    "historical_error": "position size must be greater than zero",
+    "expected_reason_code": "position_sizing.zero_quantity"
+  }
+}

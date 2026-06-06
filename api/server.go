@@ -4,20 +4,45 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"nofx/backtest"
+	"nofx/drltrain"
+	"nofx/logger"
 	"nofx/manager"
+	"nofx/storage"
+	"nofx/strategy/chanlun"
+	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
 
+const (
+	latestDecisionLimit      = 5
+	latestDecisionScanWindow = 100
+)
+
 // Server HTTP API服务器
 type Server struct {
-	router        *gin.Engine
-	traderManager *manager.TraderManager
-	port          int
+	router         *gin.Engine
+	traderManager  *manager.TraderManager
+	port           int
+	storageRuntime *storage.RuntimeConfig
+	storageLayout  *storage.Layout
+	drlTrain       *drltrain.Manager
+}
+
+type ServerOptions struct {
+	StorageRuntime *storage.RuntimeConfig
+	StorageLayout  *storage.Layout
+	DRLTrain       *drltrain.Manager
 }
 
 // NewServer 创建API服务器
 func NewServer(traderManager *manager.TraderManager, port int) *Server {
+	return NewServerWithOptions(traderManager, port, ServerOptions{})
+}
+
+func NewServerWithOptions(traderManager *manager.TraderManager, port int, opts ServerOptions) *Server {
 	// 设置为Release模式（减少日志输出）
 	gin.SetMode(gin.ReleaseMode)
 
@@ -27,9 +52,12 @@ func NewServer(traderManager *manager.TraderManager, port int) *Server {
 	router.Use(corsMiddleware())
 
 	s := &Server{
-		router:        router,
-		traderManager: traderManager,
-		port:          port,
+		router:         router,
+		traderManager:  traderManager,
+		port:           port,
+		storageRuntime: opts.StorageRuntime,
+		storageLayout:  opts.StorageLayout,
+		drlTrain:       opts.DRLTrain,
 	}
 
 	// 设置路由
@@ -67,6 +95,7 @@ func (s *Server) setupRoutes() {
 
 		// Trader列表
 		api.GET("/traders", s.handleTraderList)
+		s.registerStorageRoutes(api.Group("/storage"))
 
 		// 指定trader的数据（使用query参数 ?trader_id=xxx）
 		api.GET("/status", s.handleStatus)
@@ -77,6 +106,19 @@ func (s *Server) setupRoutes() {
 		api.GET("/statistics", s.handleStatistics)
 		api.GET("/equity-history", s.handleEquityHistory)
 		api.GET("/performance", s.handlePerformance)
+		api.GET("/strategy/symbols", s.handleStrategySymbols)
+		api.GET("/strategy/signals", s.handleStrategySignals)
+		api.GET("/strategy/drl/status", s.handleDRLStatus)
+		api.GET("/strategy/drl/features", s.handleDRLFeatures)
+		api.POST("/strategy/drl/backtest/monte-carlo", s.handleDRLMonteCarlo)
+		api.POST("/strategy/drl/backtest/stress-test", s.handleDRLStressTest)
+		api.GET("/market/klines", s.handleMarketKlines)
+		if backtestAPIEnabled() {
+			s.registerBacktestRoutes(api.Group("/backtest"))
+		}
+		if s.drlTrain != nil {
+			s.registerDRLPPOTrainRoutes(api.Group("/drl-ppo"))
+		}
 	}
 }
 
@@ -121,9 +163,10 @@ func (s *Server) handleTraderList(c *gin.Context) {
 
 	for _, t := range traders {
 		result = append(result, map[string]interface{}{
-			"trader_id":   t.GetID(),
-			"trader_name": t.GetName(),
-			"ai_model":    t.GetAIModel(),
+			"trader_id":     t.GetID(),
+			"trader_name":   t.GetName(),
+			"ai_model":      t.GetAIModel(),
+			"decision_mode": t.GetDecisionMode(),
 		})
 	}
 
@@ -146,6 +189,127 @@ func (s *Server) handleStatus(c *gin.Context) {
 
 	status := trader.GetStatus()
 	c.JSON(http.StatusOK, status)
+}
+
+func (s *Server) handleDRLStatus(c *gin.Context) {
+	traderID := strings.TrimSpace(c.Query("trader_id"))
+	if traderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trader_id不能为空"})
+		return
+	}
+	status, err := s.traderManager.GetDRLStatus(traderID)
+	if err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "不存在") {
+			code = http.StatusNotFound
+		}
+		c.JSON(code, gin.H{"error": err.Error()})
+		return
+	}
+	status["trader_id"] = traderID
+	c.JSON(http.StatusOK, status)
+}
+
+func (s *Server) handleDRLFeatures(c *gin.Context) {
+	traderID := strings.TrimSpace(c.Query("trader_id"))
+	if traderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trader_id不能为空"})
+		return
+	}
+	features, err := s.traderManager.GetDRLFeatureSnapshot(traderID)
+	if err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "不存在") {
+			code = http.StatusNotFound
+		}
+		c.JSON(code, gin.H{"error": err.Error()})
+		return
+	}
+	if features == nil {
+		features = map[string]any{
+			"trader_id": traderID,
+			"message":   "DRL策略尚未完成推理，暂无特征快照",
+		}
+	} else {
+		features["trader_id"] = traderID
+	}
+	c.JSON(http.StatusOK, features)
+}
+
+type drlMonteCarloRequest struct {
+	Prices       []float64 `json:"prices"`
+	InitialValue float64   `json:"initial_value"`
+	Paths        int       `json:"paths,omitempty"`
+	HorizonSteps int       `json:"horizon_steps,omitempty"`
+	Seed         int64     `json:"seed,omitempty"`
+}
+
+func (s *Server) handleDRLMonteCarlo(c *gin.Context) {
+	traderID := strings.TrimSpace(c.Query("trader_id"))
+	if traderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trader_id不能为空"})
+		return
+	}
+	if _, err := s.traderManager.GetDRLStatus(traderID); err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "不存在") {
+			code = http.StatusNotFound
+		}
+		c.JSON(code, gin.H{"error": err.Error()})
+		return
+	}
+	var req drlMonteCarloRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("请求体无效: %v", err)})
+		return
+	}
+	result, err := (backtest.MonteCarloSimulator{
+		Paths:        req.Paths,
+		HorizonSteps: req.HorizonSteps,
+		Seed:         req.Seed,
+	}).Simulate(req.Prices, req.InitialValue)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"trader_id": traderID, "result": result})
+}
+
+type drlStressTestRequest struct {
+	Prices       []float64 `json:"prices"`
+	InitialValue float64   `json:"initial_value"`
+	Delta        float64   `json:"delta,omitempty"`
+	ShockIndex   int       `json:"shock_index,omitempty"`
+}
+
+func (s *Server) handleDRLStressTest(c *gin.Context) {
+	traderID := strings.TrimSpace(c.Query("trader_id"))
+	if traderID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "trader_id不能为空"})
+		return
+	}
+	if _, err := s.traderManager.GetDRLStatus(traderID); err != nil {
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "不存在") {
+			code = http.StatusNotFound
+		}
+		c.JSON(code, gin.H{"error": err.Error()})
+		return
+	}
+	var req drlStressTestRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("请求体无效: %v", err)})
+		return
+	}
+	result, err := (backtest.StressTester{
+		Delta:      req.Delta,
+		ShockIndex: req.ShockIndex,
+	}).Test(req.Prices, req.InitialValue)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"trader_id": traderID, "result": result})
 }
 
 // handleAccount 账户信息
@@ -206,6 +370,176 @@ func (s *Server) handlePositions(c *gin.Context) {
 	c.JSON(http.StatusOK, positions)
 }
 
+func (s *Server) handleStrategySymbols(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	symbols, err := s.traderManager.GetStrategySymbols(traderID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	if symbols == nil {
+		symbols = []chanlun.StrategySymbol{}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"trader_id": traderID,
+		"symbols":   symbols,
+	})
+}
+
+func (s *Server) handleStrategySignals(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	symbol := strings.TrimSpace(c.Query("symbol"))
+	if symbol == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "symbol不能为空"})
+		return
+	}
+	opts, err := parseSignalReportOptions(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	report, err := s.traderManager.GetLatestStrategySignalsWithOptions(traderID, symbol, opts)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, report)
+}
+
+func parseSignalReportOptions(c *gin.Context) (chanlun.SignalReportOptions, error) {
+	opts := chanlun.SignalReportOptions{
+		View:     strings.TrimSpace(c.Query("view")),
+		Layers:   splitCSVQuery(c.Query("layers")),
+		Statuses: splitCSVQuery(c.Query("statuses")),
+	}
+	if strings.EqualFold(strings.TrimSpace(c.Query("include_history")), "true") {
+		opts.View = "audit"
+	}
+	if value := strings.TrimSpace(c.Query("from")); value != "" {
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return opts, fmt.Errorf("from必须是epoch毫秒")
+		}
+		opts.From = parsed
+	}
+	if value := strings.TrimSpace(c.Query("to")); value != "" {
+		parsed, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return opts, fmt.Errorf("to必须是epoch毫秒")
+		}
+		opts.To = parsed
+	}
+	if value := strings.TrimSpace(c.Query("limit")); value != "" {
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 0 {
+			return opts, fmt.Errorf("limit必须是非负整数")
+		}
+		opts.Limit = parsed
+	}
+	return opts, nil
+}
+
+func splitCSVQuery(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if item := strings.TrimSpace(part); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+type marketKlineDTO struct {
+	OpenTime  int64   `json:"open_time"`
+	CloseTime int64   `json:"close_time"`
+	Open      float64 `json:"open"`
+	High      float64 `json:"high"`
+	Low       float64 `json:"low"`
+	Close     float64 `json:"close"`
+	Volume    float64 `json:"volume"`
+}
+
+func (s *Server) handleMarketKlines(c *gin.Context) {
+	_, traderID, err := s.getTraderFromQuery(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	symbol := strings.TrimSpace(c.Query("symbol"))
+	if symbol == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "symbol不能为空"})
+		return
+	}
+	timeframe := strings.ToLower(strings.TrimSpace(c.DefaultQuery("timeframe", "1h")))
+	if !isSupportedMarketKlineTimeframe(timeframe) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "timeframe仅支持3m、15m、1h或4h"})
+		return
+	}
+	explicitLimit := 0
+	if rawLimit := strings.TrimSpace(c.Query("limit")); rawLimit != "" {
+		explicitLimit = parsePositiveInt(rawLimit, 240)
+	}
+	limitResolution, err := s.traderManager.ResolveMarketKlineLimit(traderID, timeframe, explicitLimit)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	klines, err := s.traderManager.GetMarketKlines(traderID, symbol, timeframe, limitResolution.Limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取K线失败: %v", err)})
+		return
+	}
+	response := make([]marketKlineDTO, 0, len(klines))
+	for _, k := range klines {
+		response = append(response, marketKlineDTO{
+			OpenTime:  k.OpenTime,
+			CloseTime: k.CloseTime,
+			Open:      k.Open,
+			High:      k.High,
+			Low:       k.Low,
+			Close:     k.Close,
+			Volume:    k.Volume,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"symbol":           symbol,
+		"timeframe":        timeframe,
+		"limit":            limitResolution.Limit,
+		"configured_limit": limitResolution.ConfiguredLimit,
+		"limit_source":     limitResolution.LimitSource,
+		"klines":           response,
+	})
+}
+
+func isSupportedMarketKlineTimeframe(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "3m", "15m", "1h", "4h":
+		return true
+	default:
+		return false
+	}
+}
+
+func parsePositiveInt(value string, fallback int) int {
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
 // handleDecisions 决策日志列表
 func (s *Server) handleDecisions(c *gin.Context) {
 	_, traderID, err := s.getTraderFromQuery(c)
@@ -246,12 +580,16 @@ func (s *Server) handleLatestDecisions(c *gin.Context) {
 		return
 	}
 
-	records, err := trader.GetDecisionLogger().GetLatestRecords(5)
+	records, err := trader.GetDecisionLogger().GetLatestRecords(latestDecisionScanWindow)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": fmt.Sprintf("获取决策日志失败: %v", err),
 		})
 		return
+	}
+	records = filterDisplayableDecisionRecords(records)
+	if len(records) > latestDecisionLimit {
+		records = records[len(records)-latestDecisionLimit:]
 	}
 
 	// 反转数组，让最新的在前面（用于列表显示）
@@ -261,6 +599,23 @@ func (s *Server) handleLatestDecisions(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, records)
+}
+
+func filterDisplayableDecisionRecords(records []*logger.DecisionRecord) []*logger.DecisionRecord {
+	filtered := make([]*logger.DecisionRecord, 0, len(records))
+	for _, record := range records {
+		if record == nil || isEmptySuccessfulDecisionRecord(record) {
+			continue
+		}
+		filtered = append(filtered, record)
+	}
+	return filtered
+}
+
+func isEmptySuccessfulDecisionRecord(record *logger.DecisionRecord) bool {
+	return len(record.Decisions) == 0 &&
+		strings.TrimSpace(record.DecisionJSON) == "" &&
+		strings.TrimSpace(record.ErrorMessage) == ""
 }
 
 // handleStatistics 统计信息
@@ -288,6 +643,22 @@ func (s *Server) handleStatistics(c *gin.Context) {
 	c.JSON(http.StatusOK, stats)
 }
 
+type EquityHistoryPoint struct {
+	Timestamp        string  `json:"timestamp"`
+	TotalEquity      float64 `json:"total_equity"`      // 账户净值（wallet + unrealized）
+	AvailableBalance float64 `json:"available_balance"` // 可用余额
+	TotalPnL         float64 `json:"total_pnl"`         // 交易盈亏（已实现 + 未实现）
+	TotalPnLPct      float64 `json:"total_pnl_pct"`     // 相对成本基准的盈亏百分比
+	CostBasis        float64 `json:"cost_basis,omitempty"`
+	StrategyBaseline float64 `json:"strategy_baseline,omitempty"`
+	BaselineSource   string  `json:"baseline_source,omitempty"`
+	EquitySource     string  `json:"equity_source,omitempty"`
+	ReturnReliable   bool    `json:"return_reliable"`
+	PositionCount    int     `json:"position_count"`  // 持仓数量
+	MarginUsedPct    float64 `json:"margin_used_pct"` // 保证金使用率
+	CycleNumber      int     `json:"cycle_number"`
+}
+
 // handleEquityHistory 收益率历史数据
 func (s *Server) handleEquityHistory(c *gin.Context) {
 	_, traderID, err := s.getTraderFromQuery(c)
@@ -312,18 +683,6 @@ func (s *Server) handleEquityHistory(c *gin.Context) {
 		return
 	}
 
-	// 构建收益率历史数据点
-	type EquityPoint struct {
-		Timestamp        string  `json:"timestamp"`
-		TotalEquity      float64 `json:"total_equity"`      // 账户净值（wallet + unrealized）
-		AvailableBalance float64 `json:"available_balance"` // 可用余额
-		TotalPnL         float64 `json:"total_pnl"`         // 总盈亏（相对初始余额）
-		TotalPnLPct      float64 `json:"total_pnl_pct"`     // 总盈亏百分比
-		PositionCount    int     `json:"position_count"`    // 持仓数量
-		MarginUsedPct    float64 `json:"margin_used_pct"`   // 保证金使用率
-		CycleNumber      int     `json:"cycle_number"`
-	}
-
 	// 从AutoTrader获取初始余额（用于计算盈亏百分比）
 	initialBalance := 0.0
 	if status := trader.GetStatus(); status != nil {
@@ -346,32 +705,74 @@ func (s *Server) handleEquityHistory(c *gin.Context) {
 		return
 	}
 
-	var history []EquityPoint
-	for _, record := range records {
-		// TotalBalance字段实际存储的是TotalEquity
-		totalEquity := record.AccountState.TotalBalance
-		// TotalUnrealizedProfit字段实际存储的是TotalPnL（相对初始余额）
-		totalPnL := record.AccountState.TotalUnrealizedProfit
+	history := buildEquityHistoryPoints(records, initialBalance)
 
-		// 计算盈亏百分比
-		totalPnLPct := 0.0
-		if initialBalance > 0 {
-			totalPnLPct = (totalPnL / initialBalance) * 100
+	c.JSON(http.StatusOK, history)
+}
+
+func buildEquityHistoryPoints(records []*logger.DecisionRecord, initialBalance float64) []EquityHistoryPoint {
+	history := make([]EquityHistoryPoint, 0, len(records))
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		totalEquity := record.AccountState.TotalBalance
+		totalPnL := record.AccountState.TotalUnrealizedProfit
+		costBasis := record.AccountState.CostBasis
+		strategyBaseline := record.AccountState.StrategyBaseline
+		baselineSource := record.AccountState.BaselineSource
+		if baselineSource == "" {
+			baselineSource = record.AccountState.PnLSource
+		}
+		equitySource := record.AccountState.EquitySource
+		if equitySource == "" && totalEquity > 0 {
+			equitySource = "exchange_balance"
 		}
 
-		history = append(history, EquityPoint{
+		returnReliable := true
+		if record.Timestamp.IsZero() {
+			returnReliable = false
+			baselineSource = "legacy_zero_timestamp"
+		}
+		if costBasis <= 0 {
+			returnReliable = false
+			if baselineSource == "" {
+				baselineSource = "legacy_missing_cost_basis"
+			} else if !strings.HasPrefix(baselineSource, "legacy_") {
+				baselineSource = "legacy_" + baselineSource
+			}
+			if initialBalance > 0 {
+				costBasis = initialBalance
+			} else if totalEquity > 0 && totalEquity-totalPnL > 0 {
+				costBasis = totalEquity - totalPnL
+			}
+		}
+		if strategyBaseline <= 0 && costBasis > 0 {
+			strategyBaseline = costBasis
+		}
+
+		totalPnLPct := 0.0
+		if returnReliable && costBasis > 0 {
+			totalPnLPct = (totalPnL / costBasis) * 100
+		}
+
+		history = append(history, EquityHistoryPoint{
 			Timestamp:        record.Timestamp.Format("2006-01-02 15:04:05"),
 			TotalEquity:      totalEquity,
 			AvailableBalance: record.AccountState.AvailableBalance,
 			TotalPnL:         totalPnL,
 			TotalPnLPct:      totalPnLPct,
+			CostBasis:        costBasis,
+			StrategyBaseline: strategyBaseline,
+			BaselineSource:   baselineSource,
+			EquitySource:     equitySource,
+			ReturnReliable:   returnReliable,
 			PositionCount:    record.AccountState.PositionCount,
 			MarginUsedPct:    record.AccountState.MarginUsedPct,
 			CycleNumber:      record.CycleNumber,
 		})
 	}
-
-	c.JSON(http.StatusOK, history)
+	return history
 }
 
 // handlePerformance AI历史表现分析（用于展示AI学习和反思）
@@ -388,9 +789,8 @@ func (s *Server) handlePerformance(c *gin.Context) {
 		return
 	}
 
-	// 分析最近100个周期的交易表现（避免长期持仓的交易记录丢失）
-	// 假设每3分钟一个周期，100个周期 = 5小时，足够覆盖大部分交易
-	performance, err := trader.GetDecisionLogger().AnalyzePerformance(100)
+	// API展示使用全历史窗口，避免只展示最近几个小时导致绩效样本为空。
+	performance, err := trader.GetDecisionLogger().AnalyzePerformance(1000000)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": fmt.Sprintf("分析历史表现失败: %v", err),
@@ -416,6 +816,7 @@ func (s *Server) Start() error {
 	log.Printf("  • GET  /api/statistics?trader_id=xxx - 指定trader的统计信息")
 	log.Printf("  • GET  /api/equity-history?trader_id=xxx - 指定trader的收益率历史数据")
 	log.Printf("  • GET  /api/performance?trader_id=xxx - 指定trader的AI学习表现分析")
+	log.Printf("  • GET  /api/strategy/drl/status?trader_id=xxx - 指定DRL trader的推理状态")
 	log.Printf("  • GET  /health               - 健康检查")
 	log.Println()
 

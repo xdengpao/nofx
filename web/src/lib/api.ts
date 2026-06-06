@@ -6,6 +6,10 @@ import type {
   Statistics,
   TraderInfo,
   CompetitionData,
+  MarketKlineResponse,
+  StrategySignalReport,
+  StrategySignalQuery,
+  StrategySymbolsResponse,
 } from '../types';
 
 const API_BASE = '/api';
@@ -108,6 +112,42 @@ export const api = {
       : `${API_BASE}/performance`;
     const res = await fetch(url);
     if (!res.ok) throw new Error('获取AI学习数据失败');
+    return res.json();
+  },
+
+  async getStrategySymbols(traderId?: string): Promise<StrategySymbolsResponse> {
+    const url = traderId
+      ? `${API_BASE}/strategy/symbols?trader_id=${encodeURIComponent(traderId)}`
+      : `${API_BASE}/strategy/symbols`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('获取策略标的失败');
+    return res.json();
+  },
+
+  async getStrategySignals(traderId: string | undefined, symbol: string, options?: StrategySignalQuery): Promise<StrategySignalReport> {
+    const params = new URLSearchParams();
+    if (traderId) params.set('trader_id', traderId);
+    params.set('symbol', symbol);
+    if (options?.view) params.set('view', options.view);
+    if (options?.include_history) params.set('include_history', 'true');
+    if (options?.layers?.length) params.set('layers', options.layers.join(','));
+    if (options?.statuses?.length) params.set('statuses', options.statuses.join(','));
+    if (options?.from) params.set('from', String(options.from));
+    if (options?.to) params.set('to', String(options.to));
+    if (options?.limit !== undefined) params.set('limit', String(options.limit));
+    const res = await fetch(`${API_BASE}/strategy/signals?${params.toString()}`);
+    if (!res.ok) throw new Error('获取策略信号失败');
+    return res.json();
+  },
+
+  async getMarketKlines(traderId: string | undefined, symbol: string, timeframe = '1h', limit?: number): Promise<MarketKlineResponse> {
+    const params = new URLSearchParams();
+    if (traderId) params.set('trader_id', traderId);
+    params.set('symbol', symbol);
+    params.set('timeframe', timeframe);
+    if (typeof limit === 'number' && limit > 0) params.set('limit', String(limit));
+    const res = await fetch(`${API_BASE}/market/klines?${params.toString()}`);
+    if (!res.ok) throw new Error('获取K线数据失败');
     return res.json();
   },
 };

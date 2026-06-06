@@ -1,7 +1,11 @@
+import { useState } from 'react';
 import useSWR from 'swr';
 import { useLanguage } from '../contexts/LanguageContext';
 import { t } from '../i18n/translations';
 import { api } from '../lib/api';
+import { formatDateTime } from '../utils/formatDateTime';
+import { exportTradeHistoryCSV } from '../utils/exportCSV';
+import { paginate } from '../utils/pagination';
 
 interface TradeOutcome {
   symbol: string;
@@ -18,6 +22,22 @@ interface TradeOutcome {
   open_time: string;
   close_time: string;
   was_stop_loss: boolean;
+  event_type?: string;
+  is_partial?: boolean;
+  close_quantity?: number;
+  remaining_quantity?: number;
+  requested_close_percentage?: number;
+  executed_close_percentage?: number;
+  order_id?: number;
+  signal_id?: string;
+  strategy_name?: string;
+  strategy_version?: string;
+  pnl_source?: string;
+  reconciled?: boolean;
+  reconciliation_status?: string;
+  reconciliation_reason?: string;
+  open_reason?: string;
+  close_reason?: string;
 }
 
 interface SymbolPerformance {
@@ -40,6 +60,46 @@ interface PerformanceAnalysis {
   profit_factor: number;
   sharpe_ratio: number;
   recent_trades: TradeOutcome[];
+  recent_trade_events?: TradeOutcome[];
+  trade_event_stats?: {
+    total_events: number;
+    full_close_events: number;
+    auto_close_events: number;
+    partial_close_events: number;
+    partial_close_realized_pnl: number;
+    partial_close_estimated_pnl: number;
+    partial_close_reconciled: number;
+    partial_close_pending: number;
+  };
+  unmatched?: unknown[];
+  rolling?: {
+    effective_max_risk_per_trade: number;
+    recent_10: { trade_count: number; profit_factor: number; total_pn_l: number };
+    recent_20: { trade_count: number; profit_factor: number; total_pn_l: number };
+    symbol_gates: Record<string, { state: string; reason?: string; min_confidence: number }>;
+    side_gates: Record<string, { state: string; reason?: string; min_confidence: number }>;
+    reasons?: string[];
+  };
+  execution_quality?: {
+    total_actions?: number;
+    open_attempts?: number;
+    open_failures?: number;
+    open_rejected_count?: number;
+    partial_close_attempts: number;
+    partial_close_failures: number;
+    partial_close_failure_rate: number;
+    protection_order_failures?: number;
+    high_risk_execution_failures?: number;
+    ai_failure_count: number;
+    ai_failure_count_by_mode?: Record<string, number>;
+    strategy_failure_count?: number;
+    strategy_failure_count_by_mode?: Record<string, number>;
+    unmatched_action_count: number;
+    recent_high_risk_errors?: Array<{ timestamp: string; symbol?: string; action?: string; risk_type: string; reason: string }>;
+    recent_open_rejection_reasons?: string[];
+    protection_order_failure_rate?: number;
+    high_risk_execution_failure_rate?: number;
+  };
   symbol_stats: { [key: string]: SymbolPerformance };
   best_symbol: string;
   worst_symbol: string;
@@ -49,8 +109,49 @@ interface AILearningProps {
   traderId: string;
 }
 
+function tradeEventLabel(trade: TradeOutcome, language: string): string {
+  const eventType = trade.event_type || (trade.is_partial ? 'partial_close' : 'full_close');
+  if (eventType === 'partial_close') return language === 'zh' ? '部分平仓' : 'Partial';
+  if (eventType === 'auto_close') return language === 'zh' ? '自动平仓' : 'Auto Close';
+  return language === 'zh' ? '完整平仓' : 'Full Close';
+}
+
+function tradeEventColor(trade: TradeOutcome): { bg: string; color: string } {
+  const eventType = trade.event_type || (trade.is_partial ? 'partial_close' : 'full_close');
+  if (eventType === 'partial_close') {
+    return { bg: 'rgba(240, 185, 11, 0.18)', color: '#FCD34D' };
+  }
+  if (eventType === 'auto_close') {
+    return { bg: 'rgba(96, 165, 250, 0.18)', color: '#60A5FA' };
+  }
+  return { bg: 'rgba(148, 163, 184, 0.16)', color: '#CBD5E1' };
+}
+
+function reconciliationLabel(trade: TradeOutcome, language: string): string {
+  if (trade.event_type !== 'partial_close' && !trade.is_partial) return '-';
+  if (trade.pnl_source === 'exchange' || trade.reconciled) {
+    return language === 'zh' ? '真实成交' : 'Exchange';
+  }
+  if (trade.reconciliation_status === 'pending' || trade.reconciliation_status === 'partial_or_pending') {
+    return language === 'zh' ? '待对账' : 'Pending';
+  }
+  if (trade.reconciliation_status === 'unsupported') {
+    return language === 'zh' ? '不支持' : 'Unsupported';
+  }
+  return language === 'zh' ? '估算' : 'Estimated';
+}
+
+function closeReasonText(trade: TradeOutcome, language: string): string {
+  if (trade.close_reason) return trade.close_reason;
+  if (trade.was_stop_loss) return language === 'zh' ? '止损/亏损平仓' : 'Stop Loss';
+  return language === 'zh' ? '止盈/手动' : 'Take Profit / Manual';
+}
+
 export default function AILearning({ traderId }: AILearningProps) {
   const { language } = useLanguage();
+  const [currentPage, setCurrentPage] = useState(1);
+  const pageSize = 20;
+
   const { data: performance, error } = useSWR<PerformanceAnalysis>(
     traderId ? `performance-${traderId}` : 'performance',
     () => api.getPerformance(traderId),
@@ -60,6 +161,13 @@ export default function AILearning({ traderId }: AILearningProps) {
       dedupingInterval: 20000,
     }
   );
+
+  // 分页计算
+  const allTrades = performance?.recent_trade_events?.length
+    ? performance.recent_trade_events
+    : performance?.recent_trades || [];
+  const totalRecords = allTrades.length;
+  const { displayItems: displayTrades, totalPages, enablePagination } = paginate(allTrades, currentPage, pageSize);
 
   if (error) {
     return (
@@ -77,7 +185,7 @@ export default function AILearning({ traderId }: AILearningProps) {
     );
   }
 
-  if (!performance || performance.total_trades === 0) {
+  if (!performance || (performance.total_trades === 0 && allTrades.length === 0)) {
     return (
       <div className="rounded p-6" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
         <div className="flex items-center gap-2 mb-2">
@@ -95,6 +203,20 @@ export default function AILearning({ traderId }: AILearningProps) {
   const symbolStatsList = Object.values(symbolStats).filter(stat => stat != null).sort(
     (a, b) => (b.total_pn_l || 0) - (a.total_pn_l || 0)
   );
+  const rolling = performance.rolling;
+  const execution = performance.execution_quality;
+  const blockedSymbols = rolling
+    ? Object.values(rolling.symbol_gates || {}).filter((gate) => gate.state === 'block').length
+    : 0;
+  const penalizedSymbols = rolling
+    ? Object.values(rolling.symbol_gates || {}).filter((gate) => gate.state === 'penalize').length
+    : 0;
+  const penalizedSides = rolling
+    ? Object.values(rolling.side_gates || {}).filter((gate) => gate.state === 'penalize').length
+    : 0;
+  const effectiveRiskPct = rolling?.effective_max_risk_per_trade
+    ? rolling.effective_max_risk_per_trade * 100
+    : 2;
 
   return (
     <div className="space-y-8">
@@ -129,6 +251,64 @@ export default function AILearning({ traderId }: AILearningProps) {
           </div>
         </div>
       </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-3">
+        <div className="rounded-lg p-4" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
+          <div className="text-xs uppercase mb-2" style={{ color: '#848E9C' }}>Strategy Risk</div>
+          <div className="text-2xl font-bold mono" style={{ color: effectiveRiskPct < 2 ? '#F87171' : '#10B981' }}>
+            {effectiveRiskPct.toFixed(2)}%
+          </div>
+          <div className="text-xs mt-1" style={{ color: '#94A3B8' }}>max risk per trade</div>
+        </div>
+        <div className="rounded-lg p-4" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
+          <div className="text-xs uppercase mb-2" style={{ color: '#848E9C' }}>Rolling Gate</div>
+          <div className="text-2xl font-bold mono" style={{ color: blockedSymbols > 0 ? '#F87171' : '#F0B90B' }}>
+            {blockedSymbols} / {penalizedSymbols}
+          </div>
+          <div className="text-xs mt-1" style={{ color: '#94A3B8' }}>blocked / penalized symbols</div>
+        </div>
+        <div className="rounded-lg p-4" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
+          <div className="text-xs uppercase mb-2" style={{ color: '#848E9C' }}>Side Filter</div>
+          <div className="text-2xl font-bold mono" style={{ color: penalizedSides > 0 ? '#F0B90B' : '#10B981' }}>
+            {penalizedSides}
+          </div>
+          <div className="text-xs mt-1" style={{ color: '#94A3B8' }}>penalized directions</div>
+        </div>
+        <div className="rounded-lg p-4" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
+          <div className="text-xs uppercase mb-2" style={{ color: '#848E9C' }}>Execution Quality</div>
+          <div className="text-2xl font-bold mono" style={{ color: (execution?.high_risk_execution_failures || execution?.protection_order_failures || 0) > 0 ? '#F87171' : '#10B981' }}>
+            {execution?.high_risk_execution_failures || 0}
+          </div>
+          <div className="text-xs mt-1" style={{ color: '#94A3B8' }}>high risk execution failures</div>
+        </div>
+      </div>
+
+      {execution && (
+        <div className="rounded-lg p-4" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
+            <div>
+              <div className="text-xs uppercase" style={{ color: '#848E9C' }}>Open Rejected</div>
+              <div className="text-xl font-bold mono" style={{ color: (execution.open_rejected_count || 0) > 0 ? '#F0B90B' : '#10B981' }}>{execution.open_rejected_count || 0}</div>
+            </div>
+            <div>
+              <div className="text-xs uppercase" style={{ color: '#848E9C' }}>Protection Fail</div>
+              <div className="text-xl font-bold mono" style={{ color: (execution.protection_order_failures || 0) > 0 ? '#F87171' : '#10B981' }}>{execution.protection_order_failures || 0}</div>
+            </div>
+            <div>
+              <div className="text-xs uppercase" style={{ color: '#848E9C' }}>AI Call Fail</div>
+              <div className="text-xl font-bold mono" style={{ color: (execution.ai_failure_count || 0) > 0 ? '#F0B90B' : '#10B981' }}>{execution.ai_failure_count || 0}</div>
+            </div>
+            <div>
+              <div className="text-xs uppercase" style={{ color: '#848E9C' }}>Unmatched</div>
+              <div className="text-xl font-bold mono" style={{ color: (execution.unmatched_action_count || 0) > 0 ? '#F0B90B' : '#10B981' }}>{execution.unmatched_action_count || 0}</div>
+            </div>
+            <div>
+              <div className="text-xs uppercase" style={{ color: '#848E9C' }}>Partial Fail</div>
+              <div className="text-xl font-bold mono" style={{ color: (execution.partial_close_failures || 0) > 0 ? '#F87171' : '#10B981' }}>{(execution.partial_close_failure_rate || 0).toFixed(1)}%</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 核心指标卡片 - 4列网格 */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -412,231 +592,226 @@ export default function AILearning({ traderId }: AILearningProps) {
         </div>
       )}
 
-      {/* 币种表现 & 历史成交 - 左右分屏 2列布局 */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* 左侧：币种表现统计表格 */}
-        {symbolStatsList.length > 0 && (
-          <div className="rounded-2xl overflow-hidden" style={{
-            background: 'rgba(30, 35, 41, 0.4)',
-            border: '1px solid rgba(99, 102, 241, 0.2)',
-            boxShadow: '0 4px 16px rgba(0, 0, 0, 0.2)',
-            maxHeight: 'calc(100vh - 200px)'
-          }}>
-            <div className="p-5 border-b sticky top-0 z-10" style={{
-              borderColor: 'rgba(99, 102, 241, 0.2)',
-              background: 'rgba(30, 35, 41, 0.95)',
-              backdropFilter: 'blur(10px)'
-            }}>
-              <h3 className="font-bold flex items-center gap-2 text-lg" style={{ color: '#E0E7FF' }}>
-                📊 {t('symbolPerformance', language)}
-              </h3>
-            </div>
-            <div className="overflow-y-auto" style={{ maxHeight: 'calc(100vh - 280px)' }}>
-              <table className="w-full">
-                <thead className="sticky top-0 z-10">
-                  <tr style={{ background: 'rgba(15, 23, 42, 0.95)', backdropFilter: 'blur(10px)' }}>
-                    <th className="text-left px-4 py-3 text-xs font-semibold" style={{ color: '#94A3B8' }}>Symbol</th>
-                    <th className="text-right px-4 py-3 text-xs font-semibold" style={{ color: '#94A3B8' }}>Trades</th>
-                    <th className="text-right px-4 py-3 text-xs font-semibold" style={{ color: '#94A3B8' }}>Win Rate</th>
-                    <th className="text-right px-4 py-3 text-xs font-semibold" style={{ color: '#94A3B8' }}>Total P&L (USDT)</th>
-                    <th className="text-right px-4 py-3 text-xs font-semibold" style={{ color: '#94A3B8' }}>Avg P&L (USDT)</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {symbolStatsList.map((stat, idx) => (
-                    <tr key={stat.symbol} className="transition-colors hover:bg-white/5" style={{
-                      borderTop: idx > 0 ? '1px solid rgba(99, 102, 241, 0.1)' : 'none'
-                    }}>
-                      <td className="px-4 py-3">
-                        <span className="font-bold mono text-sm" style={{ color: '#E0E7FF' }}>{stat.symbol}</span>
-                      </td>
-                      <td className="px-4 py-3 text-right mono text-sm" style={{ color: '#CBD5E1' }}>
-                        {stat.total_trades}
-                      </td>
-                      <td className="px-4 py-3 text-right mono text-sm font-semibold" style={{
-                        color: (stat.win_rate || 0) >= 50 ? '#10B981' : '#F87171'
-                      }}>
-                        {(stat.win_rate || 0).toFixed(1)}%
-                      </td>
-                      <td className="px-4 py-3 text-right mono text-sm font-bold" style={{
-                        color: (stat.total_pn_l || 0) > 0 ? '#10B981' : '#F87171'
-                      }}>
-                        {(stat.total_pn_l || 0) > 0 ? '+' : ''}{(stat.total_pn_l || 0).toFixed(2)}
-                      </td>
-                      <td className="px-4 py-3 text-right mono text-sm" style={{
-                        color: (stat.avg_pn_l || 0) > 0 ? '#10B981' : '#F87171'
-                      }}>
-                        {(stat.avg_pn_l || 0) > 0 ? '+' : ''}{(stat.avg_pn_l || 0).toFixed(2)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {/* 右侧：历史成交记录 */}
+      {/* 币种表现统计表格 */}
+      {symbolStatsList.length > 0 && (
         <div className="rounded-2xl overflow-hidden" style={{
           background: 'rgba(30, 35, 41, 0.4)',
-          border: '1px solid rgba(240, 185, 11, 0.2)',
-          maxHeight: 'calc(100vh - 200px)'
+          border: '1px solid rgba(99, 102, 241, 0.2)',
+          boxShadow: '0 4px 16px rgba(0, 0, 0, 0.2)'
         }}>
-          <div className="p-5 border-b sticky top-0 z-10" style={{
-            background: 'rgba(240, 185, 11, 0.1)',
-            borderColor: 'rgba(240, 185, 11, 0.3)',
-            backdropFilter: 'blur(10px)'
+          <div className="p-5 border-b" style={{
+            borderColor: 'rgba(99, 102, 241, 0.2)',
+            background: 'rgba(30, 35, 41, 0.95)'
           }}>
+            <h3 className="font-bold flex items-center gap-2 text-lg" style={{ color: '#E0E7FF' }}>
+              📊 {t('symbolPerformance', language)}
+            </h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr style={{ background: 'rgba(15, 23, 42, 0.95)' }}>
+                  <th className="text-left px-4 py-3 text-xs font-semibold" style={{ color: '#94A3B8' }}>Symbol</th>
+                  <th className="text-right px-4 py-3 text-xs font-semibold" style={{ color: '#94A3B8' }}>Trades</th>
+                  <th className="text-right px-4 py-3 text-xs font-semibold" style={{ color: '#94A3B8' }}>Win Rate</th>
+                  <th className="text-right px-4 py-3 text-xs font-semibold" style={{ color: '#94A3B8' }}>Total P&L (USDT)</th>
+                  <th className="text-right px-4 py-3 text-xs font-semibold" style={{ color: '#94A3B8' }}>Avg P&L (USDT)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {symbolStatsList.map((stat, idx) => (
+                  <tr key={stat.symbol} className="transition-colors hover:bg-white/5" style={{
+                    borderTop: idx > 0 ? '1px solid rgba(99, 102, 241, 0.1)' : 'none'
+                  }}>
+                    <td className="px-4 py-3">
+                      <span className="font-bold mono text-sm" style={{ color: '#E0E7FF' }}>{stat.symbol}</span>
+                    </td>
+                    <td className="px-4 py-3 text-right mono text-sm" style={{ color: '#CBD5E1' }}>
+                      {stat.total_trades}
+                    </td>
+                    <td className="px-4 py-3 text-right mono text-sm font-semibold" style={{
+                      color: (stat.win_rate || 0) >= 50 ? '#10B981' : '#F87171'
+                    }}>
+                      {(stat.win_rate || 0).toFixed(1)}%
+                    </td>
+                    <td className="px-4 py-3 text-right mono text-sm font-bold" style={{
+                      color: (stat.total_pn_l || 0) > 0 ? '#10B981' : '#F87171'
+                    }}>
+                      {(stat.total_pn_l || 0) > 0 ? '+' : ''}{(stat.total_pn_l || 0).toFixed(2)}
+                    </td>
+                    <td className="px-4 py-3 text-right mono text-sm" style={{
+                      color: (stat.avg_pn_l || 0) > 0 ? '#10B981' : '#F87171'
+                    }}>
+                      {(stat.avg_pn_l || 0) > 0 ? '+' : ''}{(stat.avg_pn_l || 0).toFixed(2)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* 历史成交记录 - 全宽表格 */}
+      <div className="rounded-2xl overflow-hidden" style={{
+        background: 'rgba(30, 35, 41, 0.4)',
+        border: '1px solid rgba(240, 185, 11, 0.2)'
+      }}>
+        <div className="p-5 border-b" style={{
+          background: 'rgba(240, 185, 11, 0.1)',
+          borderColor: 'rgba(240, 185, 11, 0.3)'
+        }}>
+          <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <span className="text-2xl">📜</span>
               <div>
                 <h3 className="font-bold text-lg" style={{ color: '#FCD34D' }}>{t('tradeHistory', language)}</h3>
                 <p className="text-xs" style={{ color: '#94A3B8' }}>
-                  {performance?.recent_trades && performance.recent_trades.length > 0
-                    ? t('completedTrades', language, { count: performance.recent_trades.length })
+                  {allTrades.length > 0
+                    ? t('completedTrades', language, { count: allTrades.length })
                     : t('completedTradesWillAppear', language)}
                 </p>
               </div>
             </div>
+            <button
+              onClick={() => exportTradeHistoryCSV(allTrades, traderId)}
+              disabled={allTrades.length === 0}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors"
+              style={{
+                background: allTrades.length === 0
+                  ? 'rgba(148, 163, 184, 0.1)'
+                  : 'rgba(240, 185, 11, 0.2)',
+                color: allTrades.length === 0
+                  ? '#4B5563'
+                  : '#FCD34D',
+                border: `1px solid ${allTrades.length === 0 ? 'rgba(148, 163, 184, 0.1)' : 'rgba(240, 185, 11, 0.4)'}`,
+                cursor: allTrades.length === 0 ? 'not-allowed' : 'pointer',
+              }}
+            >
+              📥 {t('exportCSV', language)}
+            </button>
           </div>
+        </div>
 
-          <div className="overflow-y-auto p-4 space-y-3" style={{ maxHeight: 'calc(100vh - 280px)' }}>
-            {performance?.recent_trades && performance.recent_trades.length > 0 ? (
-              performance.recent_trades.map((trade: TradeOutcome, idx: number) => {
-                const isProfitable = trade.pn_l >= 0;
-                const isRecent = idx === 0;
-
-                return (
-                  <div key={idx} className="rounded-xl p-4 backdrop-blur-sm transition-all hover:scale-[1.02]" style={{
-                    background: isRecent
-                      ? isProfitable
-                        ? 'linear-gradient(135deg, rgba(16, 185, 129, 0.15) 0%, rgba(14, 203, 129, 0.05) 100%)'
-                        : 'linear-gradient(135deg, rgba(248, 113, 113, 0.15) 0%, rgba(246, 70, 93, 0.05) 100%)'
-                      : 'rgba(30, 35, 41, 0.4)',
-                    border: isRecent
-                      ? isProfitable ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(248, 113, 113, 0.4)'
-                      : '1px solid rgba(71, 85, 105, 0.3)',
-                    boxShadow: isRecent
-                      ? '0 4px 16px rgba(139, 92, 246, 0.2)'
-                      : '0 2px 8px rgba(0, 0, 0, 0.1)'
-                  }}>
-                    <div className="flex items-center justify-between mb-3">
-                      <div className="flex items-center gap-2">
-                        <span className="text-base font-bold mono" style={{ color: '#E0E7FF' }}>
-                          {trade.symbol}
+        {allTrades.length > 0 ? (
+          <>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr style={{ background: 'rgba(15, 23, 42, 0.95)' }}>
+                  <th className="text-left px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('symbol', language)}</th>
+                  <th className="text-center px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{language === 'zh' ? '类型' : 'Type'}</th>
+                  <th className="text-center px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('side', language)}</th>
+                  <th className="text-left px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('openTime', language)}</th>
+                  <th className="text-left px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('closeTime', language)}</th>
+                  <th className="text-right px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('entryPrice', language)}</th>
+                  <th className="text-right px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('closePrice', language)}</th>
+                  <th className="text-right px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('quantity', language)}</th>
+                  <th className="text-right px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('leverage', language)}</th>
+                  <th className="text-right px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('positionValue', language)}</th>
+                  <th className="text-right px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('marginUsed', language)}</th>
+                  <th className="text-right px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('pnlAmount', language)}</th>
+                  <th className="text-right px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{t('pnlPercent', language)}</th>
+                  <th className="text-center px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{language === 'zh' ? '对账' : 'Reconcile'}</th>
+                  <th className="text-left px-3 py-3 font-semibold whitespace-nowrap" style={{ color: '#94A3B8' }}>{language === 'zh' ? '原因' : 'Reason'}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {displayTrades.map((trade: TradeOutcome, idx: number) => {
+                  const isProfitable = trade.pn_l >= 0;
+                  const eventStyle = tradeEventColor(trade);
+                  return (
+                    <tr key={idx} className="transition-colors hover:bg-white/5" style={{
+                      borderTop: idx > 0 ? '1px solid rgba(240, 185, 11, 0.1)' : 'none'
+                    }}>
+                      <td className="px-3 py-3 font-bold mono whitespace-nowrap" style={{ color: '#E0E7FF' }}>{trade.symbol}</td>
+                      <td className="px-3 py-3 text-center">
+                        <span className="px-2 py-0.5 rounded font-bold whitespace-nowrap" style={{
+                          background: eventStyle.bg,
+                          color: eventStyle.color
+                        }}>
+                          {tradeEventLabel(trade, language)}
                         </span>
-                        <span className="text-xs px-2 py-1 rounded font-bold" style={{
+                      </td>
+                      <td className="px-3 py-3 text-center">
+                        <span className="px-2 py-0.5 rounded font-bold" style={{
                           background: trade.side === 'long' ? 'rgba(14, 203, 129, 0.2)' : 'rgba(246, 70, 93, 0.2)',
                           color: trade.side === 'long' ? '#10B981' : '#F87171'
                         }}>
-                          {trade.side.toUpperCase()}
+                          {trade.side === 'long' ? t('long', language) : t('short', language)}
                         </span>
-                        {isRecent && (
-                          <span className="text-xs px-2 py-0.5 rounded font-semibold" style={{
-                            background: 'rgba(240, 185, 11, 0.2)',
-                            color: '#FCD34D'
-                          }}>
-                            {t('latest', language)}
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-lg font-bold mono" style={{
-                        color: isProfitable ? '#10B981' : '#F87171'
-                      }}>
+                      </td>
+                      <td className="px-3 py-3 mono whitespace-nowrap" style={{ color: '#CBD5E1' }}>{formatDateTime(trade.open_time)}</td>
+                      <td className="px-3 py-3 mono whitespace-nowrap" style={{ color: '#CBD5E1' }}>{formatDateTime(trade.close_time)}</td>
+                      <td className="px-3 py-3 text-right mono whitespace-nowrap" style={{ color: '#CBD5E1' }}>{trade.open_price.toFixed(4)}</td>
+                      <td className="px-3 py-3 text-right mono whitespace-nowrap" style={{ color: '#CBD5E1' }}>{trade.close_price.toFixed(4)}</td>
+                      <td className="px-3 py-3 text-right mono whitespace-nowrap" style={{ color: '#CBD5E1' }}>{trade.quantity ? trade.quantity.toFixed(4) : '-'}</td>
+                      <td className="px-3 py-3 text-right mono whitespace-nowrap" style={{ color: '#FCD34D' }}>{trade.leverage ? `${trade.leverage}x` : '-'}</td>
+                      <td className="px-3 py-3 text-right mono whitespace-nowrap" style={{ color: '#CBD5E1' }}>{trade.position_value ? trade.position_value.toFixed(2) : '-'}</td>
+                      <td className="px-3 py-3 text-right mono whitespace-nowrap" style={{ color: '#A78BFA' }}>{trade.margin_used ? trade.margin_used.toFixed(2) : '-'}</td>
+                      <td className="px-3 py-3 text-right mono font-bold whitespace-nowrap" style={{ color: isProfitable ? '#10B981' : '#F87171' }}>
+                        {isProfitable ? '+' : ''}{trade.pn_l.toFixed(2)}
+                      </td>
+                      <td className="px-3 py-3 text-right mono font-bold whitespace-nowrap" style={{ color: isProfitable ? '#10B981' : '#F87171' }}>
                         {isProfitable ? '+' : ''}{trade.pn_l_pct.toFixed(2)}%
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2 mb-3 text-xs">
-                      <div>
-                        <div style={{ color: '#94A3B8' }}>{t('entry', language)}</div>
-                        <div className="font-mono font-semibold" style={{ color: '#CBD5E1' }}>
-                          {trade.open_price.toFixed(4)}
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div style={{ color: '#94A3B8' }}>{t('exit', language)}</div>
-                        <div className="font-mono font-semibold" style={{ color: '#CBD5E1' }}>
-                          {trade.close_price.toFixed(4)}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Position Details */}
-                    <div className="grid grid-cols-2 gap-2 mb-3 text-xs">
-                      <div>
-                        <div style={{ color: '#94A3B8' }}>Quantity</div>
-                        <div className="font-mono font-semibold" style={{ color: '#CBD5E1' }}>
-                          {trade.quantity ? trade.quantity.toFixed(4) : '-'}
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div style={{ color: '#94A3B8' }}>Leverage</div>
-                        <div className="font-mono font-semibold" style={{ color: '#FCD34D' }}>
-                          {trade.leverage ? `${trade.leverage}x` : '-'}
-                        </div>
-                      </div>
-                      <div>
-                        <div style={{ color: '#94A3B8' }}>Position Value</div>
-                        <div className="font-mono font-semibold" style={{ color: '#CBD5E1' }}>
-                          {trade.position_value ? `$${trade.position_value.toFixed(2)}` : '-'}
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div style={{ color: '#94A3B8' }}>Margin Used</div>
-                        <div className="font-mono font-semibold" style={{ color: '#A78BFA' }}>
-                          {trade.margin_used ? `$${trade.margin_used.toFixed(2)}` : '-'}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="rounded-lg p-2 mb-2" style={{
-                      background: isProfitable ? 'rgba(16, 185, 129, 0.1)' : 'rgba(248, 113, 113, 0.1)'
-                    }}>
-                      <div className="flex items-center justify-between text-xs">
-                        <span style={{ color: '#94A3B8' }}>P&L</span>
-                        <span className="font-bold mono" style={{
-                          color: isProfitable ? '#10B981' : '#F87171'
-                        }}>
-                          {isProfitable ? '+' : ''}{trade.pn_l.toFixed(2)} USDT
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center justify-between text-xs" style={{ color: '#94A3B8' }}>
-                      <span>⏱️ {formatDuration(trade.duration)}</span>
-                      {trade.was_stop_loss && (
-                        <span className="px-2 py-0.5 rounded font-semibold" style={{
-                          background: 'rgba(248, 113, 113, 0.2)',
-                          color: '#FCA5A5'
-                        }}>
-                          {t('stopLoss', language)}
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="text-xs mt-2 pt-2 border-t" style={{
-                      color: '#64748B',
-                      borderColor: 'rgba(71, 85, 105, 0.3)'
-                    }}>
-                      {new Date(trade.close_time).toLocaleString('en-US', {
-                        month: 'short',
-                        day: '2-digit',
-                        hour: '2-digit',
-                        minute: '2-digit'
-                      })}
-                    </div>
-                  </div>
-                );
-              })
-            ) : (
-              <div className="p-6 text-center">
-                <div className="text-4xl mb-2 opacity-50">📜</div>
-                <div style={{ color: '#94A3B8' }}>{t('noCompletedTrades', language)}</div>
-              </div>
-            )}
+                      </td>
+                      <td className="px-3 py-3 text-center whitespace-nowrap" style={{ color: '#CBD5E1' }}>{reconciliationLabel(trade, language)}</td>
+                      <td className="px-3 py-3 min-w-[220px]" style={{ color: '#CBD5E1' }}>{closeReasonText(trade, language)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
-        </div>
+          {/* 分页控件 - 仅当记录数 > 50 时显示 */}
+          {enablePagination && (
+            <div className="flex items-center justify-between px-5 py-3 border-t" style={{
+              borderColor: 'rgba(240, 185, 11, 0.15)',
+              background: 'rgba(15, 23, 42, 0.6)'
+            }}>
+              <div className="text-xs" style={{ color: '#94A3B8' }}>
+                {t('recordsTotal', language, { count: totalRecords })}
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  disabled={currentPage <= 1}
+                  className="px-3 py-1 rounded text-xs font-semibold transition-colors"
+                  style={{
+                    background: currentPage <= 1 ? 'rgba(148, 163, 184, 0.1)' : 'rgba(240, 185, 11, 0.15)',
+                    color: currentPage <= 1 ? '#4B5563' : '#FCD34D',
+                    border: `1px solid ${currentPage <= 1 ? 'rgba(148, 163, 184, 0.1)' : 'rgba(240, 185, 11, 0.3)'}`,
+                    cursor: currentPage <= 1 ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  {t('previousPage', language)}
+                </button>
+                <span className="text-xs mono" style={{ color: '#CBD5E1' }}>
+                  {currentPage} / {totalPages}
+                </span>
+                <button
+                  onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                  disabled={currentPage >= totalPages}
+                  className="px-3 py-1 rounded text-xs font-semibold transition-colors"
+                  style={{
+                    background: currentPage >= totalPages ? 'rgba(148, 163, 184, 0.1)' : 'rgba(240, 185, 11, 0.15)',
+                    color: currentPage >= totalPages ? '#4B5563' : '#FCD34D',
+                    border: `1px solid ${currentPage >= totalPages ? 'rgba(148, 163, 184, 0.1)' : 'rgba(240, 185, 11, 0.3)'}`,
+                    cursor: currentPage >= totalPages ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  {t('nextPage', language)}
+                </button>
+              </div>
+            </div>
+          )}
+          </>
+        ) : (
+          <div className="p-8 text-center">
+            <div className="text-4xl mb-2 opacity-50">📜</div>
+            <div style={{ color: '#94A3B8' }}>{t('noCompletedTrades', language)}</div>
+          </div>
+        )}
       </div>
 
       {/* AI学习说明 - 现代化设计 */}
@@ -679,21 +854,6 @@ export default function AILearning({ traderId }: AILearningProps) {
   );
 }
 
-// 格式化持仓时长
-function formatDuration(duration: string | undefined): string {
-  if (!duration) return '-';
 
-  const match = duration.match(/(\d+h)?(\d+m)?(\d+\.?\d*s)?/);
-  if (!match) return duration;
 
-  const hours = match[1] || '';
-  const minutes = match[2] || '';
-  const seconds = match[3] || '';
-
-  let result = '';
-  if (hours) result += hours.replace('h', '小时');
-  if (minutes) result += minutes.replace('m', '分');
-  if (!hours && seconds) result += seconds.replace(/(\d+)\.?\d*s/, '$1秒');
-
-  return result || duration;
-}
+// formatDateTime 已提取到 ../utils/formatDateTime.ts

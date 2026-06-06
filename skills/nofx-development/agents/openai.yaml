@@ -1,0 +1,4 @@
+interface:
+  display_name: "NOFX Development"
+  short_description: "Develop and maintain the NOFX agentic trading OS."
+  default_prompt: "Use this skill when changing NOFX backend, frontend, trading, risk, exchange, API, or dashboard code."

@@ -1,0 +1,53 @@
+{
+  "proposal_id": "chanlun-profit-opt-001",
+  "defect_codes": [
+    "MICRO_STOP",
+    "LOW_ADX_ENTRY"
+  ],
+  "evidence_refs": [
+    {
+      "source": "backtest_report",
+      "path": "backtest_runs/bt_example",
+      "run_id": "bt_example",
+      "data_hash": "example_hash",
+      "trader_id": "backtest",
+      "exchange": "binance",
+      "reason_code": "MICRO_STOP"
+    }
+  ],
+  "changed_modules": [
+    "decision/strategy_risk.go",
+    "strategy/chanlun"
+  ],
+  "config_changes": [
+    {
+      "path": "strategy_risk.profiles.default.min_adx",
+      "old_value": 25,
+      "new_value": 28,
+      "default_value": 25,
+      "rollback_value": 25,
+      "reason": "降低低ADX噪声入场"
+    }
+  ],
+  "baseline_run_id": "bt_baseline_example",
+  "candidate_run_id": "bt_candidate_example",
+  "data_hash": "example_hash",
+  "gate_result": "manual_review",
+  "rollout": {
+    "dry_run_enabled": true,
+    "max_position_ratio": 0.3,
+    "rolling_window_trades": 30,
+    "net_pnl_degradation_threshold": 0,
+    "max_drawdown_threshold": 0,
+    "rejection_rate_threshold": 0.1,
+    "trader_rollout_order": [
+      "binance_qwen"
+    ]
+  },
+  "rollback_switches": [
+    "strategy_risk.profiles.default.min_adx=25"
+  ],
+  "manual_review_notes": [
+    "示例文件不包含真实账户、凭证或生产资金配置。"
+  ]
+}

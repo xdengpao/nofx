@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "name": "测试文件规范提醒",
+  "description": "当新建 Go 测试文件时，提醒遵循项目的属性基测试规范：使用 gopter 库、标注 Property 编号、至少 100 次迭代。",
+  "version": "1",
+  "when": {
+    "type": "fileCreated",
+    "patterns": [
+      "**/*_test.go"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "新建了测试文件，请确保遵循项目测试规范：1) 属性基测试使用 github.com/leanovate/gopter 库 2) 每个属性测试用注释标注：// Feature: quant-trading-system, Property N: [属性标题] 3) 每个属性测试至少运行 100 次迭代 4) 测试函数命名格式：TestProperty_[属性名] 5) 单元测试覆盖边界情况和具体示例。"
+  }
+}

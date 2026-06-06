@@ -1,0 +1,4 @@
+interface:
+  display_name: "NOFX Development"
+  short_description: "Develop the NOFX agentic trading OS."
+  default_prompt: "Use $nofx-dev to develop, fix, review, or document NOFX trading-system code."

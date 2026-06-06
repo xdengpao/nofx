@@ -1,0 +1,7 @@
+{
+  "base_config": ".kiro/specs/programmatic-strategy-backtest/examples/backtest.example.json",
+  "matrix": {
+    "programmatic_strategy.timeframes.trade": ["15m", "1h", "4h"]
+  },
+  "fail_fast": false
+}

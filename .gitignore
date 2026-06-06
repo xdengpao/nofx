@@ -8,10 +8,14 @@ nofx-auto
 *.exe
 nofx
 nofx_test
+target/
+chanlun_v2/target/
 
 # Go 相关
 *.test
 *.out
+.cache/
+.tools/
 
 # 操作系统
 .DS_Store
@@ -22,15 +26,45 @@ Thumbs.db
 *.tmp
 *.bak
 *.backup
+backups/
+config_backups/
+data_backups/
+decision_logs_backups/
+config.json.bak*
 
 # 环境变量
 .env
 config.json
+nginx/.htpasswd
 
 # 决策日志
 decision_logs/
 coin_pool_cache/
+data/
+data/trade_plans.json
+data/dynamic_candidate_pool.json
+runtime/
+logs/
 nofx_test
+!training/drl/data/
+!training/drl/data/**
+
+# Python 本地环境与缓存
+.venv/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# 本地回测数据与报告
+backtest_data/
+backtest_runs/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+models/drl/*.zip
+models/drl/*.onnx
+models/drl/**/*.zip
+models/drl/**/*.onnx
 
 # Node.js
 web/node_modules/

@@ -1,0 +1,14 @@
+{
+  "enabled": true,
+  "name": "任务完成后运行测试",
+  "description": "当 spec 任务完成后，自动运行 go test 确保所有测试通过，防止引入回归问题。",
+  "version": "1",
+  "when": {
+    "type": "postTaskExecution"
+  },
+  "then": {
+    "type": "runCommand",
+    "command": "go test ./... -count=1 -timeout 120s",
+    "timeout": 120
+  }
+}

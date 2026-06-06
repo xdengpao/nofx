@@ -1,0 +1,33 @@
+{
+  "backtest_from": "2026-01-10",
+  "backtest_to": "2026-02-01",
+  "timezone": "Asia/Singapore",
+  "history_db": "backtest_data/nofx_history.sqlite",
+  "output_dir": "backtest_runs",
+  "source": "binance-futures",
+  "symbols": ["BTCUSDT", "ETHUSDT"],
+  "initial_equity": 10000,
+  "scan_interval_minutes": 3,
+  "costs": {
+    "taker_fee_bps": 5,
+    "maker_fee_bps": 2,
+    "slippage_bps": 3
+  },
+  "execution": {
+    "market_order_fill": "next_3m_open",
+    "same_bar_conflict": "worst_case",
+    "funding_mode": "disabled",
+    "liquidation_mode": "not_modelled"
+  },
+  "strategy": {
+    "decision_mode": "programmatic",
+    "programmatic_strategy": {
+      "timeframes": {
+        "trade": "1h"
+      },
+      "state": {
+        "bootstrap": false
+      }
+    }
+  }
+}

@@ -1,0 +1,74 @@
+[
+  {
+    "symbol": "BTCUSDT",
+    "signal_type": "sell2",
+    "direction": "short",
+    "age_candles": 19,
+    "price": 78564.3,
+    "stop_loss": 78564.3,
+    "take_profit": 77675.4,
+    "current_price": 77039.4,
+    "expected_status": "invalidated",
+    "expected_reason": "target_already_crossed"
+  },
+  {
+    "symbol": "CLUSDT",
+    "signal_type": "sell1",
+    "direction": "short",
+    "age_candles": 5,
+    "price": 100,
+    "stop_loss": 110,
+    "take_profit": 70,
+    "current_price": 100,
+    "expected_status": "background",
+    "expected_reason": "structure_background_only"
+  },
+  {
+    "symbol": "ETHUSDT",
+    "signal_type": "buy2",
+    "direction": "long",
+    "age_candles": 14,
+    "price": 2180,
+    "stop_loss": 2175.04,
+    "take_profit": 2197.63,
+    "current_price": 2119.46,
+    "expected_status": "invalidated",
+    "expected_reason": "invalid_stop_take_profit_structure"
+  },
+  {
+    "symbol": "SOLUSDT",
+    "signal_type": "sell2",
+    "direction": "short",
+    "age_candles": 10,
+    "price": 86.5,
+    "stop_loss": 86.92,
+    "take_profit": 85.89,
+    "current_price": 84.7,
+    "expected_status": "invalidated",
+    "expected_reason": "target_already_crossed"
+  },
+  {
+    "symbol": "XAGUSDT",
+    "signal_type": "sell2",
+    "direction": "short",
+    "age_candles": 18,
+    "price": 75.8,
+    "stop_loss": 75.87,
+    "take_profit": 75.6,
+    "current_price": 76,
+    "expected_status": "invalidated",
+    "expected_reason": "invalid_stop_take_profit_structure"
+  },
+  {
+    "symbol": "XRPUSDT",
+    "signal_type": "buy2",
+    "direction": "long",
+    "age_candles": 13,
+    "price": 1.41,
+    "stop_loss": 1.4057,
+    "take_profit": 1.4284,
+    "current_price": 1.386,
+    "expected_status": "invalidated",
+    "expected_reason": "invalid_stop_take_profit_structure"
+  }
+]

@@ -4,18 +4,39 @@ import { api } from './lib/api';
 import { EquityChart } from './components/EquityChart';
 import { CompetitionPage } from './components/CompetitionPage';
 import AILearning from './components/AILearning';
+import { StrategyCandlestickChart } from './components/StrategyCandlestickChart';
+import { BacktestPage } from './components/backtest/BacktestPage';
+import { DRLPPOTrainingPage } from './components/drlPpoTraining/DRLPPOTrainingPage';
 import { LanguageProvider, useLanguage } from './contexts/LanguageContext';
+import { backtestApi } from './lib/backtestApi';
+import { drlPpoTrainApi } from './lib/drlPpoTrainApi';
 import { t, type Language } from './i18n/translations';
+import { buildSignalDisplayModel } from './utils/strategyDisplay';
+import {
+  markerDisplayLabel,
+  markerStatusLabel,
+  markerTone,
+  resolveEvaluationCloseTime,
+  resolveSignalCloseTime,
+  resolveTradeIntent,
+  tradeIntentLabel,
+} from './utils/strategyMarkers';
 import type {
   SystemStatus,
   AccountInfo,
   Position,
+  DecisionAction,
   DecisionRecord,
   Statistics,
   TraderInfo,
+  MarketKlineResponse,
+  StrategySignalReport,
+  StrategySignalView,
+  StrategySymbolsResponse,
+  SignalMarker,
 } from './types';
 
-type Page = 'competition' | 'trader';
+type Page = 'competition' | 'trader' | 'backtest' | 'drlPpoTraining';
 
 function App() {
   const { language, setLanguage } = useLanguage();
@@ -23,6 +44,8 @@ function App() {
   // 从URL hash读取初始页面状态（支持刷新保持页面）
   const getInitialPage = (): Page => {
     const hash = window.location.hash.slice(1); // 去掉 #
+    if (hash === 'drl-ppo-training') return 'drlPpoTraining';
+    if (hash === 'backtest') return 'backtest';
     return hash === 'trader' || hash === 'details' ? 'trader' : 'competition';
   };
 
@@ -36,6 +59,10 @@ function App() {
       const hash = window.location.hash.slice(1);
       if (hash === 'trader' || hash === 'details') {
         setCurrentPage('trader');
+      } else if (hash === 'drl-ppo-training') {
+        setCurrentPage('drlPpoTraining');
+      } else if (hash === 'backtest') {
+        setCurrentPage('backtest');
       } else if (hash === 'competition' || hash === '') {
         setCurrentPage('competition');
       }
@@ -48,8 +75,32 @@ function App() {
   // 切换页面时更新URL hash
   const navigateToPage = (page: Page) => {
     setCurrentPage(page);
-    window.location.hash = page === 'competition' ? '' : 'trader';
+    window.location.hash = page === 'competition' ? '' : page === 'drlPpoTraining' ? 'drl-ppo-training' : page;
   };
+
+  const { data: backtestHealth } = useSWR('backtest-health', backtestApi.health, {
+    shouldRetryOnError: false,
+    revalidateOnFocus: false,
+  });
+  const backtestEnabled = Boolean(backtestHealth?.enabled && backtestHealth.dry_run && !backtestHealth.live_trading);
+
+  const { data: drlPpoHealth, error: drlPpoHealthError } = useSWR('drl-ppo-health', drlPpoTrainApi.health, {
+    shouldRetryOnError: false,
+    revalidateOnFocus: false,
+  });
+  const drlPpoEnabled = Boolean(drlPpoHealth?.enabled && !drlPpoHealthError);
+
+  useEffect(() => {
+    if (currentPage === 'backtest' && backtestHealth && !backtestEnabled) {
+      navigateToPage('competition');
+    }
+  }, [currentPage, backtestEnabled, backtestHealth]);
+
+  useEffect(() => {
+    if (currentPage === 'drlPpoTraining' && (drlPpoHealthError || (drlPpoHealth && !drlPpoEnabled))) {
+      navigateToPage('competition');
+    }
+  }, [currentPage, drlPpoEnabled, drlPpoHealth, drlPpoHealthError]);
 
   // 获取trader列表
   const { data: traders } = useSWR<TraderInfo[]>('traders', api.getTraders, {
@@ -227,6 +278,30 @@ function App() {
                 >
                   {t('details', language)}
                 </button>
+                {backtestEnabled && (
+                  <button
+                    onClick={() => navigateToPage('backtest')}
+                    className="px-2 sm:px-4 py-1.5 sm:py-2 rounded text-xs sm:text-sm font-semibold transition-all"
+                    style={currentPage === 'backtest'
+                      ? { background: '#F0B90B', color: '#000' }
+                      : { background: 'transparent', color: '#848E9C' }
+                    }
+                  >
+                    Backtest
+                  </button>
+                )}
+                {drlPpoEnabled && (
+                  <button
+                    onClick={() => navigateToPage('drlPpoTraining')}
+                    className="px-2 sm:px-4 py-1.5 sm:py-2 rounded text-xs sm:text-sm font-semibold transition-all"
+                    style={currentPage === 'drlPpoTraining'
+                      ? { background: '#F0B90B', color: '#000' }
+                      : { background: 'transparent', color: '#848E9C' }
+                    }
+                  >
+                    DRL-PPO
+                  </button>
+                )}
               </div>
 
               {/* Trader Selector (only show on trader page) */}
@@ -270,8 +345,12 @@ function App() {
 
       {/* Main Content */}
       <main className="max-w-[1920px] mx-auto px-6 py-6">
-        {currentPage === 'competition' ? (
+        {currentPage === 'competition' || (currentPage === 'backtest' && !backtestEnabled) || (currentPage === 'drlPpoTraining' && !drlPpoEnabled) ? (
           <CompetitionPage />
+        ) : currentPage === 'backtest' && backtestEnabled ? (
+          <BacktestPage />
+        ) : currentPage === 'drlPpoTraining' && drlPpoEnabled ? (
+          <DRLPPOTrainingPage health={drlPpoHealth} />
         ) : (
           <TraderDetailsPage
             selectedTrader={selectedTrader}
@@ -321,6 +400,50 @@ function App() {
   );
 }
 
+type DecisionJsonAction = {
+  action?: string;
+  symbol?: string;
+  new_take_profit?: number;
+  new_stop_loss?: number;
+};
+
+function parseDecisionJsonActions(decisionJson: string): DecisionJsonAction[] {
+  if (!decisionJson) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(decisionJson);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseTargetPriceFromReasoning(reasoning?: string): number | undefined {
+  const match = reasoning?.match(/[→>]\s*([0-9]+(?:\.[0-9]+)?)/);
+  return match ? Number(match[1]) : undefined;
+}
+
+function getActionTargetPrice(action: DecisionAction, requestedActions: DecisionJsonAction[]) {
+  if (action.action !== 'update_take_profit' && action.action !== 'update_stop_loss') {
+    return undefined;
+  }
+
+  const requested = requestedActions.find((item) => item.symbol === action.symbol && item.action === action.action);
+  const value = action.action === 'update_take_profit'
+    ? requested?.new_take_profit ?? parseTargetPriceFromReasoning(action.reasoning)
+    : requested?.new_stop_loss ?? parseTargetPriceFromReasoning(action.reasoning);
+
+  return value && Number.isFinite(value)
+    ? { label: action.action === 'update_take_profit' ? 'TP' : 'SL', value }
+    : undefined;
+}
+
+function formatOptionalPrice(value?: number) {
+  return value && value > 0 ? value.toFixed(4) : '--';
+}
+
 // Trader Details Page Component
 function TraderDetailsPage({
   selectedTrader,
@@ -340,6 +463,36 @@ function TraderDetailsPage({
   lastUpdate: string;
   language: Language;
 }) {
+  const [strategySymbol, setStrategySymbol] = useState('');
+  const [strategySignalView, setStrategySignalView] = useState<StrategySignalView>('default');
+  const traderId = selectedTrader?.trader_id;
+  const isStrategyTrader = isStrategyDecisionMode(status?.decision_mode);
+  const { data: strategySymbols } = useSWR<StrategySymbolsResponse>(
+    traderId && isStrategyTrader ? `strategy-symbols-${traderId}` : null,
+    () => api.getStrategySymbols(traderId),
+    { refreshInterval: 30000, revalidateOnFocus: false }
+  );
+  const symbolOptions = strategySymbols?.symbols ?? [];
+
+  useEffect(() => {
+    if (!strategySymbol && symbolOptions.length > 0) {
+      setStrategySymbol(symbolOptions[0].symbol);
+    }
+  }, [strategySymbol, symbolOptions]);
+
+  const { data: strategySignals } = useSWR<StrategySignalReport>(
+    traderId && isStrategyTrader && strategySymbol ? `strategy-signals-${traderId}-${strategySymbol}-${strategySignalView}` : null,
+    () => api.getStrategySignals(traderId, strategySymbol, { view: strategySignalView }),
+    { refreshInterval: 30000, revalidateOnFocus: false }
+  );
+  const strategyTradeTimeframe = normalizeStrategyTimeframe(strategySignals?.trade_timeframe);
+
+  const { data: strategyKlines, error: strategyKlinesError } = useSWR<MarketKlineResponse>(
+    traderId && isStrategyTrader && strategySymbol ? `market-klines-${traderId}-${strategySymbol}-${strategyTradeTimeframe}` : null,
+    () => api.getMarketKlines(traderId, strategySymbol, strategyTradeTimeframe),
+    { refreshInterval: 30000, revalidateOnFocus: false }
+  );
+
   if (!selectedTrader) {
     return (
       <div className="space-y-6">
@@ -395,7 +548,7 @@ function TraderDetailsPage({
       {account && (
         <div className="mb-4 p-3 rounded text-xs font-mono" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
           <div style={{ color: '#848E9C' }}>
-            🔄 Last Update: {lastUpdate} | Total Equity: {account.total_equity?.toFixed(2) || '0.00'} |
+            🔄 Last Update: {lastUpdate} | Exchange Equity: {account.total_equity?.toFixed(2) || '0.00'} |
             Available: {account.available_balance?.toFixed(2) || '0.00'} | P&L: {account.total_pnl?.toFixed(2) || '0.00'}{' '}
             ({account.total_pnl_pct?.toFixed(2) || '0.00'}%)
           </div>
@@ -403,12 +556,12 @@ function TraderDetailsPage({
       )}
 
       {/* Account Overview */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+      <div className="grid grid-cols-1 md:grid-cols-5 gap-4 mb-8">
         <StatCard
-          title={t('totalEquity', language)}
+          title={t('exchangeEquity', language)}
           value={`${account?.total_equity?.toFixed(2) || '0.00'} USDT`}
-          change={account?.total_pnl_pct || 0}
-          positive={(account?.total_pnl ?? 0) > 0}
+          change={account && Math.abs(account.total_pnl_pct || 0) > 0.0001 ? account.total_pnl_pct : undefined}
+          positive={(account?.total_pnl ?? 0) >= 0}
         />
         <StatCard
           title={t('availableBalance', language)}
@@ -418,8 +571,16 @@ function TraderDetailsPage({
         <StatCard
           title={t('totalPnL', language)}
           value={`${account?.total_pnl !== undefined && account.total_pnl >= 0 ? '+' : ''}${account?.total_pnl?.toFixed(2) || '0.00'} USDT`}
-          change={account?.total_pnl_pct || 0}
+          change={account && Math.abs(account.total_pnl_pct || 0) > 0.0001 ? account.total_pnl_pct : undefined}
           positive={(account?.total_pnl ?? 0) >= 0}
+          subtitle={`${t('strategyBaseline', language)} ${account?.strategy_baseline?.toFixed(2) || account?.cost_basis?.toFixed(2) || account?.total_equity?.toFixed(2) || '0.00'} USDT`}
+        />
+        <StatCard
+          title={t('configuredInitialBalance', language)}
+          value={`${account?.initial_balance?.toFixed(2) || '0.00'} USDT`}
+          subtitle={account?.allocation_enabled
+            ? `${t('strategyAllocatedCapital', language)} ${account?.allocated_balance?.toFixed(2) || '0.00'} / ${account?.allocated_available_balance?.toFixed(2) || '0.00'} USDT`
+            : `${account?.initial_balance_role || 'configured_baseline_fallback'}`}
         />
         <StatCard
           title={t('positions', language)}
@@ -458,6 +619,8 @@ function TraderDetailsPage({
                   <th className="pb-3 font-semibold text-gray-400">{t('side', language)}</th>
                   <th className="pb-3 font-semibold text-gray-400">{t('entryPrice', language)}</th>
                   <th className="pb-3 font-semibold text-gray-400">{t('markPrice', language)}</th>
+                  <th className="pb-3 font-semibold text-gray-400">{t('stopLoss', language)}</th>
+                  <th className="pb-3 font-semibold text-gray-400">{t('takeProfit', language)}</th>
                   <th className="pb-3 font-semibold text-gray-400">{t('quantity', language)}</th>
                   <th className="pb-3 font-semibold text-gray-400">{t('positionValue', language)}</th>
                   <th className="pb-3 font-semibold text-gray-400">{t('leverage', language)}</th>
@@ -482,6 +645,12 @@ function TraderDetailsPage({
                     </td>
                     <td className="py-3 font-mono" style={{ color: '#EAECEF' }}>{pos.entry_price.toFixed(4)}</td>
                     <td className="py-3 font-mono" style={{ color: '#EAECEF' }}>{pos.mark_price.toFixed(4)}</td>
+                    <td className="py-3 font-mono" style={{ color: pos.stop_loss_price && pos.stop_loss_price > 0 ? '#F6465D' : '#848E9C' }}>
+                      {formatOptionalPrice(pos.stop_loss_price)}
+                    </td>
+                    <td className="py-3 font-mono" style={{ color: pos.take_profit_price && pos.take_profit_price > 0 ? '#0ECB81' : '#848E9C' }}>
+                      {formatOptionalPrice(pos.take_profit_price)}
+                    </td>
                     <td className="py-3 font-mono" style={{ color: '#EAECEF' }}>{pos.quantity.toFixed(4)}</td>
                     <td className="py-3 font-mono font-bold" style={{ color: '#EAECEF' }}>
                       {(pos.quantity * pos.mark_price).toFixed(2)} USDT
@@ -552,11 +721,346 @@ function TraderDetailsPage({
         {/* 右侧结束 */}
       </div>
 
+      <StrategyInspector
+        status={status}
+        symbols={symbolOptions}
+        selectedSymbol={strategySymbol}
+        onSymbolChange={setStrategySymbol}
+        signals={strategySignals}
+        signalView={strategySignalView}
+        onSignalViewChange={setStrategySignalView}
+        klines={strategyKlines}
+        klinesError={strategyKlinesError}
+      />
+
       {/* AI Learning & Performance Analysis */}
       <div className="mb-6 animate-slide-in" style={{ animationDelay: '0.3s' }}>
         <AILearning traderId={selectedTrader.trader_id} />
       </div>
     </div>
+  );
+}
+
+function StrategyInspector({
+  status,
+  symbols,
+  selectedSymbol,
+  onSymbolChange,
+  signals,
+  signalView,
+  onSignalViewChange,
+  klines,
+  klinesError,
+}: {
+  status?: SystemStatus;
+  symbols: StrategySymbolsResponse['symbols'];
+  selectedSymbol: string;
+  onSymbolChange: (symbol: string) => void;
+  signals?: StrategySignalReport;
+  signalView: StrategySignalView;
+  onSignalViewChange: (view: StrategySignalView) => void;
+  klines?: MarketKlineResponse;
+  klinesError?: Error;
+}) {
+  const tradeTimeframe = normalizeStrategyTimeframe(signals?.trade_timeframe);
+  const [layerFilters, setLayerFilters] = useState<string[]>([]);
+  const [statusFilters, setStatusFilters] = useState<string[]>([]);
+  const displayModel = buildSignalDisplayModel(signals, {
+    audit: signalView === 'audit',
+    layers: layerFilters,
+    statuses: statusFilters,
+  });
+  const latestItem = displayModel.latest;
+  const latestStaleHint = latestItem ? staleSignalHint(latestItem.marker) : '';
+  const chartMarkers = displayModel.chartMarkers;
+  const positionItems = displayModel.items.filter((item) => item.category === 'position_management').slice(0, 5);
+  const isStrategyMode = isStrategyDecisionMode(status?.decision_mode);
+  const hasTimeframeFallback = isStrategyMode && !signals?.trade_timeframe;
+  const diagnostic = diagnosticText(signals?.latest_diagnostics);
+  const summary = signals?.marker_summary;
+
+  return (
+    <div className="binance-card p-6 mb-6 animate-slide-in" style={{ animationDelay: '0.25s' }}>
+      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between mb-5">
+        <div>
+          <h2 className="text-xl font-bold" style={{ color: '#EAECEF' }}>策略检查</h2>
+          <div className="text-xs mt-1" style={{ color: '#848E9C' }}>
+            {status?.decision_mode || 'ai'} {signals?.strategy_name ? `· ${signals.strategy_name} ${signals.strategy_version || ''}` : ''}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={selectedSymbol}
+            onChange={(event) => onSymbolChange(event.target.value)}
+            className="rounded px-3 py-2 text-sm font-medium cursor-pointer"
+            style={{ background: '#1E2329', border: '1px solid #2B3139', color: '#EAECEF' }}
+          >
+            {symbols.length === 0 && <option value="">暂无标的</option>}
+            {symbols.map((item) => (
+              <option key={item.symbol} value={item.symbol}>
+                {item.symbol}{item.has_position ? ' · 持仓' : ''}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={() => onSignalViewChange(signalView === 'audit' ? 'default' : 'audit')}
+            className="rounded px-3 py-2 text-xs font-bold"
+            style={signalView === 'audit'
+              ? { background: '#F0B90B', color: '#0B0E11', border: '1px solid #F0B90B' }
+              : { background: '#1E2329', color: '#EAECEF', border: '1px solid #2B3139' }}
+          >
+            {signalView === 'audit' ? '审计' : '默认'}
+          </button>
+        </div>
+      </div>
+
+      {!isStrategyMode ? (
+        <div className="rounded p-4 text-sm" style={{ background: '#0B0E11', color: '#848E9C', border: '1px solid #2B3139' }}>
+          当前 trader 使用 AI 决策模式。
+        </div>
+      ) : (
+        <>
+          <SignalFilterBar
+            selected={layerFilters}
+            onChange={setLayerFilters}
+            statusSelected={statusFilters}
+            onStatusChange={setStatusFilters}
+            summary={summary}
+            hiddenCount={displayModel.hiddenCount}
+            collapsedCount={displayModel.collapsedCount}
+          />
+          <div className="grid grid-cols-1 2xl:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)] gap-5">
+          <div className="min-w-0 rounded p-4" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
+            <StrategyCandlestickChart
+              symbol={selectedSymbol}
+              timeframe={tradeTimeframe}
+              klines={klines?.klines ?? []}
+              markers={chartMarkers}
+              limit={klines?.limit}
+              configuredLimit={klines?.configured_limit}
+              limitSource={klines?.limit_source}
+              error={klinesError ? '获取K线数据失败' : undefined}
+            />
+          </div>
+
+          <div className="space-y-4">
+            <section className="rounded p-4" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
+              <div className="text-xs mb-3" style={{ color: '#848E9C' }}>最新信号</div>
+              {latestItem ? (
+                <div className="space-y-2 text-sm">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono font-bold" style={{ color: '#EAECEF' }}>{latestItem.marker.symbol}</span>
+                    <span className="px-2 py-0.5 rounded text-xs font-bold" style={{ background: 'rgba(240, 185, 11, 0.1)', color: '#F0B90B' }}>
+                      {latestItem.shortLabel}
+                    </span>
+                    <span style={{ color: latestItem.marker.direction === 'long' ? '#0ECB81' : latestItem.marker.direction === 'short' ? '#F6465D' : '#848E9C' }}>{latestItem.title}</span>
+                  </div>
+                  <div className="text-sm" style={{ color: '#EAECEF' }}>{latestItem.summary}</div>
+                  {latestStaleHint && (
+                    <div className="rounded px-2 py-1 text-xs" style={{ background: 'rgba(240, 185, 11, 0.08)', color: '#F0B90B', border: '1px solid rgba(240, 185, 11, 0.2)' }}>
+                      {latestStaleHint}
+                    </div>
+                  )}
+                  <div className="grid grid-cols-2 gap-2 font-mono text-xs">
+                    {latestItem.tooltipRows.slice(2, 8).map((row) => (
+                      <div key={`${row.label}-${row.value}`} style={{ color: '#848E9C' }}>
+                        <span>{row.label} </span><span style={{ color: '#EAECEF' }}>{row.value}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="text-xs" style={{ color: '#848E9C' }}>
+                    {latestItem.marker.timeframe || '--'} · {latestItem.marker.lifecycle_key || latestItem.marker.signal_id}
+                  </div>
+                </div>
+              ) : (
+                <div className="text-sm" style={{ color: '#848E9C' }}>
+                  {diagnostic || '暂无信号'}
+                </div>
+              )}
+            </section>
+
+            <section className="rounded p-4" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
+              <div className="text-xs mb-3" style={{ color: '#848E9C' }}>信号诊断</div>
+              <div className="text-sm break-words" style={{ color: '#EAECEF' }}>
+                {hasTimeframeFallback ? '未获取主交易级别，使用1h回退；' : ''}{diagnostic || latestItem?.marker.signal_id || '--'}
+              </div>
+              {summary && (
+                <div className="text-xs font-mono mt-3" style={{ color: '#848E9C' }}>
+                  markers {summary.total_returned}/{summary.total_raw} · hidden {summary.hidden_by_default} · collapsed {summary.collapsed_lifecycle}
+                  {summary.median_latency_hours ? ` · median lag ${summary.median_latency_hours.toFixed(1)}h` : ''}
+                </div>
+              )}
+              {signals?.config_hash && (
+                <div className="text-xs font-mono mt-3" style={{ color: '#848E9C' }}>config {signals.config_hash}</div>
+              )}
+              <div className="text-xs font-mono mt-2" style={{ color: '#848E9C' }}>
+                trade {tradeTimeframe} · component {signals?.component_timeframe || '--'} · micro {signals?.micro_timeframe || '--'}
+              </div>
+            </section>
+
+            <section className="rounded p-4" style={{ background: '#0B0E11', border: '1px solid #2B3139' }}>
+              <div className="text-xs mb-3" style={{ color: '#848E9C' }}>持仓管理信号</div>
+              {positionItems.length > 0 ? (
+                <div className="space-y-2">
+                  {positionItems.map((item) => (
+                    <div key={`${item.marker.signal_id}-${item.marker.status}`} className="text-xs" style={{ color: '#848E9C' }}>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <SignalBadge marker={item.marker} />
+                        <span>{item.summary}</span>
+                      </div>
+                      <div className="mt-1 break-words">{item.marker.reason || markerStatusLabel(item.marker.status)}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-sm" style={{ color: '#848E9C' }}>暂无持仓管理动作</div>
+              )}
+            </section>
+          </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+const signalLayerOptions = [
+  { id: 'structure_background', label: '结构' },
+  { id: 'preview_watch', label: '预览' },
+  { id: 'entry_trigger', label: '触发' },
+  { id: 'trade_action', label: '动作' },
+  { id: 'invalid_rejected', label: '拒绝' },
+  { id: 'position_management', label: 'PM' },
+];
+
+const signalStatusOptions = [
+  { id: 'ready', label: 'ready' },
+  { id: 'executed', label: '执行' },
+  { id: 'rejected', label: '拒绝' },
+  { id: 'invalidated', label: '失效' },
+  { id: 'background', label: '背景' },
+  { id: 'confirmed', label: '确认' },
+];
+
+function SignalFilterBar({
+  selected,
+  onChange,
+  statusSelected,
+  onStatusChange,
+  summary,
+  hiddenCount,
+  collapsedCount,
+}: {
+  selected: string[];
+  onChange: (layers: string[]) => void;
+  statusSelected: string[];
+  onStatusChange: (statuses: string[]) => void;
+  summary?: StrategySignalReport['marker_summary'];
+  hiddenCount: number;
+  collapsedCount: number;
+}) {
+  const toggle = (id: string) => {
+    onChange(selected.includes(id) ? selected.filter((item) => item !== id) : [...selected, id]);
+  };
+  const toggleStatus = (id: string) => {
+    onStatusChange(statusSelected.includes(id) ? statusSelected.filter((item) => item !== id) : [...statusSelected, id]);
+  };
+  return (
+    <div className="mb-4 flex flex-col gap-2 lg:flex-row lg:items-center lg:justify-between">
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap gap-2">
+          {signalLayerOptions.map((option) => {
+            const active = selected.length === 0 || selected.includes(option.id);
+            return (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => toggle(option.id)}
+                className="rounded px-2.5 py-1 text-xs font-bold"
+                style={active
+                  ? { background: 'rgba(240, 185, 11, 0.16)', color: '#F0B90B', border: '1px solid rgba(240, 185, 11, 0.4)' }
+                  : { background: '#1E2329', color: '#848E9C', border: '1px solid #2B3139' }}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {signalStatusOptions.map((option) => {
+            const active = statusSelected.length === 0 || statusSelected.includes(option.id);
+            return (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => toggleStatus(option.id)}
+                className="rounded px-2 py-0.5 text-[11px] font-bold"
+                style={active
+                  ? { background: 'rgba(132, 142, 156, 0.16)', color: '#EAECEF', border: '1px solid rgba(132, 142, 156, 0.35)' }
+                  : { background: '#1E2329', color: '#848E9C', border: '1px solid #2B3139' }}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      <div className="text-xs font-mono" style={{ color: '#848E9C' }}>
+        {summary ? `${summary.total_returned}/${summary.total_raw}` : '--'} · hidden {hiddenCount} · collapsed {collapsedCount}
+      </div>
+    </div>
+  );
+}
+
+function diagnosticText(value?: Record<string, unknown>) {
+  const messages = value?.messages;
+  if (Array.isArray(messages)) {
+    return messages.map(String).join('；');
+  }
+  return '';
+}
+
+function isStrategyDecisionMode(mode?: string) {
+  return mode === 'programmatic' || mode === 'chanlun_v2';
+}
+
+function normalizeStrategyTimeframe(value?: string) {
+  return value === '15m' || value === '1h' || value === '4h' ? value : '1h';
+}
+
+function staleSignalHint(marker: SignalMarker) {
+  const age = typeof marker.age_candles === 'number' ? marker.age_candles : 0;
+  const state = (marker.freshness_state || '').toLowerCase();
+  const signalClose = resolveSignalCloseTime(marker);
+  const evaluationClose = resolveEvaluationCloseTime(marker);
+  const lagHours = signalClose > 0 && evaluationClose > signalClose
+    ? ((evaluationClose - signalClose) / 3_600_000).toFixed(1)
+    : '';
+  if (['aged', 'expired', 'target_crossed', 'rr_invalid'].includes(state) || age > 1) {
+    const label = state === 'expired' ? '旧信号已过期' : state === 'aged' ? '旧信号老化' : state === 'target_crossed' ? '目标已穿越' : state === 'rr_invalid' ? '剩余RR不足' : '旧信号';
+    return `${label}${age > 0 ? ` · ${age}根` : ''}${lagHours ? ` · ${lagHours}h` : ''}`;
+  }
+  return '';
+}
+
+function SignalBadge({ marker }: { marker: SignalMarker }) {
+  const tone = markerTone(marker);
+  const base = tone === 'buy'
+    ? { background: 'rgba(14, 203, 129, 0.12)', color: '#0ECB81', border: '1px solid rgba(14, 203, 129, 0.3)' }
+    : tone === 'sell'
+      ? { background: 'rgba(246, 70, 93, 0.12)', color: '#F6465D', border: '1px solid rgba(246, 70, 93, 0.3)' }
+      : { background: 'rgba(132, 142, 156, 0.12)', color: '#848E9C', border: '1px solid rgba(132, 142, 156, 0.3)' };
+  const style = marker.status === 'executed' ? { ...base, boxShadow: '0 0 0 1px rgba(240, 185, 11, 0.35)' } : base;
+  const intentLabel = tradeIntentLabel(resolveTradeIntent(marker));
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-bold whitespace-nowrap"
+      style={style}
+      title={`${marker.source_layer} · ${markerStatusLabel(marker.status)}${intentLabel ? ` · ${intentLabel}` : ''} · ${marker.reason || marker.signal_id}`}
+    >
+      {marker.source_layer === 'position_management' ? 'PM' : 'M'} {markerDisplayLabel(marker)}
+    </span>
   );
 }
 
@@ -598,6 +1102,7 @@ function StatCard({
 function DecisionCard({ decision, language }: { decision: DecisionRecord; language: Language }) {
   const [showInputPrompt, setShowInputPrompt] = useState(false);
   const [showCoT, setShowCoT] = useState(false);
+  const requestedActions = parseDecisionJsonActions(decision.decision_json);
 
   return (
     <div className="rounded p-5 transition-all duration-300 hover:translate-y-[-2px]" style={{ border: '1px solid #2B3139', background: '#1E2329', boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)' }}>
@@ -647,7 +1152,7 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
             className="flex items-center gap-2 text-sm transition-colors"
             style={{ color: '#F0B90B' }}
           >
-            <span className="font-semibold">📤 {t('aiThinking', language)}</span>
+            <span className="font-semibold">📤 {t(isStrategyDecisionMode(decision.decision_mode) ? 'strategyAnalysis' : 'aiThinking', language)}</span>
             <span className="text-xs">{showCoT ? t('collapse', language) : t('expand', language)}</span>
           </button>
           {showCoT && (
@@ -661,28 +1166,41 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
       {/* Decisions Actions */}
       {decision.decisions && decision.decisions.length > 0 && (
         <div className="space-y-2 mb-3">
-          {decision.decisions.map((action, j) => (
-            <div key={j} className="flex items-center gap-2 text-sm rounded px-3 py-2" style={{ background: '#0B0E11' }}>
-              <span className="font-mono font-bold" style={{ color: '#EAECEF' }}>{action.symbol}</span>
-              <span
-                className="px-2 py-0.5 rounded text-xs font-bold"
-                style={action.action.includes('open')
-                  ? { background: 'rgba(96, 165, 250, 0.1)', color: '#60a5fa' }
-                  : { background: 'rgba(240, 185, 11, 0.1)', color: '#F0B90B' }
-                }
-              >
-                {action.action}
-              </span>
-              {action.leverage > 0 && <span style={{ color: '#F0B90B' }}>{action.leverage}x</span>}
-              {action.price > 0 && (
-                <span className="font-mono text-xs" style={{ color: '#848E9C' }}>@{action.price.toFixed(4)}</span>
-              )}
-              <span style={{ color: action.success ? '#0ECB81' : '#F6465D' }}>
-                {action.success ? '✓' : '✗'}
-              </span>
-              {action.error && <span className="text-xs ml-2" style={{ color: '#F6465D' }}>{action.error}</span>}
-            </div>
-          ))}
+          {decision.decisions.map((action, j) => {
+            const targetPrice = getActionTargetPrice(action, requestedActions);
+
+            return (
+              <div key={j} className="flex flex-wrap items-center gap-2 text-sm rounded px-3 py-2" style={{ background: '#0B0E11' }}>
+                <span className="font-mono font-bold" style={{ color: '#EAECEF' }}>{action.symbol}</span>
+                <span
+                  className="px-2 py-0.5 rounded text-xs font-bold"
+                  style={action.action.includes('open')
+                    ? { background: 'rgba(96, 165, 250, 0.1)', color: '#60a5fa' }
+                    : { background: 'rgba(240, 185, 11, 0.1)', color: '#F0B90B' }
+                  }
+                >
+                  {action.action}
+                </span>
+                {action.leverage > 0 && <span style={{ color: '#F0B90B' }}>{action.leverage}x</span>}
+                {targetPrice ? (
+                  <>
+                    <span className="font-mono text-xs" style={{ color: '#F0B90B' }}>{targetPrice.label} {targetPrice.value.toFixed(4)}</span>
+                    {action.price > 0 && (
+                      <span className="font-mono text-xs" style={{ color: '#848E9C' }}>MKT {action.price.toFixed(4)}</span>
+                    )}
+                  </>
+                ) : (
+                  action.price > 0 && (
+                    <span className="font-mono text-xs" style={{ color: '#848E9C' }}>@{action.price.toFixed(4)}</span>
+                  )
+                )}
+                <span style={{ color: action.success ? '#0ECB81' : '#F6465D' }}>
+                  {action.success ? '✓' : '✗'}
+                </span>
+                {action.error && <span className="text-xs ml-2" style={{ color: '#F6465D' }}>{action.error}</span>}
+              </div>
+            );
+          })}
         </div>
       )}
 

@@ -10,7 +10,13 @@
       "hyperliquid_wallet_addr": "your_ethereum_address",
       "hyperliquid_testnet": false,
       "deepseek_key": "your_deepseek_api_key",
+      // initial_balance 是收益统计/兜底基准，不代表交易所钱包上限。
       "initial_balance": 1000,
+      // 如需让该 trader 只按指定策略资金做 sizing 和风险预算，启用 capital_allocation。
+      "capital_allocation": {
+        "enabled": false,
+        "allocated_balance": 1000
+      },
       "scan_interval_minutes": 3
     },
     {
@@ -38,6 +44,247 @@
       "custom_model_name": "gpt-4o",
       "initial_balance": 1000,
       "scan_interval_minutes": 3
+    },
+    {
+      "id": "binance_drl_ppo",
+      "name": "Binance DRL PPO Trader",
+      "enabled": false,
+      "decision_mode": "drl",
+      "exchange": "binance",
+      "binance_api_key": "your_binance_api_key",
+      "binance_secret_key": "your_binance_secret_key",
+      "initial_balance": 1000,
+      "scan_interval_minutes": 3,
+      "drl_strategy": {
+        "model_path": "models/drl/ppo_v1.onnx",
+        "model_version": "ppo_v1",
+        "observation_window": 60,
+        "timeframe": "4h",
+        "symbols": ["BTCUSDT", "ETHUSDT"],
+        "action_threshold": 0.1,
+        "max_position_pct": 0.3,
+        "default_leverage": 5,
+        "stop_loss_atr_mult": 2.0,
+        "take_profit_atr_mult": 3.0,
+        "max_drawdown_pct": 20,
+        "features": {
+          "include_macd": true,
+          "include_ema": true,
+          "include_rsi": true,
+          "include_atr": true,
+          "include_cci": true,
+          "include_bollinger": true,
+          "ema_short_period": 12,
+          "ema_long_period": 26,
+          "rsi_period": 14,
+          "atr_period": 14,
+          "cci_period": 20,
+          "bollinger_period": 20,
+          "bollinger_std_dev": 2.0
+        },
+        "auto_retrain": false,
+        "retrain_interval_hours": 168,
+        "validation_min_da": 0.55,
+        "monte_carlo_enabled": false,
+        "monte_carlo_paths": 2000,
+        "stress_test_enabled": false,
+        "stress_test_delta": 0.3,
+        "stablecoin_hedge": false,
+        "stablecoin_ratio": 0.3
+      }
+    },
+    {
+      "id": "binance_chanlun_programmatic",
+      "name": "Binance Chanlun Programmatic Trader",
+      "enabled": false,
+      "decision_mode": "programmatic",
+      "exchange": "binance",
+      "binance_api_key": "your_binance_api_key",
+      "binance_secret_key": "your_binance_secret_key",
+      "initial_balance": 1000,
+      "scan_interval_minutes": 3,
+      "programmatic_strategy": {
+        "strategy_name": "chanlun_programmatic",
+        "strategy_version": "v1",
+        "defect_fix_pack_enabled": true,
+        "suppression_permanent_threshold": 5,
+        "max_pilot_notional_pct": 0.6,
+        "min_pilot_notional_usd": 30,
+        "allow_long": true,
+        "allow_short": true,
+        "enabled_signals": ["buy1", "buy2", "buy3", "sell1", "sell2", "sell3"],
+        "timeframes": {
+          "higher": "4h",
+          "trade": "1h",
+          "sub": "15m",
+          "micro": "3m"
+        },
+        "history_depth": {
+          "3m": 240,
+          "15m": 192,
+          "1h": 240,
+          "4h": 180
+        },
+        "symbol_pool": {
+          // append: 追加到动态池；override: 只看自定义池；filter: 从动态池中过滤。
+          "mode": "append",
+          "symbols": ["BTCUSDT", "ETHUSDT"]
+        },
+        "moving_average": {
+          "short_period": 20,
+          "long_period": 50
+        },
+        "structure": {
+          "strictness": "enhanced",
+          "left_bars": 2,
+          "right_bars": 2,
+          "min_stroke_bars": 5,
+          "min_swing_pct": 0.3,
+          "atr_multiplier": 0.5
+        },
+        "divergence": {
+          "ratio": 0.8,
+          "price_tolerance_pct": 0.1,
+          "price_tolerance_atr_multiplier": 0.2
+        },
+        "adx": {
+          "period": 14,
+          "min_adx": 20,
+          "micro_adx_filter": false
+        },
+        "position": {
+          "max_add_count": 2,
+          "add_size_multiplier": 0.5,
+          "partial_close_pct": 30,
+          "allow_reversal": false
+        },
+        "position_management": {
+          // 无新 trade 级别闭合K线时仍每个scan_interval管理已有持仓。
+          "enabled": true,
+          "partial_close_cooldown_minutes": 15,
+          "max_partial_close_count_per_position": 2,
+          "max_total_partial_close_pct": 50,
+          "timeframes": {
+            "structure": "15m",
+            "micro": "3m"
+          },
+          "breakeven": {
+            "enabled": true,
+            "trigger_profit_pct": 1.0,
+            "trigger_r": 1.0,
+            "buffer_pct": 0.05
+          },
+          "floating_drawdown": {
+            "enabled": true,
+            "activation_profit_pct": 2.0,
+            "activation_r": 1.5,
+            "drawdown_pct": 35,
+            "action": "partial_close"
+          },
+          "structure_break": {
+            "enabled": true,
+            "confirm_bars": 2,
+            "action": "partial_close",
+            "partial_close_guard_action": "bypass_cooldown_clip_budget"
+          },
+          "short_trade": {
+            "enabled": true,
+            "partial_close_pct": 30
+          }
+        },
+        "take_profit": {
+          "mode": "structure",
+          "fallback_mode": "reject",
+          "min_net_rr": 2.5
+        },
+        "signal_freshness": {
+          "enabled": true,
+          "missed_target_guard": true,
+          "min_remaining_net_rr": 2.5
+        },
+        "preview_signals": {
+          "enabled": true,
+          "component_timeframe": "15m",
+          "trade_timeframe": "1h",
+          "watch_after_closed_components": 2,
+          "pilot_after_closed_components": 3,
+          "allow_pilot_open": true,
+          "pilot_risk_fraction": 0.3,
+          "pilot_min_confidence": 70,
+          "pilot_min_confidence_by_signal_type": {
+            "buy1": 70,
+            "sell1": 70,
+            "buy2": 70,
+            "sell2": 70,
+            "buy3": 75,
+            "sell3": 75
+          },
+          "pilot_min_confidence_use_p75": true,
+          "pilot_min_confidence_p75_floor": 65,
+          "pilot_min_confidence_p75_ceiling": 85,
+          "require_confirmed_upgrade": true
+        },
+        "entry_timing": {
+          "enabled": true,
+          "direct_structure_open": true,
+          "direct_structure_min_confidence": 70,
+          "max_no_trigger_sub_candles": 3,
+          "require_fresh_trigger": true,
+          "trigger_timeframe": "15m",
+          "allowed_trigger_types": ["preview_2x15m_watchlist", "preview_3x15m_pilot", "pullback_retest_resume"],
+          "entry_zone": {
+            "max_chase_ratio": 0.35,
+            "max_chase_atr_multiplier": 0.6,
+            "fresh_age_chase_relax": 0.1,
+            "min_remaining_net_rr": 2.0,
+            "signal_type_min_rr": {
+              "buy1@1h": 2.0,
+              "sell1@1h": 2.0,
+              "buy2@1h": 1.6,
+              "sell2@1h": 1.6,
+              "buy3@1h": 1.4,
+              "sell3@1h": 1.4
+            },
+            "tier_overrides": {
+              "core": {
+                "max_chase_ratio": 0.5,
+                "min_remaining_net_rr": 1.6
+              }
+            },
+            "theoretical_rr_unreachable_skip": true,
+            "symbol_overrides": {
+              "BTCUSDT": {
+                "max_chase_ratio": 0.4,
+                "min_remaining_net_rr": 2.2
+              },
+              "ETHUSDT": {
+                "max_chase_ratio": 0.4,
+                "min_remaining_net_rr": 2.2
+              },
+              "BNBUSDT": {
+                "max_chase_ratio": 0.4,
+                "min_remaining_net_rr": 2.2
+              }
+            }
+          },
+          "pilot": {
+            "enabled": true,
+            "risk_fraction": 0.3,
+            "min_confidence": 70
+          },
+          "continuation_after_target_crossed": "disabled"
+        },
+        "candidate_governor": {
+          "enabled": true,
+          "allow_non_crypto_symbols": [],
+          "max_quote_spread_bps": 20,
+          "core_symbols_must_appear": ["BTCUSDT", "ETHUSDT"]
+        },
+        "state": {
+          "path": "data/programmatic_strategy_state.json",
+          "bootstrap": false
+        }
+      }
     },
     {
       "id": "aster_deepseek",
@@ -77,6 +324,70 @@
   ],
   "coin_pool_api_url": "",
   "oi_top_api_url": "",
+  "dynamic_candidate_pool": {
+    "enabled": true,
+    "refresh_hour": 8,
+    "ttl_hours": 24,
+    "min_pool_size": 15,
+    "max_pool_size": 30,
+    "prompt_candidate_limit": 8,
+    "core_symbols": ["BTCUSDT", "ETHUSDT"],
+    "min_oi_value_usd": 15000000,
+    "min_quote_volume_24h_usd": 20000000,
+    "cooldown_days_after_losses": 2,
+    "exchange_volume_top_limit": 30,
+    "snapshot_path": "data/dynamic_candidate_pool.json"
+  },
+  "storage": {
+    // 原生运行默认使用 /Volumes/light2/nofx；可改成任意已存在、可写的目录。
+    // Docker Compose 会通过 NOFX_STORAGE_ROOT 覆盖为容器内 /app/runtime，
+    // 宿主机默认挂载项目本地 ./runtime，不会默认挂载外置盘。
+    "root": "/Volumes/light2/nofx",
+    "allow_external_paths": false
+  },
+  "drl_ppo_train": {
+    // 训练 API 默认关闭；原生训练时可设 true，Docker 后端镜像默认仍建议保持 false。
+    "enabled": false,
+    "max_concurrency": 1,
+    "python_bin": "python3",
+    "train_script": "training/drl/scripts/train.py",
+    "evaluate_script": "training/drl/scripts/evaluate.py",
+    "log_tail_bytes": 262144
+  },
+  "trading_frequency": {
+    // 推荐首次上线使用 balanced：AI新机会分析间隔12分钟，prompt候选10个，高ADX/RR/rolling放宽仅report-only。
+    "mode": "balanced",
+    "report_only": {
+      "high_adx": false,
+      "rr_threshold": false,
+      "rolling_gate": false,
+      "gate_effectiveness": true
+    },
+    "loosen_mode": {
+      "enabled": true,
+      "inactivity_window_minutes": 720,
+      "pilot_confidence_drop": 10,
+      "min_net_rr_delta": -0.4,
+      "max_chase_ratio_bump": 0.05,
+      "max_duration_hours": 24,
+      "hard_floor_pilot_confidence": 60
+    }
+
+    // 可选 safe：
+    // "mode": "safe"
+
+    // 可选 active：
+    // "mode": "active",
+    // "analysis_interval_minutes": 9,
+    // "prompt_candidate_limit": 12,
+    // "daily_open_limit": 4,
+    // "rollback_window_hours": 24,
+    // "rollback_min_profit_factor": 0.8,
+    // "rollback_max_drawdown_pct": 2.0
+    //
+    // 注意：active触发运行时回退到safe开仓行为时，不会动态缩小候选池prompt_candidate_limit；
+    // 如需改变候选数量，请修改配置并重启服务。
+  },
   "api_server_port": 8080,
   "max_daily_loss": 10.0,
   "max_drawdown": 20.0,

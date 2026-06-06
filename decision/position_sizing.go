@@ -1,0 +1,149 @@
+package decision
+
+import "math"
+
+// PositionSizingInput 描述以账户风险为中心的仓位 sizing 输入。
+type PositionSizingInput struct {
+	AccountEquity            float64
+	AvailableBalance         float64
+	ExchangeAvailableBalance float64
+	AllocationEnabled        bool
+	AllocatedBalance         float64
+	AllocatedAvailable       float64
+	CurrentPrice             float64
+	StopLoss                 float64
+	Leverage                 int
+	EffectiveRiskPct         float64
+	RemainingRiskBudgetPct   float64
+	FeeSlippagePct           float64
+	MinOrderValueUSDT        float64
+	RequestedPositionSizeUSD float64
+	PartialClosePct          float64
+	ProfileName              string
+}
+
+// PositionSizingResult 是统一仓位 sizing 的结果。
+type PositionSizingResult struct {
+	Executable            bool     `json:"executable"`
+	PositionSizeUSD       float64  `json:"position_size_usd"`
+	MaxPositionSizeUSD    float64  `json:"max_position_size_usd"`
+	RiskUSD               float64  `json:"risk_usd"`
+	RiskPct               float64  `json:"risk_pct"`
+	FeeSlippageReserveUSD float64  `json:"fee_slippage_reserve_usd"`
+	TotalRiskUSD          float64  `json:"total_risk_usd"`
+	TotalRiskPct          float64  `json:"total_risk_pct"`
+	RiskCapReason         string   `json:"risk_cap_reason,omitempty"`
+	MarginRequiredUSD     float64  `json:"margin_required_usd"`
+	StopDistancePct       float64  `json:"stop_distance_pct"`
+	StopDistanceRatio     float64  `json:"stop_distance_ratio"`
+	StopDistancePercent   float64  `json:"stop_distance_percent"`
+	CanPartialExit        bool     `json:"can_partial_exit"`
+	ReasonCode            string   `json:"reason_code,omitempty"`
+	Reasons               []string `json:"reasons,omitempty"`
+}
+
+const (
+	defaultFeeSlippagePct    = 0.002
+	defaultMinOrderValueUSDT = 10.0
+	defaultPartialClosePct   = 20.0
+)
+
+// CalculatePositionSizing 将 AI 给出的仓位与账户风险、手续费滑点、保证金和最小名义额统一校验。
+func CalculatePositionSizing(input PositionSizingInput) PositionSizingResult {
+	result := PositionSizingResult{}
+
+	if input.AccountEquity <= 0 {
+		result.ReasonCode = positionSizingReasonCode(input, "position_sizing.invalid_account_equity")
+		result.Reasons = append(result.Reasons, "账户净值必须大于0")
+		return result
+	}
+	if input.AvailableBalance <= 0 {
+		result.ReasonCode = positionSizingReasonCode(input, "position_sizing.available_balance_insufficient")
+		result.Reasons = append(result.Reasons, "可用余额必须大于0")
+		return result
+	}
+	if input.CurrentPrice <= 0 || input.StopLoss <= 0 {
+		result.Reasons = append(result.Reasons, "当前价和止损价必须大于0")
+		return result
+	}
+	if input.Leverage <= 0 {
+		result.Reasons = append(result.Reasons, "杠杆必须大于0")
+		return result
+	}
+	if input.EffectiveRiskPct <= 0 {
+		input.EffectiveRiskPct = 0.02
+	}
+	if input.FeeSlippagePct <= 0 {
+		input.FeeSlippagePct = defaultFeeSlippagePct
+	}
+	if input.MinOrderValueUSDT <= 0 {
+		input.MinOrderValueUSDT = defaultMinOrderValueUSDT
+	}
+	if input.PartialClosePct <= 0 {
+		input.PartialClosePct = defaultPartialClosePct
+	}
+
+	stopDistancePct := math.Abs(input.CurrentPrice-input.StopLoss) / input.CurrentPrice
+	if stopDistancePct <= 0 {
+		result.Reasons = append(result.Reasons, "止损距离必须大于0")
+		return result
+	}
+	result.StopDistancePct = stopDistancePct
+	result.StopDistanceRatio = stopDistancePct
+	result.StopDistancePercent = stopDistancePct * 100
+
+	effectiveRiskPct := input.EffectiveRiskPct
+	if input.RemainingRiskBudgetPct > 0 && input.RemainingRiskBudgetPct < effectiveRiskPct {
+		effectiveRiskPct = input.RemainingRiskBudgetPct
+		result.RiskCapReason = "remaining_risk_budget"
+	}
+	riskBudgetUSD := input.AccountEquity * effectiveRiskPct
+	maxByRisk := riskBudgetUSD / (stopDistancePct + input.FeeSlippagePct)
+	maxByMargin := input.AvailableBalance * float64(input.Leverage) * 0.9
+	result.MaxPositionSizeUSD = math.Min(maxByRisk, maxByMargin)
+	if maxByMargin < maxByRisk {
+		result.RiskCapReason = "available_margin"
+	} else if result.RiskCapReason == "" {
+		result.RiskCapReason = "risk_budget"
+	}
+
+	positionSize := result.MaxPositionSizeUSD
+	if input.RequestedPositionSizeUSD > 0 {
+		positionSize = math.Min(input.RequestedPositionSizeUSD, result.MaxPositionSizeUSD)
+	}
+	result.PositionSizeUSD = positionSize
+	result.RiskUSD = positionSize * stopDistancePct
+	result.RiskPct = result.RiskUSD / input.AccountEquity
+	result.FeeSlippageReserveUSD = positionSize * input.FeeSlippagePct
+	result.TotalRiskUSD = result.RiskUSD + result.FeeSlippageReserveUSD
+	result.TotalRiskPct = result.TotalRiskUSD / input.AccountEquity
+	result.MarginRequiredUSD = positionSize / float64(input.Leverage)
+
+	if positionSize < input.MinOrderValueUSDT {
+		result.ReasonCode = positionSizingReasonCode(input, "position_sizing.min_notional")
+		result.Reasons = append(result.Reasons, "仓位名义额低于最小下单额")
+		return result
+	}
+	if result.MarginRequiredUSD > input.AvailableBalance {
+		result.ReasonCode = positionSizingReasonCode(input, "position_sizing.available_balance_insufficient")
+		result.Reasons = append(result.Reasons, "可用保证金不足")
+		return result
+	}
+
+	partialCloseValue := positionSize * input.PartialClosePct / 100
+	remainingValue := positionSize - partialCloseValue
+	result.CanPartialExit = partialCloseValue >= input.MinOrderValueUSDT && remainingValue >= input.MinOrderValueUSDT
+	if !result.CanPartialExit {
+		result.Reasons = append(result.Reasons, "仓位过小，无法可靠分批退出")
+	}
+
+	result.Executable = len(result.Reasons) == 0
+	return result
+}
+
+func positionSizingReasonCode(input PositionSizingInput, fallback string) string {
+	if input.AllocationEnabled {
+		return "position_sizing.allocation_insufficient"
+	}
+	return fallback
+}
